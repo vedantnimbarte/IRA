@@ -1,4 +1,4 @@
-# Downloads everything ira-voice needs into .\models and .\piper
+# Downloads everything IRA needs into .\models and .\piper
 # Run from the repo root:  .\scripts\fetch-models.ps1
 
 $ErrorActionPreference = 'Stop'

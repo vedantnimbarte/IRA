@@ -60,7 +60,9 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ira_voice=info".into()),
+                // Must match the crate name -- tracing targets are module
+                // paths, so a rename here silently turns off all logging.
+                .unwrap_or_else(|_| "ira=info".into()),
         )
         .init();
 

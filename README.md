@@ -1,4 +1,4 @@
-# ira-voice
+# ira
 
 Duplex voice loop prototype for IRA. Wake word → VAD endpointing → STT → streaming
 LLM → streaming TTS, with barge-in.
