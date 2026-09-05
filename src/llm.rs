@@ -25,7 +25,7 @@ fn split_sentence(buf: &mut String) -> Option<String> {
         if matches!(c, b'.' | b'!' | b'?') {
             // Require whitespace (or end of buffer) after the mark, so "3.50"
             // and "e.g." do not each become their own utterance.
-            let boundary = bytes.get(i + 1).map_or(true, |n| n.is_ascii_whitespace());
+            let boundary = bytes.get(i + 1).is_none_or(|n| n.is_ascii_whitespace());
             if boundary && i >= 1 {
                 let s: String = buf.drain(..=i).collect();
                 return Some(s.trim().to_string());
