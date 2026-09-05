@@ -1,0 +1,4 @@
+# Store every text file as LF in the repo regardless of the checkout OS or
+# anyone's core.autocrlf setting. Without this, a clone on another machine or in
+# CI can rewrite line endings and turn a one-line change into a whole-file diff.
+* text=auto
