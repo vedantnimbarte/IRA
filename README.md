@@ -1,4 +1,11 @@
-# ira
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/ira-dark.svg">
+    <img src="assets/ira-light.svg" alt="IRA" width="120">
+  </picture>
+</p>
+
+<h1 align="center">IRA</h1>
 
 Duplex voice loop prototype for IRA. Wake word → VAD endpointing → STT → streaming
 LLM → streaming TTS, with barge-in.
