@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -103,6 +104,14 @@ pub trait Tool: Send + Sync {
     async fn call(&self, args: Value, ctx: &ToolCtx) -> Result<ToolOutcome>;
 }
 
+/// A background job that has finished, on its way back to the loop.
+pub struct Done {
+    pub id: u64,
+    pub name: String,
+    /// What it produced, or why it failed.
+    pub result: Result<String, String>,
+}
+
 /// Asks the main loop to get a spoken yes or no.
 ///
 /// The loop owns the state machine and the microphone, so confirmation cannot
@@ -119,11 +128,29 @@ pub struct Host {
     /// The screen sees every call and every result. The loop only hears the
     /// model's summary of them, which is the point of having a screen.
     ui: Ui,
+    /// Where finished background jobs report to.
+    done: mpsc::Sender<Done>,
+    next_job: AtomicU64,
+    /// Jobs started and not yet reported. The Host starts them, so it is the
+    /// only thing that can count them.
+    running: Arc<AtomicU64>,
 }
 
 impl Host {
-    pub fn new(confirm: mpsc::Sender<Confirm>, ui: Ui) -> Self {
-        Self { tools: HashMap::new(), confirm, ui }
+    pub fn new(confirm: mpsc::Sender<Confirm>, ui: Ui, done: mpsc::Sender<Done>) -> Self {
+        Self {
+            tools: HashMap::new(),
+            confirm,
+            ui,
+            done,
+            next_job: AtomicU64::new(1),
+            running: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// How many background jobs are still going.
+    pub fn running(&self) -> u64 {
+        self.running.load(Ordering::Relaxed)
     }
 
     pub fn add(&mut self, tool: Arc<dyn Tool>) {
@@ -172,6 +199,33 @@ impl Host {
             name: name.to_string(),
             args: args.to_string(),
         });
+
+        // Background work is detached and answered for immediately, so the loop
+        // is free to take another turn while it runs.
+        //
+        // Its cancellation token is its own, not the turn's: the job was agreed
+        // to before it started, and interrupting the sentence that asked for it
+        // is not a reason to abandon work already under way.
+        if spec.latency == Latency::Background {
+            let id = self.next_job.fetch_add(1, Ordering::Relaxed);
+            let tool = tool.clone();
+            let done = self.done.clone();
+            let name = name.to_string();
+            let transcript = ctx.transcript.clone();
+            let running = self.running.clone();
+            running.fetch_add(1, Ordering::Relaxed);
+            tokio::spawn(async move {
+                let ctx = ToolCtx { transcript, cancel: CancellationToken::new() };
+                let result = match tool.call(args, &ctx).await {
+                    Ok(ToolOutcome::Answer(t)) => Ok(t),
+                    Ok(_) => Ok("Done.".to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+                let _ = done.send(Done { id, name, result }).await;
+                running.fetch_sub(1, Ordering::Relaxed);
+            });
+            return Ok(ToolOutcome::Started(id));
+        }
 
         let out = match tokio::time::timeout(spec.latency.budget(), tool.call(args, ctx)).await {
             Ok(r) => r,
@@ -260,6 +314,12 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    /// Nowhere for finished jobs to go, which is fine for tools that finish
+    /// in line.
+    fn jobs() -> (mpsc::Sender<Done>, mpsc::Receiver<Done>) {
+        mpsc::channel(4)
+    }
+
     fn ctx() -> ToolCtx {
         ToolCtx { transcript: String::new(), cancel: CancellationToken::new() }
     }
@@ -286,7 +346,7 @@ mod tests {
     #[tokio::test]
     async fn the_clock_answers_without_confirmation() {
         let (tx, mut rx) = mpsc::channel(1);
-        let mut host = Host::new(tx, Ui::disabled());
+        let mut host = Host::new(tx, Ui::disabled(), jobs().0);
         host.add(Arc::new(Clock));
 
         let out = host.call("clock", json!({}), &ctx()).await.unwrap();
@@ -298,7 +358,7 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_tool_is_an_error_not_a_panic() {
         let (tx, _rx) = mpsc::channel(1);
-        let host = Host::new(tx, Ui::disabled());
+        let host = Host::new(tx, Ui::disabled(), jobs().0);
         assert!(host.call("nope", json!({}), &ctx()).await.is_err());
     }
 
@@ -327,13 +387,76 @@ mod tests {
     #[tokio::test]
     async fn a_tool_over_its_budget_is_abandoned() {
         let (tx, _rx) = mpsc::channel(1);
-        let mut host = Host::new(tx, Ui::disabled());
+        let mut host = Host::new(tx, Ui::disabled(), jobs().0);
         host.add(Arc::new(Overrun));
         let err = host
             .call("overrun", json!({}), &ctx())
             .await
             .expect_err("must not wait five seconds");
         assert!(err.to_string().contains("budget"), "got {err}");
+    }
+
+    /// Work that takes longer than a conversation is willing to wait.
+    struct LongJob;
+    #[async_trait::async_trait]
+    impl Tool for LongJob {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "build".into(),
+                description: "takes a while".into(),
+                schema: json!({"type": "object"}),
+                mutates: false,
+                latency: Latency::Background,
+                confirm: None,
+            }
+        }
+        async fn call(&self, _args: Value, ctx: &ToolCtx) -> Result<ToolOutcome> {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            // A job outlives the turn that asked for it, so its token must not
+            // be the turn's -- interrupting the sentence is not a reason to
+            // abandon work already agreed to and under way.
+            assert!(!ctx.cancel.is_cancelled(), "job inherited the turn's cancellation");
+            Ok(ToolOutcome::Answer("build passed".into()))
+        }
+    }
+
+    /// The whole point of a background tool: the answer comes back before the
+    /// work does, so the loop is free to take another turn meanwhile.
+    #[tokio::test]
+    async fn a_background_tool_answers_before_it_finishes() {
+        let (tx, _rx) = mpsc::channel(1);
+        let (done_tx, mut done_rx) = jobs();
+        let mut host = Host::new(tx, Ui::disabled(), done_tx);
+        host.add(Arc::new(LongJob));
+
+        // The turn that asked is over and interrupted before the work lands.
+        let turn = CancellationToken::new();
+        let asked = std::time::Instant::now();
+        let out = host
+            .call("build", json!({}), &ToolCtx {
+                transcript: "build it".into(),
+                cancel: turn.clone(),
+            })
+            .await
+            .unwrap();
+        let returned = asked.elapsed();
+        turn.cancel();
+
+        let id = match out {
+            ToolOutcome::Started(id) => id,
+            other => panic!("expected Started, got {other:?}"),
+        };
+        assert!(
+            returned < Duration::from_millis(200),
+            "call blocked for {returned:?}; the loop would have been stuck too"
+        );
+        assert_eq!(host.running(), 1, "a job in flight must be countable");
+
+        let done = done_rx.recv().await.expect("the job must report back");
+        assert_eq!(done.id, id, "the report must name the job that was started");
+        assert_eq!(done.name, "build");
+        assert_eq!(done.result.as_deref(), Ok("build passed"));
+        assert!(asked.elapsed() >= Duration::from_millis(300));
     }
 
     /// A tool that records whether it actually ran.
@@ -362,7 +485,7 @@ mod tests {
     async fn a_refused_tool_does_not_run() {
         let ran = Arc::new(AtomicBool::new(false));
         let (tx, mut rx) = mpsc::channel::<Confirm>(1);
-        let mut host = Host::new(tx, Ui::disabled());
+        let mut host = Host::new(tx, Ui::disabled(), jobs().0);
         host.add(Arc::new(Writer(ran.clone())));
 
         // Stand in for the loop: hear the question, answer no.
@@ -386,7 +509,7 @@ mod tests {
     async fn a_confirmed_tool_runs() {
         let ran = Arc::new(AtomicBool::new(false));
         let (tx, mut rx) = mpsc::channel::<Confirm>(1);
-        let mut host = Host::new(tx, Ui::disabled());
+        let mut host = Host::new(tx, Ui::disabled(), jobs().0);
         host.add(Arc::new(Writer(ran.clone())));
 
         tokio::spawn(async move {
@@ -403,7 +526,7 @@ mod tests {
     async fn a_dropped_confirmation_is_not_consent() {
         let ran = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel::<Confirm>(1);
-        let mut host = Host::new(tx, Ui::disabled());
+        let mut host = Host::new(tx, Ui::disabled(), jobs().0);
         host.add(Arc::new(Writer(ran.clone())));
 
         // The loop goes away mid-question.

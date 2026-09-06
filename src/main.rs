@@ -279,6 +279,7 @@ async fn main() -> Result<()> {
     // Tools. The clock is the only built-in; everything else arrives over MCP
     // as configuration rather than code.
     let (ui, mut talk_rx) = ui::Ui::start().await;
+    let (jobs_tx, mut jobs_rx) = mpsc::channel::<tool::Done>(8);
     // Without acoustic echo cancellation the microphone hears the speaker, so
     // voice-triggered barge-in fires on IRA's own reply. Disarming it makes
     // speaker mode usable at the cost of hands-free interruption; the talk
@@ -289,7 +290,7 @@ async fn main() -> Result<()> {
     }
     let (confirm_tx, mut confirm_rx) = mpsc::channel::<tool::Confirm>(4);
     let host = {
-        let mut h = tool::Host::new(confirm_tx, ui.clone());
+        let mut h = tool::Host::new(confirm_tx, ui.clone(), jobs_tx);
         h.add(Arc::new(tool::Clock));
         for t in mcp::connect_all(&cfg.mcp.server).await {
             h.add(t);
@@ -336,6 +337,9 @@ async fn main() -> Result<()> {
     // control reuses the state machine rather than duplicating it.
     let mut talk = false;
     let mut ducked = false;
+    // Finished jobs waiting for IRA to have the floor legitimately. The tone
+    // fires the instant one lands; the words wait.
+    let mut reports: VecDeque<String> = VecDeque::new();
     // Bumped by every scrap of speech, so a transcript made before it changed
     // is known to be stale without comparing audio.
     let mut utt_gen = 0u64;
@@ -383,6 +387,29 @@ async fn main() -> Result<()> {
 
                 match state {
                     State::Idle => {
+                        // Idle is the only moment a report may be spoken: IRA is
+                        // not mid-reply and the user is not mid-sentence.
+                        if let Some(report) = reports.pop_front() {
+                            tracing::info!("reporting a finished job");
+                            ui.send(ui::Event::Reply { text: report.clone() });
+                            if let Err(e) = tts.say(&report) {
+                                tracing::error!(?e, "tts");
+                            }
+                            // Holding, so it can be interrupted and so the
+                            // follow-up window opens afterwards -- a report is
+                            // usually something you want to answer.
+                            turn = None;
+                            llm_running = false;
+                            awaiting = false;
+                            spoke_any = true;
+                            barge_ms = 0;
+                            hold_base_ms = tts.elapsed_ms();
+                            tts.begin_turn();
+                            vad.reset();
+                            go(&mut state, State::Holding, &ui);
+                            talk = false;
+                            continue;
+                        }
                         let woke = wake.push(&frame)?;
                         if woke.is_some() || talk {
                             let score = woke.unwrap_or(0.0);
@@ -643,6 +670,27 @@ async fn main() -> Result<()> {
                 talk = false;
             }
 
+            Some(done) = jobs_rx.recv() => {
+                let (ok, text) = match done.result {
+                    Ok(t) => (true, t),
+                    Err(e) => (false, e),
+                };
+                tracing::info!(id = done.id, name = %done.name, ok, "job finished");
+                ui.send(ui::Event::Result { name: done.name.clone(), ok, text: text.clone() });
+                // Heard immediately, wherever the conversation is: this is the
+                // only sound IRA makes that nobody asked for just now.
+                tts.pip();
+                // ponytail: the result is read out as it came back. Handing it
+                // to the model to phrase would read better and costs a turn --
+                // worth it here, because nobody is waiting on a background job.
+                reports.push_back(format!(
+                    "{} {}. {}",
+                    done.name,
+                    if ok { "finished" } else { "failed" },
+                    text
+                ));
+            }
+
             Some(_) = talk_rx.recv() => {
                 tracing::info!("talk");
                 talk = true;
@@ -792,6 +840,14 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Jobs do not survive the process, so say so rather than let someone wait
+    // for a report that is never coming. A job you asked for and never heard
+    // about again is indistinguishable from one that silently failed.
+    let lost = host.running() as usize + reports.len();
+    if lost > 0 {
+        tracing::warn!(lost, "background jobs lost at shutdown");
+        println!("{lost} background job(s) were still running and are lost.");
+    }
     Ok(())
 }
 

@@ -137,7 +137,7 @@ need the LLM to report itself.
 |---|---|---|
 | Wake chirp | rising, 660 → 880 Hz | Wake word landed, floor is yours |
 | Error earcon | falling, 440 → 330 Hz | Something failed and speech could not say so |
-| Job pip | single soft 880 Hz | A background job finished |
+| Job pip | single soft 880 Hz | A background job finished; the words come at the next `Idle` |
 
 All three distinguishable with your back to the machine.
 
@@ -280,6 +280,27 @@ connected.** `Ui::watchers()` is read as the turn starts, and only a non-zero
 count selects the wording that tells the model to say the short version aloud
 and leave the rest on screen. Promising a screen nobody is watching is the same
 defect P1 removed, with extra steps.
+
+## Background jobs
+
+A tool declaring `latency = "background"` is detached by the host, which returns
+`Started(id)` at once so the loop can take another turn. The job runs with its
+own cancellation token, not the turn's: it was agreed to before it started, and
+interrupting the sentence that asked for it is not a reason to abandon it.
+
+When it finishes:
+
+1. A pip sounds immediately, wherever the conversation is.
+2. The report joins a queue.
+3. At the next entry to `Idle` — not mid-reply, not while the user is speaking —
+   one report is spoken, and IRA enters `Holding` so it can be interrupted and
+   so the follow-up window opens afterwards.
+
+Jobs do not survive the process. On shutdown anything still running is counted
+and reported, because an unreported job is indistinguishable from a failed one.
+
+Nothing in this is specific to any tool: `latency = "background"` in `ira.toml`
+is the whole interface.
 
 ## Transcription runs ahead of the endpoint
 

@@ -57,6 +57,7 @@ context, the decision, its consequences, and what would change it.
 | [0008](decisions/0008-rejected-assembling-ira-from-echo-and-wingman.md) | Assembling IRA from Echo and Wingman | rejected |
 | [0009](decisions/0009-the-screen-is-a-served-page.md) | The screen is a page IRA serves, not a window it owns | accepted |
 | [0010](decisions/0010-press-to-talk-before-echo-cancellation.md) | Press-to-talk ships before echo cancellation | accepted |
+| [0011](decisions/0011-a-tone-now-and-words-when-idle.md) | A tone now, and words when IRA next has the floor | accepted |
 
 ## Looking for something specific?
 

@@ -98,7 +98,7 @@ after. **Shipped** items already work.
 | FR-16 | Speak a holding phrase while a slow action runs, rather than going quiet | Must | P3 |
 | FR-17 | Ask for spoken confirmation before any action that changes state, and abort on refusal | Must | P3 |
 | FR-18 | Gain new capabilities by configuration, without a code change or rebuild | **Shipped** | P4 |
-| FR-19 | Accept a task that takes minutes, and report back when it finishes | Should | P8 |
+| FR-19 | Accept a task that takes minutes, and report back when it finishes | **Shipped** | P8 |
 | FR-20 | Dictate text into whichever application has focus | Could | P8 |
 
 ### Screen
@@ -166,3 +166,4 @@ tell us which phase to invest in next.
 | ~~Window or overlay?~~ **Answered: a page.** | Something you visit, in a browser tab. It is browsable rather than glanceable, which is the right trade for long answers and tool output but not for a passing status. An overlay stays possible and would read the same event stream. | ~~P5~~ |
 | What is IRA's personality? | Currently defined only by a brevity instruction. Two sentences is a constraint, not a voice, and the voice is most of what a user remembers. | P5 |
 | ~~Where does memory live?~~ **Answered.** | kortex-memory, an MCP server with sixteen tools over stdio and HTTP/SSE. It is therefore a P4 integration, not a P3 built-in, and IRA does not implement memory itself. | ~~P3~~ |
+| ~~May IRA speak unprompted?~~ **Answered.** | A pip when a job lands, the words at the next idle moment. See [0011](decisions/0011-a-tone-now-and-words-when-idle.md). | ~~P8~~ |
