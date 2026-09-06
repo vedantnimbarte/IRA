@@ -76,12 +76,17 @@ context, the decision, its consequences, and what would change it.
 
 ## Open questions
 
-Four decisions are unresolved and each blocks a phase. They are listed with
-recommendations in [ROADMAP.md](ROADMAP.md#open-questions). The two worth knowing
-about immediately:
+The design questions the roadmap opened have all been answered, each in a
+decision record under [decisions/](decisions/). What remains open is not a
+decision but a measurement — four things nobody has checked, listed in the
+README under *What has not been verified* and in
+[TEST-PLAN.md](TEST-PLAN.md):
 
-- **Proactive speech.** When a background job finishes, IRA must speak with no wake
-  word for the first time. Blocks P8.
-- **kortex-memory has never been run against IRA.** The MCP adapter is built and
-  tested, but kortex needs Postgres, Redis and MinIO up, which is a deployment
-  question. FR-15 is unmet until that happens.
+- **A live microphone.** Every acoustic behaviour — barge-in, the wake word,
+  ducking, press-to-talk — has only been exercised by replaying WAV files.
+- **A real model.** Time-to-first-token has never been observed above zero, so
+  the latency work in [BASELINE.md](BASELINE.md) optimised the half of the
+  budget that could be measured.
+- **Another machine.** IRA has only ever been built and run on one Windows box.
+- **kortex-memory and Wingman.** Both adapters are built and tested against
+  hostile stubs; neither real integration has been connected.

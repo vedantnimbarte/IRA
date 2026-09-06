@@ -57,52 +57,60 @@ sentence splitter is a tested component rather than an incidental one.
 
 ## State machine
 
-Three states today. `Confirming` is added in P3 to gate tools that change state;
-it is a state rather than a helper because refusal must cancel the turn rather
-than start a new one, and because barge-in means something different while a
-question is pending.
+Four states. `Confirming` gates tools that change something; it is a state
+rather than a helper because a refusal must end the turn rather than start a new
+one, and because only yes or no is an answer there.
 
 ```
-                    reply finished & queue drained
-        ┌──────────────────────────────────────────────────┐
-        │                                                  │
-        │        barge-in · follow-up window                │
-        │        ┌───────────────────────────┐              │
-        ▼        ▼                           │              │
-   ┌────────┐         ┌───────────┐    ┌──────────┐         │
-   │  Idle  │ ──────▶ │ Listening │ ──▶│ Holding  │ ────────┘
-   └────────┘  wake   └───────────┘    └──────────┘
-        ▲       word        │      silence     │
-        │                   │      ≥ 700 ms    │ mutating tool
-        └───────────────────┘                  ▼
-           no speech, 3 s              ┌──────────────┐
-                                       │  Confirming  │ ── yes ──▶ Holding
-                                       └──────────────┘ ── no ───▶ Idle
-                                          (P3 — new)
+                     barge-in, or the talk control
+        ┌──────────────────────────────────────────────┐
+        │                                              │
+        ▼                                              │
+   ┌────────┐  wake word   ┌───────────┐  silence  ┌────┴─────┐
+   │  Idle  │ ───────────▶ │ Listening │ ─────────▶│ Holding  │
+   │        │  or /talk    │           │  ≥ 700 ms │          │
+   └────────┘              └───────────┘           └────┬─────┘
+        ▲    ▲                   │                      │
+        │    └───────────────────┘                      │ a tool wants
+        │      no speech: 3 s after a wake word,        │ to change
+        │      2 s in a follow-up window                │ something
+        │                                               ▼
+        │                                        ┌──────────────┐
+        │       reply done → Listening,          │  Confirming  │
+        │       floor open 2 s for a follow-up   └──────┬───────┘
+        │                                    yes ──────┘│
+        └────────────────────────────────────────────────┘
+                     a finished job's report is spoken here
 ```
 
 Thinking and speaking are one state on purpose. From the user's side there is no
 difference — IRA has the floor either way, and barge-in must work identically in
-both.
+both. Anything other than an explicit yes leaves `Confirming` without running
+the tool.
 
 The exhaustive transition table lives in [SPEC.md](SPEC.md).
 
 ## Module map
 
-| File | Responsibility | Extension | Changes at |
-|---|---|---|---|
-| `audio.rs` | Capture, downmix, resample to 16 kHz | **Closed** | P6 — AEC only |
-| `wake.rs` | openWakeWord three-stage chain, refractory | **Closed** | P7 — model swap, no code |
-| `vad.rs` | Silero v5, recurrent state carry | **Closed** | P7 — semantic turn model alongside |
-| `tts.rs` | Piper subprocess, rodio queue, chirp | **Closed** | P6 — ducking |
-| `stt.rs` | Transcription over HTTP, either backend | Config | P7 — streaming |
-| `llm.rs` | Streaming generation, sentence splitting | Config | P3 — tool-calling loop |
-| `main.rs` | State machine, turn orchestration | **Closed** | P1, P2, P3, P8 |
-| `tool.rs` | Trait, registry, dispatch, confirmation | *New at P3* | — |
-| `mcp.rs` | MCP client, one adapter to the trait | Config | — |
-| `config.rs` | `ira.toml`: servers and per-tool policy | Config | — |
-| `metrics.rs` | Per-stage turn timing | Closed | — |
-| `ui.rs` | The served page and its event stream | Closed | — |
+| File | Responsibility | Extension |
+|---|---|---|
+| `audio.rs` | cpal capture, downmix, 16 kHz resample; WAV replay | **Closed** |
+| `wake.rs` | openWakeWord three-stage chain, refractory | **Closed** |
+| `vad.rs` | Silero v5, 576-sample window, recurrent state | **Closed** |
+| `tts.rs` | Piper subprocess, rodio queue, three earcons, ducking | **Closed** |
+| `main.rs` | The state machine and turn orchestration | **Closed** |
+| `stt.rs` | Transcription over HTTP, either backend | Config |
+| `llm.rs` | Streaming generation, sentence splitting, the tool loop | Config |
+| `tool.rs` | The `Tool` trait, registry, confirmation gate, background jobs | **Trait** |
+| `mcp.rs` | MCP servers adapted to that trait | Config |
+| `config.rs` | `ira.toml`: servers and per-tool policy | Config |
+| `doctor.rs` | Preflight checks; the fatal subset gates start-up | Closed |
+| `metrics.rs` | Per-turn timing, and the `turn` line | Closed |
+| `transcript.rs` | The JSONL record of what was said | Config |
+| `ui.rs` | The served page and its event stream | Closed |
+
+Which phase touched what is history now, and lives in
+[ROADMAP.md](ROADMAP.md) rather than here.
 
 "Closed" means no extension point, not immutable. `main.rs` is closed because a
 state machine with pluggable transitions is a state machine nobody can reason
