@@ -48,6 +48,17 @@ prompt instructs the model, when an answer needs more room, to "say you have put
 the detail on screen." IRA has no display. P5 makes it true; until then the clause
 must go.
 
+### The one that mattered most, found while fixing the others
+
+**Endpointing never worked.** `vad.rs` fed Silero v5 a bare 512-sample chunk
+where the model expects 576 — the 64 samples of preceding context that
+silero-vad's own wrapper prepends. The input shape is dynamic, so it ran without
+error and returned a probability near zero for *every* chunk, including
+full-scale speech. `heard_speech` therefore never became true, the no-speech
+timeout always won, and **no turn could ever complete**. Fixed in P1, with a test
+that plays real speech; see [BASELINE.md](BASELINE.md) for the first working
+measurements.
+
 ### And one gap that shapes the whole plan
 
 There is not a single `Instant::now()` in `main.rs`. The project's stated purpose
@@ -61,9 +72,10 @@ Numbered because the order carries real information: each phase's exit criteria
 are the next one's entry conditions. The exception is P6, which touches only
 `audio.rs` and can run in parallel with P3–P5.
 
-### P0 — Instrument the loop
+### P0 — Instrument the loop — *done*
 
-Make "feels right" a number instead of an opinion.
+Make "feels right" a number instead of an opinion. Baseline recorded in
+[BASELINE.md](BASELINE.md).
 
 - Timestamps threaded through one turn: wake fired → endpoint → transcript back
   → first LLM token → first audio sample out
@@ -78,7 +90,7 @@ backends.
 **Why first:** every later phase claims a latency improvement. Without a baseline
 those claims cannot be checked, and the tuning constants stay guesses.
 
-### P1 — Close the honesty gaps
+### P1 — Close the honesty gaps — *done*
 
 No state where IRA fails without saying so, or claims something untrue.
 

@@ -31,7 +31,11 @@ Start with the [README](../README.md) for how to run it.
    contract, per-phase acceptance criteria.
    - Read this if: you are writing the code.
 
-5. **[TEST-PLAN.md](TEST-PLAN.md)** — how we know it works.
+5. **[BASELINE.md](BASELINE.md)** — the measured latency baseline, and an
+   explicit list of what is still unmeasured.
+   - Read this if: you are about to claim something got faster.
+
+6. **[TEST-PLAN.md](TEST-PLAN.md)** — how we know it works.
    The coverage gap and how to close it, the corpus, benchmark method, manual test
    scripts, fault injection, CI gates.
    - Read this if: you are about to call a phase done.
@@ -64,7 +68,8 @@ context, the decision, its consequences, and what would change it.
 | Add a tool | [ARCHITECTURE.md](ARCHITECTURE.md) — tool subsystem, then [SPEC.md](SPEC.md) — types |
 | Know what a phase must satisfy | [SPEC.md](SPEC.md) — acceptance criteria |
 | Know why we did not do X | [ROADMAP.md](ROADMAP.md) — considered and deferred, or [decisions/](decisions/) |
-| Measure latency | [TEST-PLAN.md](TEST-PLAN.md) — benchmark method |
+| Measure latency | [TEST-PLAN.md](TEST-PLAN.md) — method, then [BASELINE.md](BASELINE.md) |
+| Replay a WAV instead of using the mic | [SPEC.md](SPEC.md#environment-variables) — `IRA_AUDIO_FILE` |
 
 ## Open questions
 

@@ -15,8 +15,10 @@
 //! Only three things differ between the two: where the system prompt goes, the
 //! auth header, and where the text sits in each SSE frame.
 
+use crate::metrics::Timings;
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -27,7 +29,7 @@ pub const MODEL: &str = "claude-sonnet-5";
 pub const SYSTEM: &str = "You are IRA, a voice assistant. You are being spoken to \
 and your reply is read aloud, so answer in at most two short sentences. No \
 markdown, no lists, no code blocks, no emoji. If the answer genuinely needs more \
-room, give the one-line version and say you have put the detail on screen.";
+room, give the one-line version and offer to go into detail if they ask.";
 
 /// Flush at sentence ends, or at a word boundary if one sentence runs long.
 fn split_sentence(buf: &mut String) -> Option<String> {
@@ -72,8 +74,9 @@ pub async fn stream(
     client: &reqwest::Client,
     history: &[(String, String)],
     user: &str,
-    out: mpsc::Sender<String>,
+    out: mpsc::Sender<(String, CancellationToken)>,
     cancel: CancellationToken,
+    timings: &Timings,
 ) -> Result<String> {
     let url = std::env::var("IRA_LLM_URL").ok();
     let openai = url.is_some();
@@ -122,6 +125,11 @@ pub async fn stream(
         return Err(anyhow!("llm {}: {}", resp.status(), resp.text().await?));
     }
 
+    // Time to first token separates the model's latency from ours. Without it a
+    // slow turn is just slow, with nothing to point at.
+    let asked = Instant::now();
+    let mut first_token = false;
+
     let mut stream = resp.bytes_stream();
     let mut sse = String::new();
     let mut buf = String::new();
@@ -148,10 +156,14 @@ pub async fn stream(
                 continue;
             };
             if let Some(t) = delta_text(&v, openai) {
+                if !first_token {
+                    first_token = true;
+                    Timings::set(&timings.ttft_ms, asked.elapsed().as_millis() as u64);
+                }
                 full.push_str(t);
                 buf.push_str(t);
                 while let Some(s) = split_sentence(&mut buf) {
-                    if !s.is_empty() && out.send(s).await.is_err() {
+                    if !s.is_empty() && out.send((s, cancel.clone())).await.is_err() {
                         return Ok(full);
                     }
                 }
@@ -161,7 +173,7 @@ pub async fn stream(
 
     let tail = buf.trim().to_string();
     if !tail.is_empty() && !cancel.is_cancelled() {
-        let _ = out.send(tail).await;
+        let _ = out.send((tail, cancel.clone())).await;
     }
     Ok(full)
 }

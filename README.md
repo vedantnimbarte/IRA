@@ -76,7 +76,11 @@ theory — these numbers are starting guesses, not measurements.
 | wake threshold | 0.5 | Too low: fires on the TV. Too high: you repeat yourself. |
 
 Env overrides: `IRA_MODELS`, `IRA_WAKEWORD`, `IRA_VOICE`, `IRA_PIPER`,
-`IRA_STT_URL`, `IRA_LLM_URL`, `IRA_LLM_KEY`, `IRA_LLM_MODEL`.
+`IRA_STT_URL`, `IRA_LLM_URL`, `IRA_LLM_KEY`, `IRA_LLM_MODEL`,
+`IRA_AUDIO_FILE`, `IRA_SKIP_WAKE`, `IRA_TAIL_MS`, `IRA_CLOCK`.
+
+`ira doctor` checks models, microphone, keys and local engines before you talk to
+it, and the same fatal checks run on every start-up.
 
 ## OpenRouter, or any OpenAI-compatible brain
 

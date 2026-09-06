@@ -4,8 +4,8 @@ The loop's value is a subjective property measured objectively. This document
 defines the corpus, the harness, the numbers and the manual scripts — and states
 plainly which parts cannot be automated and must be judged by a person.
 
-**Automated today:** 10 tests
-**State machine coverage:** none
+**Automated today:** 20 tests
+**State machine coverage:** the barge-in predicate; transitions still need the replay harness
 **Release gate:** one week of dogfood
 
 ## The coverage that is missing
@@ -19,11 +19,12 @@ shapes threaded between openWakeWord's three stages and Silero's recurrent state
 | Resampler | Wrong ratio corrupts every downstream stage inaudibly | 2 tests |
 | Wake chain | Tensor shape mismatch between the three models | 1 test |
 | VAD | Recurrent state not carried → model forgets context each chunk | 1 test |
+| VAD | Reports no speech ever, silently — see below | 2 tests |
 | WAV encoding | Malformed container rejected by the STT engine | 2 tests |
 | Sentence splitter | Decimals split → "three point" / "fifty" as two utterances | 3 tests |
 | LLM wire formats | Reading one format's frames with the other's rules → IRA goes mute | 1 test |
-| **State machine** | **Every turn-taking behaviour the product exists for** | **None** |
-| Barge-in | Interruption ignored, or a cancelled turn still speaks | None |
+| **State machine** | **Every turn-taking behaviour the product exists for** | Replay harness exists; transitions still uncovered |
+| Barge-in | Interruption ignored, or a cancelled turn still speaks | 2 tests (the predicate) |
 | TTS queue | Playback not cleared on interrupt; drain detection wrong | None |
 | Failure paths | Silent failure — the current worst UX defect | None |
 
@@ -31,6 +32,13 @@ shapes threaded between openWakeWord's three stages and Silero's recurrent state
 function. Everything without coverage is the state machine — which is the product.
 It has already shipped one race, and that race was found by reading, not by
 testing.
+
+**This gap has already cost a working product once.** `vad.rs` fed Silero 512
+samples where the model wants 576, so it reported no speech under any condition.
+Endpointing never fired and no turn could complete. The existing VAD test
+asserted only that silence reads as silence, which an always-false VAD satisfies
+perfectly. A test that plays real speech and expects a "speech" verdict is the
+only thing that distinguishes the two, and it now exists.
 
 ## Making the loop testable
 
@@ -66,6 +74,17 @@ two different jobs.
 |---|---|---|
 | Piper-synthesised | Latency. Reproducible, zero-cost, regenerable from a text file, and latency depends on duration rather than voice quality. | Accuracy. Synthetic speech is unnaturally clean; word-error-rate measured on it will be optimistic and misleading. |
 | Real recordings | Accuracy, false-wake rate, endpointing against natural pauses and disfluency. | Nothing — but it costs a person's time and cannot be regenerated on demand. |
+
+**Synthetic audio cannot test the wake word.** openWakeWord is trained on real
+speech and does not fire on Piper's output — measured, not assumed. Latency
+replays therefore set `IRA_SKIP_WAKE` and start with the floor open, which is
+sound because NFR-1 is endpoint-to-first-audio and does not involve the wake
+word. NFR-3 and NFR-4 need real recordings and cannot be automated from a
+synthetic corpus.
+
+`corpus/speech-16k.wav` is committed: 1.96 s of speech at the model's own sample
+rate, so the VAD test needs no resampling. It is the fixture that catches a dead
+VAD.
 
 Synthesising the latency corpus is already proven — Piper is in the repo and its
 output round-tripped correctly through whisper.cpp during the STT work:
@@ -206,7 +225,7 @@ of what matters, once the file-based frame source exists.
 |---|---|---|
 | `cargo test` | Every push | Yes |
 | `cargo clippy --all-targets` | Every push | Yes — currently clean, keep it there |
-| `cargo fmt --check` | Every push | Yes |
+| `cargo fmt --check` | Every push | **Not yet** — the tree has ~13 pre-existing diffs; needs one formatting commit before this can gate |
 | Loop tests via `IRA_AUDIO_FILE` | Every push, virtual clock | Yes, from P0 |
 | Latency benchmark, local STT | Nightly on the GPU machine | No — report a trend; a threshold here would flake on shared hardware |
 | Fault-injection suite | Every push | Yes, from P1 |
