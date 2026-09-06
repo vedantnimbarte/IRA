@@ -41,6 +41,10 @@ jobs:
       - name: Test
         run: cargo test --all-targets
 
+      # -D warnings on `stable` means a new Rust release can fail this on
+      # unchanged code, when a lint is added. That is the trade being made
+      # deliberately: catching new lints is worth an occasional small fix, and
+      # the alternative is pinning a toolchain and never seeing them.
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 

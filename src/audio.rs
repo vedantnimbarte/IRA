@@ -232,8 +232,10 @@ pub(crate) fn read_wav(path: &Path) -> Result<(Vec<f32>, u32, usize)> {
     }
 
     let samples = b[start..end]
-        .chunks_exact(2)
-        .map(|p| i16::from_le_bytes([p[0], p[1]]) as f32 / 32768.0)
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|p| i16::from_le_bytes(*p) as f32 / 32768.0)
         .collect();
     Ok((samples, rate, channels))
 }
