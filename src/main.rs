@@ -35,6 +35,12 @@ use tokio_util::sync::CancellationToken;
 const ENDPOINT_MS: u64 = 700;
 /// A wake word with no speech after it was a false trigger.
 const NO_SPEECH_TIMEOUT_MS: u64 = 3_000;
+/// How long the floor stays open after a reply, so a follow-up needs no wake
+/// word. Shorter than the post-wake timeout: after a wake word the user has
+/// announced they are about to speak and deserves patience, whereas holding the
+/// floor open for three seconds after every single reply just makes IRA feel
+/// like it is waiting for something.
+const FOLLOW_UP_MS: u64 = 2_000;
 /// Hard cap on one utterance.
 const MAX_UTTERANCE_MS: u64 = 20_000;
 /// Speech this long while IRA holds the floor counts as an interruption.
@@ -79,6 +85,35 @@ enum Turn {
     /// Transcription returned nothing -- almost always noise after a false wake.
     Empty,
     Failed(Fail),
+}
+
+/// What Listening should do with the audio it has seen so far.
+#[derive(Debug, PartialEq)]
+enum Next {
+    /// Keep buffering.
+    Wait,
+    /// The user's turn is over. Answer it.
+    Answer,
+    /// Nobody spoke. Give the floor back without a sound.
+    GiveUp,
+}
+
+/// Decides when to stop listening.
+///
+/// Extracted from the loop because the three exits interact: the no-speech
+/// deadline must stop applying the instant speech is heard, or a slow speaker
+/// gets cut off, and the deadline itself depends on whether the user announced
+/// themselves with a wake word or is simply continuing a conversation.
+fn listening_next(heard_speech: bool, silence_ms: u64, utterance_ms: u64, follow_up: bool) -> Next {
+    if !heard_speech {
+        let deadline = if follow_up { FOLLOW_UP_MS } else { NO_SPEECH_TIMEOUT_MS };
+        return if utterance_ms >= deadline { Next::GiveUp } else { Next::Wait };
+    }
+    if silence_ms >= ENDPOINT_MS || utterance_ms >= MAX_UTTERANCE_MS {
+        Next::Answer
+    } else {
+        Next::Wait
+    }
 }
 
 /// A sentence may only be spoken while the turn that produced it still holds
@@ -159,6 +194,9 @@ async fn main() -> Result<()> {
     let mut utterance_ms = 0u64;
     let mut barge_ms = 0u64;
     let mut llm_running = false;
+    // Whether this Listening was entered without a wake word, by IRA holding the
+    // floor open after a reply.
+    let mut follow_up = false;
     // Whether this turn got any words out. A stream that breaks after two
     // sentences must not append an apology to them.
     let mut spoke_any = false;
@@ -206,6 +244,7 @@ async fn main() -> Result<()> {
                             heard_speech = false;
                             silence_ms = 0;
                             utterance_ms = 0;
+                            follow_up = false;
                             state = State::Listening;
                         }
                     }
@@ -222,36 +261,43 @@ async fn main() -> Result<()> {
                             }
                         }
 
-                        if !heard_speech && utterance_ms >= NO_SPEECH_TIMEOUT_MS {
-                            tracing::info!("no speech after wake, back to idle");
-                            state = State::Idle;
-                        } else if (heard_speech && silence_ms >= ENDPOINT_MS)
-                            || utterance_ms >= MAX_UTTERANCE_MS
-                        {
-                            cancel = CancellationToken::new();
-                            llm_running = true;
-                            spoke_any = false;
-                            barge_ms = 0;
-                            vad.reset();
-                            turn_id += 1;
-                            let listen_ms = wake_at
-                                .map(|w| w.elapsed().as_millis() as u64)
-                                .unwrap_or(0);
-                            let t = metrics::Turn::start(turn_id, wake_ms, listen_ms);
-                            let timings = t.timings.clone();
-                            turn = Some(t);
-                            hold_base_ms = tts.elapsed_ms();
-                            tts.begin_turn();
-                            state = State::Holding;
-                            spawn_turn(
-                                client.clone(),
-                                std::mem::take(&mut utterance),
-                                history.clone(),
-                                turn_tx.clone(),
-                                speech_tx.clone(),
-                                cancel.clone(),
-                                timings,
-                            );
+                        match listening_next(heard_speech, silence_ms, utterance_ms, follow_up) {
+                            Next::Wait => {}
+                            Next::GiveUp => {
+                                if follow_up {
+                                    tracing::info!("no follow-up, back to idle");
+                                } else {
+                                    tracing::info!("no speech after wake, back to idle");
+                                }
+                                vad.reset();
+                                state = State::Idle;
+                            }
+                            Next::Answer => {
+                                cancel = CancellationToken::new();
+                                llm_running = true;
+                                spoke_any = false;
+                                barge_ms = 0;
+                                vad.reset();
+                                turn_id += 1;
+                                let listen_ms = wake_at
+                                    .map(|w| w.elapsed().as_millis() as u64)
+                                    .unwrap_or(0);
+                                let t = metrics::Turn::start(turn_id, wake_ms, listen_ms);
+                                let timings = t.timings.clone();
+                                turn = Some(t);
+                                hold_base_ms = tts.elapsed_ms();
+                                tts.begin_turn();
+                                state = State::Holding;
+                                spawn_turn(
+                                    client.clone(),
+                                    std::mem::take(&mut utterance),
+                                    history.clone(),
+                                    turn_tx.clone(),
+                                    speech_tx.clone(),
+                                    cancel.clone(),
+                                    timings,
+                                );
+                            }
                         }
                     }
 
@@ -286,12 +332,33 @@ async fn main() -> Result<()> {
                             silence_ms = 0;
                             utterance_ms = 0;
                             barge_ms = 0;
+                            follow_up = false;
+                            // The interrupted turn's wake is no longer the start
+                            // of anything; this turn began when they cut in.
+                            wake_ms = 0;
+                            wake_at = Some(Instant::now());
                             state = State::Listening;
                         } else if !llm_running && tts.idle() {
-                            tracing::info!("idle");
                             log_turn(&mut turn, &tts, hold_base_ms, false, stt_backend, &llm_model);
+                            // Hold the floor open briefly so a reply can be
+                            // answered without a wake word. This also covers the
+                            // failure phrases: after "I didn't catch that", the
+                            // user can simply say it again.
+                            tracing::info!("floor open for a follow-up");
                             vad.reset();
-                            state = State::Idle;
+                            // The drain check waits for quiet, so the user may
+                            // already have started. Seed from the pre-roll or
+                            // their first word is lost.
+                            utterance = tail(&pre_roll, PRE_ROLL_KEEP);
+                            heard_speech = false;
+                            silence_ms = 0;
+                            utterance_ms = 0;
+                            follow_up = true;
+                            // No new wake word, so the turn line measures from
+                            // the moment the floor opened.
+                            wake_ms = 0;
+                            wake_at = Some(Instant::now());
+                            state = State::Listening;
                         }
                     }
                 }
@@ -462,6 +529,46 @@ mod tests {
             should_speak(&turn_b, &State::Holding),
             "the live turn must still be able to speak"
         );
+    }
+
+    /// A follow-up gets less patience than a wake word, and the difference has
+    /// to be exactly at the two deadlines.
+    #[test]
+    fn a_follow_up_window_closes_sooner_than_a_wake_word_wait() {
+        // Just inside each deadline: still waiting.
+        assert_eq!(listening_next(false, 0, FOLLOW_UP_MS - 1, true), Next::Wait);
+        assert_eq!(
+            listening_next(false, 0, NO_SPEECH_TIMEOUT_MS - 1, false),
+            Next::Wait
+        );
+
+        // At the deadline: give the floor back.
+        assert_eq!(listening_next(false, 0, FOLLOW_UP_MS, true), Next::GiveUp);
+        assert_eq!(
+            listening_next(false, 0, NO_SPEECH_TIMEOUT_MS, false),
+            Next::GiveUp
+        );
+
+        // The window a wake word buys must not shrink to the follow-up one:
+        // at 2 s after a wake word IRA is still listening.
+        assert_eq!(listening_next(false, 0, FOLLOW_UP_MS, false), Next::Wait);
+    }
+
+    /// Once someone is talking, no deadline may cut them off. Only silence or
+    /// the hard cap ends a turn.
+    #[test]
+    fn a_speaker_is_never_cut_off_by_the_no_speech_deadline() {
+        // Long past both deadlines, mid-sentence, brief pause.
+        assert_eq!(listening_next(true, 200, 30_000, true), Next::Answer);
+        assert_eq!(listening_next(true, 0, 10_000, true), Next::Wait);
+        assert_eq!(listening_next(true, 0, 10_000, false), Next::Wait);
+
+        // Endpoint, exactly at the boundary.
+        assert_eq!(listening_next(true, ENDPOINT_MS - 1, 5_000, false), Next::Wait);
+        assert_eq!(listening_next(true, ENDPOINT_MS, 5_000, false), Next::Answer);
+
+        // The hard cap ends a monologue even with no pause at all.
+        assert_eq!(listening_next(true, 0, MAX_UTTERANCE_MS, false), Next::Answer);
     }
 
     /// Sentences arriving while the user has the floor are dropped, whatever
