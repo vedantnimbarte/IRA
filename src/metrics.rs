@@ -35,6 +35,9 @@ pub struct Turn {
     pub timings: Arc<Timings>,
     wake_ms: u64,
     listen_ms: u64,
+    /// Whether the transcript was already in hand when the turn began, having
+    /// been produced while the endpoint window was still counting down.
+    pub speculative: bool,
 }
 
 impl Turn {
@@ -45,6 +48,7 @@ impl Turn {
             timings: Arc::new(Timings::default()),
             wake_ms,
             listen_ms,
+            speculative: false,
         }
     }
 
@@ -72,6 +76,10 @@ impl Turn {
             total_ms = first_audio_ms.unwrap_or(0),
             tool_ms = t.tool_ms.load(Ordering::Relaxed),
             tools = t.tool_calls.load(Ordering::Relaxed),
+            // stt_ms is endpoint-to-transcript. When the transcript was
+            // speculated it is near zero, and this says why rather than
+            // leaving the reader to think transcription got faster.
+            spec = self.speculative,
             spoke = first_audio_ms.is_some(),
             stt_backend,
             llm_model = model,

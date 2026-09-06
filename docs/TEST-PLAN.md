@@ -168,6 +168,13 @@ abandoned answer.
 **Phase:** every phase. This is the regression test for the product's core claim.
 
 ### T-2 — Think out loud
+**Still expected to fail.** Semantic endpointing was deferred in P7; a 900 ms
+pause still ends the turn at `ENDPOINT_MS`. Raising `ENDPOINT_MS` trades this
+against latency, and speculative transcription now makes that trade cheaper —
+the endpoint window is overlapped with transcription, so lengthening it costs
+less than it used to.
+
+### T-2 — Think out loud (original)
 **Do:** Say "what was that thing…", pause for a full second, then "…the one from
 Tuesday".
 **Pass:** One turn, containing the whole sentence. Currently expected to *fail* at

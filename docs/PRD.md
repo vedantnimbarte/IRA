@@ -75,9 +75,9 @@ after. **Shipped** items already work.
 | FR-3 | Stop speaking within the interruption budget when the user begins talking, and treat what they said as the next turn | Shipped | — |
 | FR-4 | Begin speaking before the model has finished generating the reply | Shipped | — |
 | FR-5 | Accept a follow-up turn without requiring the wake word again | Shipped | — |
-| FR-6 | Not end the user's turn on a mid-thought pause | Should | P7 |
+| FR-6 | Not end the user's turn on a mid-thought pause | Should | **Deferred** — see P7 |
 | FR-7 | Offer press-to-talk as an alternative activation mode | **Shipped** | P6 |
-| FR-8 | Respond to its own name rather than a placeholder wake word | Should | P7 |
+| FR-8 | Respond to its own name rather than a placeholder wake word | Should | **Deferred** — needs a training run and a room |
 
 ### Reliability and feedback
 

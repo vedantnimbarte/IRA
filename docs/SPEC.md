@@ -165,6 +165,7 @@ directory.
 | `IRA_CONFIG` | `ira.toml` | MCP servers and per-tool policy |
 | `IRA_UI` | `8180` | Screen port. `off` disables it entirely |
 | `IRA_PTT` | *unset* | Set to disarm voice barge-in. Interrupting becomes the talk control, which is what makes speakers usable without echo cancellation |
+| `IRA_SPECULATE_MS` | `200` | Silence after which transcription starts. Above `ENDPOINT_MS` disables speculation, which is how the two are compared on one machine |
 | `IRA_TAIL_MS` | `3000` | Silence appended after a replayed file. The model's round trip happens inside this window, so a benchmark wanting the whole reply needs more |
 | `IRA_SKIP_WAKE` | *unset* | Start in Listening. openWakeWord does not fire on synthesised speech, so a Piper corpus never gets past Idle |
 | `RUST_LOG` | `ira=info` | Must match the crate name; a rename silently disables logging |
@@ -279,6 +280,34 @@ connected.** `Ui::watchers()` is read as the turn starts, and only a non-zero
 count selects the wording that tells the model to say the short version aloud
 and leave the rest on screen. Promising a screen nobody is watching is the same
 defect P1 removed, with extra steps.
+
+## Transcription runs ahead of the endpoint
+
+Transcription starts when speech *pauses* for `SPECULATE_MS`, not when the turn
+is proven over at `ENDPOINT_MS`. The two therefore overlap, and the saving is
+the gap between them.
+
+Every scrap of speech bumps a generation counter, so a transcript made before
+the user carried on talking is recognised as describing a sentence that no
+longer exists, and dropped. A pause mid-sentence produces a wasted
+transcription; that costs CPU which was otherwise idle and no wall-clock at all.
+
+At the endpoint there are three cases, and they converge on one path:
+
+| At the endpoint | What happens |
+|---|---|
+| A transcript is ready for this generation | Reply begins immediately; `stt_ms` is near zero and `spec=true` |
+| One is in flight for this generation | The turn waits for it; `stt_ms` is what is left of it |
+| Neither | One is started and waited for — the old behaviour |
+
+`stt_ms` stays what it always was: endpoint to transcript in hand, which is the
+wait the user actually experiences. `spec` says why it is small, so nobody reads
+the log and concludes transcription got faster.
+
+A turn gives up on a transcript after `TRANSCRIPT_TIMEOUT_MS`. The transcribing
+task always answers, even to report failure, so reaching that means the task
+died — and without the timeout the loop would hold the floor forever, which is
+the worst thing IRA can do.
 
 ## Speaking and stopping
 
