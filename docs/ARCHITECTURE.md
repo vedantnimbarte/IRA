@@ -120,11 +120,17 @@ pub trait Tool: Send + Sync {
 
 // Three shapes, because tools genuinely have three shapes.
 pub enum ToolOutcome {
-    Speak(String),   // memory, calendar  -- answer to read out
-    Silent,          // Echo typed it     -- nothing to read out
-    Started(JobId),  // Wingman           -- minutes; reported later
+    Answer(String),  // clock, calendar  -- a result the model phrases
+    Silent,          // a write          -- nothing worth reporting
+    Started(JobId),  // Wingman          -- minutes; reported later
 }
 ```
+
+`Answer` is handed back to the model rather than read out verbatim. The model
+asked for the tool in order to answer something, and raw tool output is often a
+non-sequitur as a reply: "is it raining Thursday?" answered with a stored note
+about Thursday is not an answer. The cost is one more model round trip inside
+the turn, which is real and shows up in `total_ms`.
 
 `Started` is the shape that forces the design. Memory, calendar and home
 automation are call → result → speak, and a contract of "function returning an

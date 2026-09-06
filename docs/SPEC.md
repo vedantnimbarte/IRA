@@ -33,7 +33,7 @@ pub enum Latency {
 }
 
 pub enum ToolOutcome {
-    Speak(String),   // read this out
+    Answer(String),  // a result; handed back to the model, not read verbatim
     Silent,          // done; acknowledge with a tone, say nothing
     Started(JobId),  // result arrives via the job channel
 }
@@ -77,12 +77,21 @@ audio frame except where marked otherwise.
 | Listening | `!heard_speech && 2_000 ms` in a follow-up | Idle | Discard utterance; **no sound**. Shorter than the post-wake wait: a wake word is a promise to speak, a finished reply is not |
 | Holding | `barge_ms >= 250 && past grace` | Listening | Cancel token; log the turn as barged; interrupt TTS; reset VAD; seed utterance from full 1 s pre-roll; `heard_speech = true`; reset the turn clock |
 | Holding | reply done && tts idle | Listening | Log the turn; open the follow-up window; seed from pre-roll; reset the turn clock |
-| Holding | tool wants mutate | Confirming | Speak the confirmation question; start 6 s timer; hold the pending call |
-| Confirming | transcript ∈ YES | Holding | Execute the held call; resume the turn |
-| Confirming | transcript ∈ NO | Idle | Drop the call; say "Cancelled."; end the turn |
-| Confirming | unrecognised reply | Confirming | Re-ask once, then treat as NO. **Ambiguity fails closed.** |
-| Confirming | 6 s timeout | Idle | Drop the call; say nothing further |
-| Confirming | `barge_in` | Listening | Drop the call. **Interrupting a confirmation is never consent** |
+| Holding | tool wants mutate | Confirming | Speak the question; hold the pending call; reset the utterance buffer |
+| Confirming | `vad_speech` / `vad_silence` | Confirming | Same buffering as Listening, with a 6 s no-speech deadline |
+| Confirming | endpoint | Confirming | Transcribe the answer only — no model, no history, no tools |
+| Confirming | transcript ∈ YES | Holding | Run the held call; the turn resumes where it paused |
+| Confirming | transcript ∈ NO | Holding † | Say "Cancelled."; refuse the call; cancel the turn |
+| Confirming | unrecognised reply | Confirming | Re-ask once, then refuse. **Ambiguity fails closed.** |
+| Confirming | 6 s no speech | Idle | Refuse the call; say nothing. Silence is not consent |
+
+† Not Idle, as originally specified: the turn returns to Holding so "Cancelled."
+is actually heard, and the follow-up window then opens as it does after any
+reply — which is what lets the user immediately say what they *did* want.
+
+A confirmation is transcribed and matched against the grammar directly. It never
+reaches the model, so the thing being confirmed gets no chance to argue its way
+past the question.
 | any | `job_complete` (P8) | unchanged | Completion tone now; speak the summary on next entry to Idle |
 
 The deadline stops applying the instant speech is heard, or a slow speaker gets
@@ -154,6 +163,7 @@ directory.
 | `IRA_CONFIG` | `ira.toml` | *P4* — tool and server configuration |
 | `IRA_AUDIO_FILE` | *unset* | Replay a WAV instead of opening the mic (see [TEST-PLAN.md](TEST-PLAN.md)) |
 | `IRA_CLOCK` | *unset* | `virtual` drops replay pacing, for CI |
+| `IRA_MEMORY` | — | *Not used.* Memory is kortex-memory over MCP, from P4 |
 | `IRA_TAIL_MS` | `3000` | Silence appended after a replayed file. The model's round trip happens inside this window, so a benchmark wanting the whole reply needs more |
 | `IRA_SKIP_WAKE` | *unset* | Start in Listening. openWakeWord does not fire on synthesised speech, so a Piper corpus never gets past Idle |
 | `RUST_LOG` | `ira=info` | Must match the crate name; a rename silently disables logging |
@@ -230,6 +240,24 @@ tracing::info!(
 field exists to explain a bad `total_ms`. Report p50 and p95 over a run, never a
 mean — the tail is what users remember, and one 4-second turn is more damaging
 than twenty 900 ms ones are good.
+
+## Tool loop
+
+The model may ask for a tool instead of answering. `llm.rs` runs up to
+`MAX_ROUNDS` (3) request rounds per turn, appending the call and its result to
+the conversation each time, then answers with whatever it has.
+
+- Tools are advertised only when the registry is non-empty.
+- A `Slow` tool speaks `FILLER` ("Let me check.") *before* the wait, not after.
+  Fixed text, because a filler needing a model round trip defeats its purpose.
+- Every call is wrapped in its latency class's budget and abandoned on overrun.
+- A tool error is handed back to the model to phrase, so a failure stays inside
+  the conversation instead of ending it on a canned line.
+- `mutates` tools go through `Confirming` first. A refusal cancels the turn.
+
+Both wire formats stream tool calls as fragments — Anthropic as
+`input_json_delta` inside a `tool_use` block, OpenAI as `tool_calls` deltas — so
+arguments are accumulated across frames and parsed once at the end.
 
 ## VAD input contract
 

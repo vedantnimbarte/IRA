@@ -34,10 +34,13 @@ Streamable-HTTP transports.
 New capabilities arrive as configuration rather than code. Lifting Wingman's MCP
 client becomes mechanical rather than a translation layer.
 
-`ToolOutcome` must carry three shapes, not one — `Speak`, `Silent` and
+`ToolOutcome` must carry three shapes, not one — `Answer`, `Silent` and
 `Started(JobId)` — because a contract of "function returning an answer" would
-fit memory and calendar but not Wingman, and discovering that after the registry
-was built would mean rewriting it.
+fit the clock and a calendar but not Wingman, and discovering that after the
+registry was built would mean rewriting it.
+
+Built as `Answer` rather than `Speak`: the result goes back to the model to be
+phrased, not straight to the speaker. See ARCHITECTURE.md.
 
 Dynamic-library plugins were rejected outright. Echo ships that mechanism and
 its own `PLUGINS.md` states the permission list is advisory and unenforced: a
