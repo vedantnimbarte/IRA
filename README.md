@@ -51,6 +51,18 @@ mic ─┬─ openWakeWord ──── Idle: is that the wake word?
 | `tts.rs` | Piper subprocess + rodio | `ira-tts` |
 | `main.rs` | state machine | `ira-daemon` |
 
+## Docs
+
+[docs/INDEX.md](docs/INDEX.md) is the map. In reading order:
+[PRD](docs/PRD.md) (what and why) &middot;
+[ROADMAP](docs/ROADMAP.md) (ten phases to v1.0) &middot;
+[ARCHITECTURE](docs/ARCHITECTURE.md) (how, and why it is shaped this way) &middot;
+[SPEC](docs/SPEC.md) (implementable detail) &middot;
+[TEST-PLAN](docs/TEST-PLAN.md) (how we know it works).
+
+Decisions are recorded individually under [docs/decisions/](docs/decisions/) --
+including the ones that were rejected, and what would change them.
+
 ## Knobs
 
 Everything worth tuning is a `const` at the top of `main.rs`. Tune by ear, not by
