@@ -2,4 +2,6 @@
 # Fetched by scripts/fetch-models.ps1 -- ~6 MB of weights, not source.
 /models/*.onnx
 /models/*.onnx.json
+/models/*.bin
 /piper/
+/whisper/

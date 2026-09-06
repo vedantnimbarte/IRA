@@ -1,8 +1,19 @@
-//! Streaming Anthropic call, chunked into sentences.
+//! Streaming LLM call, chunked into sentences.
 //!
 //! Sentences, not tokens, are the unit that matters here: TTS can start speaking
 //! the first sentence while the model is still writing the second. That overlap
 //! is most of the perceived latency win in a voice loop.
+//!
+//! Anthropic direct by default. Set `IRA_LLM_URL` to talk to anything speaking
+//! the OpenAI chat-completions wire format instead -- OpenRouter, LM Studio,
+//! Ollama, vLLM, llama.cpp:
+//!
+//!   $env:IRA_LLM_URL   = "https://openrouter.ai/api/v1/chat/completions"
+//!   $env:IRA_LLM_KEY   = "sk-or-..."                    # omit for a local server
+//!   $env:IRA_LLM_MODEL = "anthropic/claude-sonnet-4.5"  # provider's own id
+//!
+//! Only three things differ between the two: where the system prompt goes, the
+//! auth header, and where the text sits in each SSE frame.
 
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
@@ -41,6 +52,20 @@ fn split_sentence(buf: &mut String) -> Option<String> {
     None
 }
 
+/// The text carried by one SSE frame, for whichever wire format is in use.
+///
+/// Both are quiet about frames that carry no text -- Anthropic's `message_start`,
+/// OpenAI's opening role-only delta -- so `None` is routine, not an error.
+fn delta_text(v: &serde_json::Value, openai: bool) -> Option<&str> {
+    if openai {
+        v["choices"][0]["delta"]["content"].as_str()
+    } else if v["type"] == "content_block_delta" {
+        v["delta"]["text"].as_str()
+    } else {
+        None
+    }
+}
+
 /// Streams the reply, sending each finished sentence to `out`.
 /// Returns the full text. Cancelling drops the HTTP stream mid-flight.
 pub async fn stream(
@@ -50,29 +75,49 @@ pub async fn stream(
     out: mpsc::Sender<String>,
     cancel: CancellationToken,
 ) -> Result<String> {
-    let key =
-        std::env::var("ANTHROPIC_API_KEY").map_err(|_| anyhow!("ANTHROPIC_API_KEY not set"))?;
+    let url = std::env::var("IRA_LLM_URL").ok();
+    let openai = url.is_some();
 
     let mut messages = Vec::new();
+    // OpenAI carries the system prompt as the first message; Anthropic takes it
+    // as a top-level field.
+    if openai {
+        messages.push(serde_json::json!({"role": "system", "content": SYSTEM}));
+    }
     for (u, a) in history {
         messages.push(serde_json::json!({"role": "user", "content": u}));
         messages.push(serde_json::json!({"role": "assistant", "content": a}));
     }
     messages.push(serde_json::json!({"role": "user", "content": user}));
 
-    let resp = client
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", key)
-        .header("anthropic-version", "2023-06-01")
-        .json(&serde_json::json!({
-            "model": MODEL,
-            "max_tokens": 300,
-            "system": SYSTEM,
-            "stream": true,
-            "messages": messages,
-        }))
-        .send()
-        .await?;
+    let mut body = serde_json::json!({
+        "model": std::env::var("IRA_LLM_MODEL").unwrap_or_else(|_| MODEL.into()),
+        "max_tokens": 300,
+        "stream": true,
+        "messages": messages,
+    });
+    if !openai {
+        body["system"] = SYSTEM.into();
+    }
+
+    let req = match &url {
+        // A local server usually wants no key at all, so an absent one is not
+        // an error here the way a missing ANTHROPIC_API_KEY is.
+        Some(url) => match std::env::var("IRA_LLM_KEY") {
+            Ok(key) => client.post(url).bearer_auth(key),
+            Err(_) => client.post(url),
+        },
+        None => client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("anthropic-version", "2023-06-01")
+            .header(
+                "x-api-key",
+                std::env::var("ANTHROPIC_API_KEY")
+                    .map_err(|_| anyhow!("ANTHROPIC_API_KEY not set"))?,
+            ),
+    };
+
+    let resp = req.json(&body).send().await?;
     if !resp.status().is_success() {
         return Err(anyhow!("llm {}: {}", resp.status(), resp.text().await?));
     }
@@ -102,14 +147,12 @@ pub async fn stream(
             let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
                 continue;
             };
-            if v["type"] == "content_block_delta" {
-                if let Some(t) = v["delta"]["text"].as_str() {
-                    full.push_str(t);
-                    buf.push_str(t);
-                    while let Some(s) = split_sentence(&mut buf) {
-                        if !s.is_empty() && out.send(s).await.is_err() {
-                            return Ok(full);
-                        }
+            if let Some(t) = delta_text(&v, openai) {
+                full.push_str(t);
+                buf.push_str(t);
+                while let Some(s) = split_sentence(&mut buf) {
+                    if !s.is_empty() && out.send(s).await.is_err() {
+                        return Ok(full);
                     }
                 }
             }
@@ -126,6 +169,40 @@ pub async fn stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn json(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).unwrap()
+    }
+
+    /// Real frame shapes from both wire formats. The two disagree about where
+    /// the text lives and about which frames carry any, so reading one with the
+    /// other's rules yields a silent empty reply rather than an error.
+    #[test]
+    fn reads_text_from_either_wire_format() {
+        let openai = json(
+            r#"{"choices":[{"delta":{"content":"Hello"},"index":0}]}"#,
+        );
+        let anthropic = json(
+            r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}"#,
+        );
+        assert_eq!(delta_text(&openai, true), Some("Hello"));
+        assert_eq!(delta_text(&anthropic, false), Some("Hello"));
+
+        // Each format's opening frame carries no text and must not panic or
+        // yield a spurious empty string.
+        assert_eq!(
+            delta_text(&json(r#"{"choices":[{"delta":{"role":"assistant"}}]}"#), true),
+            None
+        );
+        assert_eq!(
+            delta_text(&json(r#"{"type":"message_start","message":{"id":"x"}}"#), false),
+            None
+        );
+        // Neither may read the other's frame, which is the failure that would
+        // otherwise show up as IRA silently saying nothing.
+        assert_eq!(delta_text(&anthropic, true), None);
+        assert_eq!(delta_text(&openai, false), None);
+    }
 
     #[test]
     fn splits_on_sentence_end() {

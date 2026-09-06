@@ -1,13 +1,21 @@
-//! Speech-to-text via Groq's hosted Whisper.
+//! Speech-to-text: Groq's hosted Whisper, or any local whisper.cpp server.
 //!
-//! ponytail: cloud-only for the prototype so the loop's *feel* can be measured
-//! without a whisper.cpp build in the way. Echo already has the local path;
-//! lifting it into `ira-stt` is the swap, and the router decides which runs.
+//! whisper.cpp's own `whisper-server` speaks the same multipart API as Groq's
+//! endpoint -- same `file` part, same `{"text": ...}` back -- so switching
+//! engines is a URL, not a code path. Set `IRA_STT_URL` to go local:
+//!
+//!   whisper-server -m ggml-tiny.en.bin -t 8 --host 127.0.0.1 --port 8231
+//!   $env:IRA_STT_URL = "http://127.0.0.1:8231/inference"
+//!
+//! Local costs latency and buys offline + privacy. Measured on 8 CPU cores,
+//! 2.8 s of speech: tiny.en ~750 ms, base.en ~1.5 s. Tune by ear -- this sits
+//! directly in the gap between you stopping and IRA starting.
 
 use anyhow::{anyhow, Result};
 use reqwest::multipart::{Form, Part};
 
 const MODEL: &str = "whisper-large-v3-turbo";
+const GROQ_URL: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
 
 /// Minimal 16-bit PCM WAV. Whisper endpoints want a container, not raw samples.
 fn wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
@@ -32,7 +40,6 @@ fn wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
 }
 
 pub async fn transcribe(client: &reqwest::Client, samples: &[f32], sr: u32) -> Result<String> {
-    let key = std::env::var("GROQ_API_KEY").map_err(|_| anyhow!("GROQ_API_KEY not set"))?;
     let form = Form::new()
         .part(
             "file",
@@ -43,9 +50,16 @@ pub async fn transcribe(client: &reqwest::Client, samples: &[f32], sr: u32) -> R
         .text("model", MODEL)
         .text("response_format", "json");
 
-    let resp = client
-        .post("https://api.groq.com/openai/v1/audio/transcriptions")
-        .bearer_auth(key)
+    // whisper-server ignores the `model` field, so the body is identical for
+    // both and only the destination differs.
+    let req = match std::env::var("IRA_STT_URL") {
+        Ok(url) => client.post(url),
+        Err(_) => client.post(GROQ_URL).bearer_auth(
+            std::env::var("GROQ_API_KEY").map_err(|_| anyhow!("GROQ_API_KEY not set"))?,
+        ),
+    };
+
+    let resp = req
         .multipart(form)
         .send()
         .await?;
@@ -59,6 +73,22 @@ pub async fn transcribe(client: &reqwest::Client, samples: &[f32], sr: u32) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Proves the local engine accepts *our* WAV bytes, not just a reference
+    /// file. Skips unless a server is up:
+    ///   whisper-server -m ggml-tiny.en.bin -t 8 --host 127.0.0.1 --port 8231
+    ///   IRA_STT_URL=http://127.0.0.1:8231/inference cargo test -- --nocapture
+    #[tokio::test]
+    async fn local_server_accepts_our_wav() {
+        if std::env::var("IRA_STT_URL").is_err() {
+            eprintln!("skipped: set IRA_STT_URL to a running whisper-server");
+            return;
+        }
+        // A second of silence: whisper returns little, but a malformed
+        // container fails the request outright, which is what this checks.
+        let out = transcribe(&reqwest::Client::new(), &vec![0.0; 16_000], 16_000).await;
+        assert!(out.is_ok(), "{:?}", out.err());
+    }
 
     #[test]
     fn wav_header_is_well_formed() {
