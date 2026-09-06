@@ -37,6 +37,41 @@ use tokio_util::sync::CancellationToken;
 
 /// Silence after speech that ends the user's turn.
 const ENDPOINT_MS: u64 = 700;
+/// Silence after which transcription starts, without waiting to find out
+/// whether the turn is actually over.
+///
+/// Endpointing spends `ENDPOINT_MS` proving the user stopped, and transcription
+/// then takes about as long again. Run in sequence that is the whole latency
+/// budget; overlapped, transcription is nearly free. If the user turns out to
+/// have been mid-thought the guess is thrown away and made again, which costs
+/// CPU that was otherwise idle and no wall-clock at all.
+///
+/// Longer than a gap between words, shorter than a pause for thought.
+/// `IRA_SPECULATE_MS` overrides it; a value above `ENDPOINT_MS` turns
+/// speculation off, which is how the two are compared on one machine.
+const SPECULATE_MS: u64 = 200;
+
+/// How long the turn waits for a transcript before giving up on it.
+///
+/// The transcribing task always answers, even to report failure, so reaching
+/// this means the task itself died. Without it the loop would hold the floor
+/// forever and IRA would simply stop responding -- the worst failure it has.
+const TRANSCRIPT_TIMEOUT_MS: u64 = 15_000;
+
+/// Speculation only helps while it starts before the endpoint fires, and the
+/// saving is exactly the gap between them. Checked at compile time because
+/// closing that gap would quietly undo the phase that opened it.
+const _: () = assert!(SPECULATE_MS < ENDPOINT_MS);
+/// A turn must give up on a transcript well after the endpoint, or it would
+/// abandon one that was merely slow.
+const _: () = assert!(TRANSCRIPT_TIMEOUT_MS > ENDPOINT_MS);
+
+fn speculate_ms() -> u64 {
+    std::env::var("IRA_SPECULATE_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(SPECULATE_MS)
+}
 /// A wake word with no speech after it was a false trigger.
 const NO_SPEECH_TIMEOUT_MS: u64 = 3_000;
 /// How long IRA waits for a spoken yes or no before treating silence as no.
@@ -93,20 +128,19 @@ enum State {
     Confirming,
 }
 
-/// Which stage failed, so the loop can say the right thing without a round trip.
-enum Fail {
-    Stt,
-    Llm,
-}
-
 enum Turn {
-    Heard(String),
+    /// A transcript, tagged with the utterance it was made from. `None` means
+    /// transcription failed.
+    ///
+    /// Speculative: it may arrive while the user is still talking, in which
+    /// case `gen` no longer matches and it is dropped.
+    Transcript { gen: u64, text: Option<String> },
     /// What the user said in answer to a confirmation question.
     Confirmed(String),
     Done { user: String, reply: String },
-    /// Transcription returned nothing -- almost always noise after a false wake.
-    Empty,
-    Failed(Fail),
+    /// The model failed. Transcription failures never reach here: they are
+    /// answered where the transcript was expected.
+    Failed,
 }
 
 /// What Listening should do with the audio it has seen so far.
@@ -302,6 +336,13 @@ async fn main() -> Result<()> {
     // control reuses the state machine rather than duplicating it.
     let mut talk = false;
     let mut ducked = false;
+    // Bumped by every scrap of speech, so a transcript made before it changed
+    // is known to be stale without comparing audio.
+    let mut utt_gen = 0u64;
+    let mut spec_inflight: Option<u64> = None;
+    let mut spec_ready: Option<(u64, Option<String>)> = None;
+    // The turn has begun and is waiting on a transcript that has not landed.
+    let mut awaiting = false;
     // Whether this turn got any words out. A stream that breaks after two
     // sentences must not append an apology to them.
     let mut spoke_any = false;
@@ -313,6 +354,10 @@ async fn main() -> Result<()> {
     // The TTS clock reading when IRA took the floor, so first-audio can be
     // expressed relative to the endpoint.
     let mut hold_base_ms = 0u64;
+    // When the endpoint fired, so stt_ms measures the wait the user actually
+    // experienced rather than how long transcription took.
+    let mut stt_started = Instant::now();
+    let speculate = speculate_ms();
 
     tracing::info!(stt_backend, %llm_model, "ready -- say the wake word; ctrl-c to quit");
 
@@ -363,9 +408,28 @@ async fn main() -> Result<()> {
                             if speech {
                                 heard_speech = true;
                                 silence_ms = 0;
+                                // Anything guessed before this word is now a
+                                // guess about a different sentence.
+                                utt_gen += 1;
                             } else if heard_speech {
                                 silence_ms += vad::CHUNK_MS;
                             }
+                        }
+
+                        // Start transcribing on a pause rather than on proof the
+                        // turn is over. Most of the time the pause was the end.
+                        if heard_speech
+                            && silence_ms >= speculate
+                            && spec_inflight != Some(utt_gen)
+                            && !matches!(spec_ready, Some((g, _)) if g == utt_gen)
+                        {
+                            spec_inflight = Some(utt_gen);
+                            spawn_stt(
+                                client.clone(),
+                                utt_gen,
+                                utterance.clone(),
+                                turn_tx.clone(),
+                            );
                         }
 
                         let deadline = if follow_up { FOLLOW_UP_MS } else { NO_SPEECH_TIMEOUT_MS };
@@ -390,25 +454,53 @@ async fn main() -> Result<()> {
                                 let listen_ms = wake_at
                                     .map(|w| w.elapsed().as_millis() as u64)
                                     .unwrap_or(0);
-                                let t = metrics::Turn::start(turn_id, wake_ms, listen_ms);
+                                let mut t = metrics::Turn::start(turn_id, wake_ms, listen_ms);
+                                let ready = matches!(spec_ready, Some((g, _)) if g == utt_gen);
+                                t.speculative = ready;
                                 let timings = t.timings.clone();
                                 turn = Some(t);
+                                stt_started = Instant::now();
                                 hold_base_ms = tts.elapsed_ms();
                                 tts.begin_turn();
                                 go(&mut state, State::Holding, &ui);
-                                spawn_turn(
-                                    client.clone(),
-                                    std::mem::take(&mut utterance),
-                                    history.clone(),
-                                    turn_tx.clone(),
-                                    speech_tx.clone(),
-                                    cancel.clone(),
-                                    timings,
-                                    host.clone(),
-                                    // Checked as the turn starts: IRA may only
-                                    // promise a screen someone is looking at.
-                                    ui.watchers() > 0,
-                                );
+
+                                // Nothing guessed and nothing in flight -- the
+                                // user spoke through the whole window, so start
+                                // now and wait for it.
+                                if !ready && spec_inflight != Some(utt_gen) {
+                                    spec_inflight = Some(utt_gen);
+                                    spawn_stt(
+                                        client.clone(),
+                                        utt_gen,
+                                        utterance.clone(),
+                                        turn_tx.clone(),
+                                    );
+                                }
+                                utterance.clear();
+                                awaiting = true;
+
+                                if let Some((g, text)) = spec_ready.take() {
+                                    if g == utt_gen {
+                                        awaiting = false;
+                                        Timings::set(
+                                            &timings.stt_ms,
+                                            stt_started.elapsed().as_millis() as u64,
+                                        );
+                                        begin_reply(
+                                            text,
+                                            &client,
+                                            &history,
+                                            &turn_tx,
+                                            &speech_tx,
+                                            &cancel,
+                                            &timings,
+                                            &host,
+                                            &ui,
+                                            &mut tts,
+                                            &mut llm_running,
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -488,6 +580,11 @@ async fn main() -> Result<()> {
                         if should_interrupt(ptt, past_grace, barge_ms, talk) {
                             tracing::info!(by = if talk { "talk" } else { "voice" }, "barge-in");
                             ducked = false;
+                            // Whatever was being transcribed belonged to the
+                            // turn just abandoned.
+                            awaiting = false;
+                            spec_ready = None;
+                            utt_gen += 1;
                             cancel.cancel();
                             llm_running = false;
                             log_turn(&mut turn, &tts, hold_base_ms, true, stt_backend, &llm_model, &ui);
@@ -506,7 +603,15 @@ async fn main() -> Result<()> {
                             wake_ms = 0;
                             wake_at = Some(Instant::now());
                             go(&mut state, State::Listening, &ui);
-                        } else if !llm_running && tts.idle() {
+                        } else if awaiting
+                            && stt_started.elapsed().as_millis() as u64 > TRANSCRIPT_TIMEOUT_MS
+                        {
+                            tracing::error!("no transcript came back");
+                            awaiting = false;
+                            llm_running = false;
+                            ui.send(ui::Event::Failed { what: "transcription".into() });
+                            let _ = tts.say(SAY_STT_FAILED);
+                        } else if !llm_running && !awaiting && tts.idle() {
                             if ducked {
                                 tts.unduck();
                                 ducked = false;
@@ -582,9 +687,42 @@ async fn main() -> Result<()> {
 
             Some(event) = turn_rx.recv() => {
                 match event {
-                    Turn::Heard(text) => {
-                        tracing::info!(user = %text, "heard");
-                        ui.send(ui::Event::Heard { text });
+                    Turn::Transcript { gen, text } => {
+                        if spec_inflight == Some(gen) {
+                            spec_inflight = None;
+                        }
+                        if gen != utt_gen {
+                            // The user carried on talking; this describes a
+                            // sentence that no longer exists.
+                            tracing::debug!(gen, utt_gen, "stale transcript");
+                        } else if awaiting {
+                            awaiting = false;
+                            if let Some(t) = turn.as_ref() {
+                                Timings::set(
+                                    &t.timings.stt_ms,
+                                    stt_started.elapsed().as_millis() as u64,
+                                );
+                            }
+                            let timings = turn
+                                .as_ref()
+                                .map(|t| t.timings.clone())
+                                .unwrap_or_default();
+                            begin_reply(
+                                text,
+                                &client,
+                                &history,
+                                &turn_tx,
+                                &speech_tx,
+                                &cancel,
+                                &timings,
+                                &host,
+                                &ui,
+                                &mut tts,
+                                &mut llm_running,
+                            );
+                        } else {
+                            spec_ready = Some((gen, text));
+                        }
                     }
                     Turn::Done { user, reply } => {
                         llm_running = false;
@@ -637,30 +775,14 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
-                    Turn::Empty => {
+                    Turn::Failed => {
                         llm_running = false;
-                        tracing::info!("nothing transcribed");
-                        // A sentence here would be worse than a sound: this is
-                        // usually a false wake, and the user never spoke.
-                        tts.error_tone();
-                    }
-                    Turn::Failed(what) => {
-                        llm_running = false;
-                        match what {
-                            Fail::Stt => {
-                                tracing::error!("stt failed");
-                                ui.send(ui::Event::Failed { what: "transcription".into() });
-                                let _ = tts.say(SAY_STT_FAILED);
-                            }
-                            Fail::Llm => {
-                                tracing::error!("llm failed");
-                                ui.send(ui::Event::Failed { what: "the model".into() });
-                                // Half a reply plus an apology is worse than
-                                // half a reply. Only speak if nothing was said.
-                                if !spoke_any {
-                                    let _ = tts.say(SAY_LLM_FAILED);
-                                }
-                            }
+                        tracing::error!("llm failed");
+                        ui.send(ui::Event::Failed { what: "the model".into() });
+                        // Half a reply plus an apology is worse than half a
+                        // reply. Only speak if nothing was said.
+                        if !spoke_any {
+                            let _ = tts.say(SAY_LLM_FAILED);
                         }
                     }
                 }
@@ -717,10 +839,74 @@ fn tail(buf: &VecDeque<f32>, n: usize) -> Vec<f32> {
     buf.iter().skip(buf.len().saturating_sub(n)).copied().collect()
 }
 
+/// Transcribes an utterance, tagged so a stale answer can be recognised.
+fn spawn_stt(client: reqwest::Client, gen: u64, audio: Vec<f32>, out: mpsc::Sender<Turn>) {
+    tokio::spawn(async move {
+        let text = match stt::transcribe(&client, &audio, audio::SR).await {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::error!(?e, "stt");
+                None
+            }
+        };
+        let _ = out.send(Turn::Transcript { gen, text }).await;
+    });
+}
+
+/// Turns a transcript into a reply, or into the right noise if there is none.
+///
+/// Called from two places -- the endpoint, when the guess already landed, and
+/// the moment it lands afterwards -- so both take exactly the same path.
 #[allow(clippy::too_many_arguments)]
-fn spawn_turn(
+fn begin_reply(
+    text: Option<String>,
+    client: &reqwest::Client,
+    history: &[(String, String)],
+    out: &mpsc::Sender<Turn>,
+    speech: &mpsc::Sender<(String, CancellationToken)>,
+    cancel: &CancellationToken,
+    timings: &Arc<Timings>,
+    host: &Arc<tool::Host>,
+    ui: &ui::Ui,
+    tts: &mut tts::Tts,
+    llm_running: &mut bool,
+) {
+    let text = match text {
+        Some(t) => t,
+        None => {
+            *llm_running = false;
+            tracing::error!("stt failed");
+            ui.send(ui::Event::Failed { what: "transcription".into() });
+            let _ = tts.say(SAY_STT_FAILED);
+            return;
+        }
+    };
+    if text.trim().is_empty() {
+        *llm_running = false;
+        tracing::info!("nothing transcribed");
+        ui.send(ui::Event::Failed { what: "nothing heard".into() });
+        tts.error_tone();
+        return;
+    }
+    tracing::info!(user = %text, "heard");
+    ui.send(ui::Event::Heard { text: text.clone() });
+    spawn_reply(
+        client.clone(),
+        text,
+        history.to_vec(),
+        out.clone(),
+        speech.clone(),
+        cancel.clone(),
+        timings.clone(),
+        host.clone(),
+        ui.watchers() > 0,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_reply(
     client: reqwest::Client,
-    audio: Vec<f32>,
+    text: String,
     history: Vec<(String, String)>,
     out: mpsc::Sender<Turn>,
     speech: mpsc::Sender<(String, CancellationToken)>,
@@ -731,29 +917,6 @@ fn spawn_turn(
 ) {
     let cancelled = cancel.clone();
     tokio::spawn(async move {
-        let asked = Instant::now();
-        let result = stt::transcribe(&client, &audio, audio::SR).await;
-        // Recorded even on failure: a slow failure and a fast one are different
-        // problems, and the log line is the only place that shows which.
-        Timings::set(&timings.stt_ms, asked.elapsed().as_millis() as u64);
-
-        let text = match result {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::error!(?e, "stt");
-                let _ = out.send(Turn::Failed(Fail::Stt)).await;
-                return;
-            }
-        };
-        if text.is_empty() {
-            let _ = out.send(Turn::Empty).await;
-            return;
-        }
-        if cancel.is_cancelled() {
-            let _ = out.send(Turn::Done { user: text, reply: String::new() }).await;
-            return;
-        }
-        let _ = out.send(Turn::Heard(text.clone())).await;
 
         match llm::stream(&client, &history, &text, speech, cancel, &timings, &host, screen)
             .await
@@ -768,7 +931,7 @@ fn spawn_turn(
             }
             Err(e) => {
                 tracing::error!(?e, "llm");
-                let _ = out.send(Turn::Failed(Fail::Llm)).await;
+                let _ = out.send(Turn::Failed).await;
             }
         }
     });

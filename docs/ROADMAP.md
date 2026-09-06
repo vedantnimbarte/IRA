@@ -208,18 +208,33 @@ longer the answer, the more certain the failure — which is the wrong way round
 and it silently broke the long answers P5 had just shipped. `idle()` now waits
 for what it asked for, bounded so a dead piper cannot strand the loop.
 
-### P7 — Turn quality
+### P7 — Turn quality — *partly done*
 
 Stop cutting people off mid-thought; cut a stage from the critical path.
 
-- Streaming STT — send audio as it arrives instead of after endpointing
-- Semantic endpointing (smart-turn v2) alongside VAD, so a thinking pause is not
-  a turn end
-- Train a real "IRA" wake word — a Colab run against the same three-stage chain;
-  only the classifier `.onnx` changes
+- **Speculative transcription.** Endpointing spends `ENDPOINT_MS` proving the
+  user stopped, and transcription then takes about as long again; run in
+  sequence that is the whole latency budget. Transcription now starts on a
+  *pause* (`SPECULATE_MS`, 200 ms) rather than on proof the turn is over. If the
+  pause turns out to have been mid-thought the guess is discarded and remade,
+  which costs idle CPU and no wall-clock. Measured saving: **522 ms**, see
+  [BASELINE.md](BASELINE.md).
+- ~~Semantic endpointing (smart-turn v2)~~ **deferred.** A heuristic over the
+  speculative transcript was tried on paper and rejected: whisper punctuates
+  short fragments confidently, so "What was that thing?" reads as complete and
+  T-2 would still fail. Doing it properly means a second model whose accuracy
+  cannot be judged without real speech, and a wrong turn-detector *extends every
+  turn* — a latency regression on top of the win above.
+- ~~Train a real "IRA" wake word~~ **deferred.** A Colab training run, then a
+  false-wake rate that can only be measured in a room over hours.
 
 **Exit:** measured improvement against the P0 baseline, not a subjective one.
-**Depends:** P0.
+**Met**, by an interleaved same-machine A/B rather than a comparison against the
+older baseline: median `total_ms` 1667 → 1145. The saving lands on
+`ENDPOINT_MS - SPECULATE_MS`, which is what the design predicted.
+
+**Depends:** P0 — and this is what P0 was for. The change is invisible without
+the `turn` line, and could not have been argued for without a number.
 
 ### P8 — Background jobs and Wingman
 

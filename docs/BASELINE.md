@@ -45,6 +45,32 @@ first sample: sentence splitting, the write to Piper's stdin, its synthesis, and
 the rodio queue. It also absorbs any time the model spends failing, which is why
 a failed turn can show a large `tts_ms` alongside `ttft_ms=0`.
 
+## P7 — speculative transcription
+
+Transcription now starts on a pause rather than on proof the turn is over, so it
+overlaps the endpoint window. Measured as an interleaved A/B on one machine
+rather than against the table above: this box was noticeably slower on the day,
+which inflates both arms equally and makes a cross-day comparison meaningless.
+
+Six pairs, alternating, `IRA_SPECULATE_MS=99999` to disable and `200` to enable.
+
+| | median `stt_ms` | median `total_ms` |
+|---|---|---|
+| Sequential (old behaviour) | 1188 | **1667** |
+| Overlapped | 661 | **1145** |
+
+**522 ms saved**, and the overlapped arm was better or tied in all six pairs.
+The saving lands on `ENDPOINT_MS - SPECULATE_MS` (500 ms), which is what the
+design predicts: the endpoint window is dead time that transcription can occupy.
+
+`stt_ms` remains endpoint-to-transcript — the wait the user experiences, not the
+work done. A `spec` field on the turn line says when the transcript was already
+in hand, so a small `stt_ms` is not misread as transcription having got faster.
+
+The absolute numbers here are not comparable with the table above, and the
+ceiling is: once transcription is shorter than `ENDPOINT_MS` it disappears from
+the critical path entirely, and the remaining budget is the model and Piper.
+
 ## Not measured
 
 - **Any GPU.** The machine that will run IRA has a GTX 1650. No CUDA pack has
