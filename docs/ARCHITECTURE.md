@@ -99,7 +99,8 @@ The exhaustive transition table lives in [SPEC.md](SPEC.md).
 | `llm.rs` | Streaming generation, sentence splitting | Config | P3 — tool-calling loop |
 | `main.rs` | State machine, turn orchestration | **Closed** | P1, P2, P3, P8 |
 | `tool.rs` | Trait, registry, dispatch, confirmation | *New at P3* | — |
-| `mcp.rs` | MCP client, one adapter to the trait | *New at P4* | — |
+| `mcp.rs` | MCP client, one adapter to the trait | Config | — |
+| `config.rs` | `ira.toml`: servers and per-tool policy | Config | — |
 | `metrics.rs` | Per-stage turn timing | *New at P0* | — |
 
 "Closed" means no extension point, not immutable. `main.rs` is closed because a

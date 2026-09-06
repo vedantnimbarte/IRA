@@ -207,6 +207,10 @@ impl Tool for Clock {
     }
 }
 
+/// Cap on a tool description, which lands directly in the model's prompt.
+/// Server-supplied text is an instruction channel; this bounds how much of one.
+pub const DESC_MAX: usize = 1024;
+
 /// Words that count as yes and no. Matched against the whole trimmed
 /// transcript, not as substrings -- "no, don't do that" must not hit "do that".
 pub fn yes_no(transcript: &str) -> Option<bool> {

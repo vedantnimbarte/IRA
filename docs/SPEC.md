@@ -160,34 +160,23 @@ directory.
 | `IRA_LLM_KEY` | *unset* | Bearer token for `IRA_LLM_URL`; omit for a local server |
 | `IRA_LLM_MODEL` | `claude-sonnet-5` | Required with `IRA_LLM_URL` — gateways name models differently |
 | `ANTHROPIC_API_KEY` | *required\** | \*Unless `IRA_LLM_URL` is set |
-| `IRA_CONFIG` | `ira.toml` | *P4* — tool and server configuration |
 | `IRA_AUDIO_FILE` | *unset* | Replay a WAV instead of opening the mic (see [TEST-PLAN.md](TEST-PLAN.md)) |
 | `IRA_CLOCK` | *unset* | `virtual` drops replay pacing, for CI |
-| `IRA_MEMORY` | — | *Not used.* Memory is kortex-memory over MCP, from P4 |
+| `IRA_CONFIG` | `ira.toml` | MCP servers and per-tool policy |
 | `IRA_TAIL_MS` | `3000` | Silence appended after a replayed file. The model's round trip happens inside this window, so a benchmark wanting the whole reply needs more |
 | `IRA_SKIP_WAKE` | *unset* | Start in Listening. openWakeWord does not fire on synthesised speech, so a Piper corpus never gets past Idle |
 | `RUST_LOG` | `ira=info` | Must match the crate name; a rename silently disables logging |
 
-### `ira.toml` — new at P4
+### `ira.toml`
+
+Optional. Without it IRA runs with its built-ins and nothing else. Unknown keys
+are rejected rather than ignored: a typo in a `mutates` line would otherwise
+disarm the confirmation gate silently.
+
+Windows paths need TOML *literal* strings (single quotes) — a backslash in a
+basic string is an escape.
 
 ```toml
-# Timing. Every value here is currently a const in main.rs.
-[timing]
-endpoint_ms        = 700
-barge_in_ms        = 250
-barge_in_grace_ms  = 300   # measured from first audio out, not turn start
-follow_up_ms       = 2000
-confirm_timeout_ms = 6000
-
-[wake]
-threshold = 0.5
-
-# Tools IRA implements itself.
-[tools.memory]
-enabled = true
-mutates = false
-latency = "fast"
-
 # MCP servers. stdio spawns a child; http uses Streamable-HTTP.
 [[mcp.server]]
 name      = "calendar"
@@ -195,20 +184,33 @@ transport = "stdio"
 command   = "mcp-calendar"
 args      = []
 
-# mutates is declared HERE, per tool, and never read from the server.
-# Anything not listed defaults to mutates = true and will ask first.
+# Which tools to expose. Omit or leave empty for all of them.
+#
+# Every schema is sent to the model on every round, and a turn that calls a
+# tool has two rounds. A server offering sixteen tools puts sixteen schemas in
+# front of the model twice per turn, which is worth choosing deliberately.
+only = ["list_events", "create_event"]
+
+# What IRA believes about each tool, regardless of what the server says.
+# Anything not listed defaults to mutates = true and latency = "slow", so it
+# asks before running.
 [mcp.server.tools]
-list_events  = { mutates = false, latency = "slow" }
-create_event = { mutates = true,  latency = "slow" }
+list_events  = { mutates = false, latency = "fast" }
+create_event = { mutates = true,  latency = "slow", confirm = "Add that to your calendar?" }
 
 [[mcp.server]]
-name      = "wingman"
+name      = "kortex"
 transport = "http"
-url       = "http://127.0.0.1:8787"
+url       = "http://127.0.0.1:8765"
 
-[mcp.server.tools]
-exec = { mutates = true, latency = "background" }
+[mcp.server.headers]
+Authorization = "Bearer ..."
 ```
+
+Timing and the wake threshold stay `const`s in `main.rs`. They are tuned by ear
+against the `turn` line, not by anyone editing a file, and config surface nobody
+has asked for is surface to keep working.
+
 
 ## Instrumentation — P0
 

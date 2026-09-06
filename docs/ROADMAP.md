@@ -135,7 +135,7 @@ on a known race.
 **Risk:** spoken sentences cannot be unspoken, so the prompt must enforce
 speak-or-call, never both mid-sentence.
 
-### P4 — MCP adapter
+### P4 — MCP adapter — *done*
 
 New tools arrive as config, not code.
 
@@ -148,6 +148,16 @@ New tools arrive as config, not code.
 
 **Exit:** a third-party calendar server works with zero IRA code changes.
 **Depends:** P3.
+
+**Delivered:** the adapter, `ira.toml`, per-tool policy, `only` selection,
+description truncation, and graceful degradation when a server is missing,
+broken or slow. Verified against a stub MCP server, including a tool the server
+described as harmless that IRA asked about anyway.
+
+**Not delivered: FR-15.** kortex-memory has never been connected. It needs
+Postgres + pgvector, Redis and MinIO running, which is a deployment question
+rather than a code one. The adapter is ready for it; nothing has proved the pair
+work together.
 
 ### P5 — Companion UI
 
@@ -241,7 +251,8 @@ table with real per-stage numbers.
 | Question | Why it matters | Blocks |
 |---|---|---|
 | When a background job finishes, how does IRA tell you? | Speaking unprompted is a capability IRA has never had. Recommendation: earcon at completion, spoken summary when next Idle. | P8 |
-| ~~Does kortex-memory exist?~~ **Answered: yes.** | [vedantnimbarte/kortex-memory](https://github.com/vedantnimbarte/kortex-memory) — a Python MCP server, sixteen tools, stdio and HTTP/SSE, backed by Postgres + pgvector, Redis and MinIO. It reaches IRA through the P4 adapter, so memory is a P4 integration and IRA implements none of it. Open follow-on: sixteen tool schemas is a lot of context to advertise in a latency-critical loop, so P4 likely needs to select a subset. | ~~P3~~ P4 |
+| Where does kortex-memory run? | It needs Postgres + pgvector, Redis and MinIO. On the GTX 1650 box that competes with whisper for the machine, and stdio versus HTTP/SSE is a real choice. The adapter supports both; nothing has been run. | FR-15 |
+| ~~Sixteen schemas in a voice turn?~~ **Solved.** | `only = [...]` per server. Every schema is sent on every round and a tool-calling turn has two rounds, so exposing all sixteen would put thirty-two schemas in front of the model per turn. | ~~P4~~ |
 | Wingman as a library, or over HTTP? | A library dependency pulls 16 crates in for one call site. Recommendation: HTTP first. | P8 |
 | Which UI framework? | Tauri is the in-house precedent from Echo; an overlay is lighter and more glanceable. | P5 |
 

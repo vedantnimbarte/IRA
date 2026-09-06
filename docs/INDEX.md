@@ -79,6 +79,6 @@ about immediately:
 
 - **Proactive speech.** When a background job finishes, IRA must speak with no wake
   word for the first time. Blocks P8.
-- **kortex-memory is an MCP server**, so memory arrives at P4 through the adapter
-  rather than being built into IRA. Its sixteen tool schemas may be more context
-  than a voice turn should carry, which P4 has to decide.
+- **kortex-memory has never been run against IRA.** The MCP adapter is built and
+  tested, but kortex needs Postgres, Redis and MinIO up, which is a deployment
+  question. FR-15 is unmet until that happens.
