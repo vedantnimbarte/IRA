@@ -119,6 +119,31 @@ fn fold_tool_call(v: &Value, openai: bool, call: &mut Call) -> bool {
     false
 }
 
+/// Folds a frame's token usage into the turn, if it carries any.
+///
+/// Anthropic reports usage unprompted: the input count on `message_start` and
+/// the output count on `message_delta`. OpenAI-compatible endpoints report it
+/// only when asked with `stream_options`, which is not sent -- an unknown field
+/// would break a gateway that rejects them, and a working conversation is worth
+/// more than a token count. Those setups report zero, which is why the field
+/// says `in_tokens` rather than pretending to be a bill.
+fn fold_usage(v: &Value, timings: &Timings) {
+    let usage = if v["type"] == "message_start" {
+        &v["message"]["usage"]
+    } else {
+        &v["usage"]
+    };
+    if let Some(n) = usage["input_tokens"].as_u64().or(usage["prompt_tokens"].as_u64()) {
+        timings.in_tokens.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(n) = usage["output_tokens"]
+        .as_u64()
+        .or(usage["completion_tokens"].as_u64())
+    {
+        timings.out_tokens.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Tool definitions in whichever shape the endpoint expects.
 fn tool_defs(host: &Host, openai: bool) -> Vec<Value> {
     host.specs()
@@ -412,6 +437,8 @@ async fn one_round(
             let Ok(v) = serde_json::from_str::<Value>(data) else {
                 continue;
             };
+
+            fold_usage(&v, timings);
 
             if fold_tool_call(&v, openai, &mut call) {
                 mark(timings);

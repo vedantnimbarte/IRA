@@ -21,6 +21,9 @@ pub struct Timings {
     pub tool_ms: AtomicU64,
     /// How many tools the turn called.
     pub tool_calls: AtomicU64,
+    /// Tokens the model reported for this turn, when it reported any.
+    pub in_tokens: AtomicU64,
+    pub out_tokens: AtomicU64,
 }
 
 impl Timings {
@@ -80,6 +83,8 @@ impl Turn {
             // speculated it is near zero, and this says why rather than
             // leaving the reader to think transcription got faster.
             spec = self.speculative,
+            in_tokens = t.in_tokens.load(Ordering::Relaxed),
+            out_tokens = t.out_tokens.load(Ordering::Relaxed),
             spoke = first_audio_ms.is_some(),
             stt_backend,
             llm_model = model,

@@ -153,7 +153,7 @@ directory.
 | `IRA_MODELS` | `models` | Directory holding all ONNX weights and the voice |
 | `IRA_WAKEWORD` | `hey_jarvis_v0.1.onnx` | Classifier filename inside `IRA_MODELS` |
 | `IRA_VOICE` | `en_US-amy-medium.onnx` | Piper voice; sample rate read from the sidecar JSON |
-| `IRA_PIPER` | `piper/piper.exe` | Piper executable |
+| `IRA_PIPER` | `piper/piper.exe`, or `piper/piper` off Windows | Piper executable |
 | `IRA_STT_URL` | *unset* | Set → local whisper.cpp; unset → Groq |
 | `GROQ_API_KEY` | *required\** | \*Unless `IRA_STT_URL` is set |
 | `IRA_LLM_URL` | *unset* | Set → OpenAI wire format; unset → Anthropic |
@@ -164,6 +164,7 @@ directory.
 | `IRA_CLOCK` | *unset* | `virtual` drops replay pacing, for CI |
 | `IRA_CONFIG` | `ira.toml` | MCP servers and per-tool policy |
 | `IRA_UI` | `8180` | Screen port. `off` disables it entirely |
+| `IRA_TRANSCRIPT` | `transcript.jsonl` | Where the conversation is recorded. `off` disables it |
 | `IRA_PTT` | *unset* | Set to disarm voice barge-in. Interrupting becomes the talk control, which is what makes speakers usable without echo cancellation |
 | `IRA_SPECULATE_MS` | `200` | Silence after which transcription starts. Above `ENDPOINT_MS` disables speculation, which is how the two are compared on one machine |
 | `IRA_TAIL_MS` | `3000` | Silence appended after a replayed file. The model's round trip happens inside this window, so a benchmark wanting the whole reply needs more |
@@ -280,6 +281,32 @@ connected.** `Ui::watchers()` is read as the turn starts, and only a non-zero
 count selects the wording that tells the model to say the short version aloud
 and leave the rest on screen. Promising a screen nobody is watching is the same
 defect P1 removed, with extra steps.
+
+## The transcript
+
+One JSON object per line, appended per turn: `at`, `turn`, `user`, `ira`,
+`tools`, `in_tokens`, `out_tokens`. JSONL because it appends without rewriting,
+survives truncation mid-write, and `tail -f` reads it while IRA is still
+talking.
+
+It carries **no timing**. A reply is recorded when the model finishes, which is
+before a word of it has been spoken, so anything measured there would be read
+too early and would mostly be zero. Latency lives in the `turn` log line, which
+is emitted when the turn is actually over.
+
+This is text, not audio — audio is still buffered for one utterance and
+discarded. But a conversation on disk is a change in posture from a process that
+kept nothing, so the path is logged at start-up rather than left to be
+discovered.
+
+Token counts appear when the endpoint volunteers them. Anthropic does so
+unprompted, on `message_start` and `message_delta`. OpenAI-compatible endpoints
+report usage only when asked with `stream_options`, which IRA does not send: an
+unknown field would break a gateway that rejects them, and a working
+conversation is worth more than a token count. Those setups report zero.
+
+There is no cost figure, only tokens. Pricing means a rate table that goes stale
+silently and errs toward under-reporting.
 
 ## Background jobs
 

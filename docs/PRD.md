@@ -87,8 +87,8 @@ after. **Shipped** items already work.
 | FR-10 | Never speak content from a turn the user already interrupted | Must | P1 |
 | FR-11 | Never claim to have done something it cannot do | Must | P1 |
 | FR-12 | Diagnose its own setup on demand: models, microphone, keys, local engines | Must | P0 |
-| FR-13 | Keep a readable transcript of past conversations | Should | P9 |
-| FR-14 | Report what each turn cost in tokens | Could | P9 |
+| FR-13 | Keep a readable transcript of past conversations | **Shipped** | P9 |
+| FR-14 | Report what each turn cost in tokens | **Shipped** | P9 — tokens, not currency |
 
 ### Acting, not just answering
 

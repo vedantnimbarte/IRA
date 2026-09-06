@@ -261,18 +261,31 @@ landed. Not met against Wingman itself, which has never been run.
 **Depends:** P3, P4, and the proactive-speech decision — which
 [0011](decisions/0011-a-tone-now-and-words-when-idle.md) now settles.
 
-### P9 — v1.0 hardening
+### P9 — v1.0 hardening — *partly done*
 
 Something another person can install and run.
 
-- Cross-platform: the Piper path, `.exe` assumptions and the PowerShell fetch
-  script are all Windows-bound
-- Packaging and signing (Echo's notes on unsigned-binary friction apply directly)
-- Persistent transcript and session history
-- Per-turn token and cost accounting
+- Cross-platform: the Piper binary name is chosen by platform, `ira doctor`
+  names the setup script that exists on the machine it is running on, and
+  `scripts/fetch-models.sh` is the POSIX counterpart of the PowerShell one
+- Persistent transcript: JSONL, one object per turn, `IRA_TRANSCRIPT` to move
+  or disable it
+- Token accounting: reported when the endpoint volunteers a count
+- ~~Packaging and signing~~ **deferred** — release infrastructure and a
+  certificate, neither of which exists yet. Echo's notes on unsigned-binary
+  friction apply unchanged
 
 **Exit:** a clean machine goes from download to conversation without reading
-source.
+source. **Unproven.** Every Windows-bound assumption found in the source has
+been removed, but IRA has never been built or run anywhere except this machine.
+The POSIX script parses and its model-fetching path was exercised; the Piper
+download and the whisper.cpp build in it have not been run, because both need a
+Linux or macOS box.
+
+**Cost, not just tokens.** Deliberately not implemented. Pricing means a table
+of per-model rates that goes stale silently and is wrong in the direction of
+under-reporting. Tokens are what IRA can know for certain; anything wanting
+currency can multiply them by a number it maintains itself.
 
 ## Latency budget
 

@@ -23,6 +23,9 @@ $env:GROQ_API_KEY = "gsk_..."
 cargo run --release
 ```
 
+On Linux or macOS, `./scripts/fetch-models.sh` does the same job. Untested:
+this has only ever been run on Windows.
+
 Say **"hey Jarvis"**, wait for the chirp, talk. Interrupt her any time.
 
 > **Wear headphones, or use press-to-talk.** There is no acoustic echo
