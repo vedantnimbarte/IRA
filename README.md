@@ -47,7 +47,7 @@ mic ─┬─ openWakeWord ──── Idle: is that the wake word?
 | `wake.rs` | openWakeWord 3-model chain | `ira-wake` |
 | `vad.rs` | Silero v5, endpointing + barge-in | `ira-vad` |
 | `stt.rs` | Groq Whisper | `ira-stt` (lift Echo's local path in) |
-| `llm.rs` | Anthropic stream → sentences | `ira-brain` (Wingman as a library) |
+| `llm.rs` | Anthropic/OpenAI stream → sentences | `ira-brain` (Wingman as a library) |
 | `tts.rs` | Piper subprocess + rodio | `ira-tts` |
 | `main.rs` | state machine | `ira-daemon` |
 
@@ -63,7 +63,63 @@ theory — these numbers are starting guesses, not measurements.
 | `BARGE_IN_GRACE_MS` | 300 | Too low: the tail of your question interrupts its own answer. |
 | wake threshold | 0.5 | Too low: fires on the TV. Too high: you repeat yourself. |
 
-Env overrides: `IRA_MODELS`, `IRA_WAKEWORD`, `IRA_VOICE`, `IRA_PIPER`.
+Env overrides: `IRA_MODELS`, `IRA_WAKEWORD`, `IRA_VOICE`, `IRA_PIPER`,
+`IRA_STT_URL`, `IRA_LLM_URL`, `IRA_LLM_KEY`, `IRA_LLM_MODEL`.
+
+## OpenRouter, or any OpenAI-compatible brain
+
+Anthropic direct is the default. `IRA_LLM_URL` switches to the OpenAI
+chat-completions format, which OpenRouter, LM Studio, Ollama, vLLM and
+llama.cpp all speak:
+
+```powershell
+$env:IRA_LLM_URL   = "https://openrouter.ai/api/v1/chat/completions"
+$env:IRA_LLM_KEY   = "sk-or-..."
+$env:IRA_LLM_MODEL = "anthropic/claude-sonnet-4.5"   # OpenRouter's id, not Anthropic's
+```
+
+`ANTHROPIC_API_KEY` is then unused. `IRA_LLM_MODEL` is required here because
+every gateway names models differently; `IRA_LLM_KEY` is not, since a local
+server generally wants no key.
+
+Whatever the model, keep it fast. Time-to-first-sentence is what you hear -- a
+reasoning model that thinks for four seconds before its first token feels broken
+in a voice loop no matter how good the answer is.
+
+## Local STT
+
+whisper.cpp's `whisper-server` speaks the same multipart API as Groq, so going
+offline is a URL rather than a code path:
+
+```powershell
+.\scriptsetch-models.ps1 -Whisper
+```
+
+Opt-in, because it is a bigger download than everything else here combined. It
+reads `nvidia-smi` and picks the build to match: an NVIDIA driver gets the
+cuBLAS 11.8 pack and `small.en`, anything else gets the CPU pack and `tiny.en`.
+Override either with `-Backend` / `-Model`. It prints the two lines to run:
+
+```powershell
+.\whisper\whisper-server.exe -m .\models\ggml-small.en.bin --host 127.0.0.1 --port 8231
+$env:IRA_STT_URL = "http://127.0.0.1:8231/inference"
+```
+
+CUDA is backward compatible, so the 11.8 pack runs on a 12.x driver at the same
+speed for a tenth of the download. Cards newer than CUDA 11.8 (Blackwell) need
+`-Backend cuda12`.
+
+`GROQ_API_KEY` is then unused. Measured on 8 CPU cores against 2.8 s of speech:
+
+| Engine | Latency | Notes |
+|---|---|---|
+| Groq `whisper-large-v3-turbo` | — | Fast, but needs the network and sends your voice off the machine |
+| `tiny.en`, 8 threads | ~750 ms | Offline. Fine on clear speech, drops proper nouns |
+| `base.en`, 8 threads | ~1.5 s | Noticeably sluggish in the loop |
+
+That latency sits directly in the gap between you stopping and IRA starting, so
+pick by ear. On a CUDA machine the same server with a GPU build erases the gap;
+this box has integrated graphics, so the numbers above are CPU-only.
 
 ## Deliberate shortcuts
 
@@ -72,7 +128,7 @@ Each is marked with a `ponytail:` comment at the site.
 | Shortcut | Ceiling | Upgrade when |
 |---|---|---|
 | No AEC, headphones assumed | Unusable on speakers | Before any demo not wearing headphones — `webrtc-audio-processing` |
-| Cloud STT only | Not private, dies offline | Lift Echo's local Whisper into `ira-stt` |
+| Groq STT by default | Not private, dies offline | Set `IRA_STT_URL` -- local costs ~750 ms on CPU |
 | Cheap linear resampler | Slight aliasing | Only if measured word-error-rate suffers |
 | Piper respawn on barge-in | ~250 ms before she can speak again | If interruption recovery feels slow — keep a warm spare |
 | Fixed 8-turn history window | No real memory | Wire up kortex-memory |
@@ -90,7 +146,7 @@ the plan.
 
 ## Tests
 
-`cargo test` — 8 tests, no network or mic needed.
+`cargo test` — 10 tests, no network or mic needed.
 
 Two run the real ONNX models and are the ones that matter: they check the tensor
 shapes threaded through openWakeWord's three stages and Silero's recurrent state
@@ -99,6 +155,10 @@ note if `models/` is empty, so a fresh clone still passes.
 
 The rest cover what silently corrupts audio: resampler ratio, WAV header, and
 sentence splitting (which must not break on `3.50`).
+
+One more skips unless `IRA_STT_URL` points at a running whisper-server: it
+checks that a local engine accepts the WAV bytes `stt.rs` writes, which is the
+one thing a URL swap cannot be assumed to get right.
 
 The loop itself is tuned by talking to it — there is no test for "feels right".
 
