@@ -5,3 +5,5 @@
 /models/*.bin
 /piper/
 /whisper/
+# Written by IRA at runtime -- a record of your conversations, not source.
+/transcript.jsonl

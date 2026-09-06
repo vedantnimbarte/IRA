@@ -9,6 +9,14 @@
 
 use std::path::{Path, PathBuf};
 
+/// The setup command for this platform, so an error tells a Linux user to run
+/// something that exists on Linux.
+pub const SETUP: &str = if cfg!(windows) {
+    ".\\scripts\\fetch-models.ps1"
+} else {
+    "./scripts/fetch-models.sh"
+};
+
 pub enum Level {
     Ok,
     /// Works, but something will be missing or slower than it needs to be.
@@ -68,7 +76,7 @@ pub fn files_and_keys(p: &Paths) -> Vec<Check> {
         } else {
             out.push(Check::fatal(
                 format!("{name} missing at {}", path.display()),
-                "run .\\scripts\\fetch-models.ps1",
+                format!("run {SETUP}"),
             ));
         }
     };
@@ -87,7 +95,7 @@ pub fn files_and_keys(p: &Paths) -> Vec<Check> {
     } else {
         out.push(Check::fatal(
             format!("piper missing at {}", p.piper.display()),
-            "run .\\scripts\\fetch-models.ps1, or set IRA_PIPER",
+            format!("run {SETUP}, or set IRA_PIPER"),
         ));
     }
 
@@ -240,6 +248,7 @@ mod tests {
         );
         let checks = files_and_keys(&p);
         let fatal = first_fatal(&checks).expect("missing models must be fatal");
-        assert!(fatal.contains("fetch-models"), "no fix offered: {fatal}");
+        // The fix must name a script that exists on the platform being run on.
+        assert!(fatal.contains(SETUP), "no usable fix offered: {fatal}");
     }
 }

@@ -21,6 +21,7 @@ mod mcp;
 mod metrics;
 mod stt;
 mod tool;
+mod transcript;
 mod tts;
 mod ui;
 mod vad;
@@ -247,7 +248,14 @@ async fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("models"));
     let wakeword = std::env::var("IRA_WAKEWORD").unwrap_or_else(|_| "hey_jarvis_v0.1.onnx".into());
-    let piper = PathBuf::from(std::env::var("IRA_PIPER").unwrap_or_else(|_| "piper/piper.exe".into()));
+    // Piper ships as piper.exe on Windows and piper everywhere else.
+    let piper = PathBuf::from(std::env::var("IRA_PIPER").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "piper/piper.exe".into()
+        } else {
+            "piper/piper".to_string()
+        }
+    }));
     let voice = models.join(std::env::var("IRA_VOICE").unwrap_or_else(|_| "en_US-amy-medium.onnx".into()));
 
     let checks = doctor::paths(&models, &wakeword, &voice, &piper);
@@ -279,6 +287,7 @@ async fn main() -> Result<()> {
     // Tools. The clock is the only built-in; everything else arrives over MCP
     // as configuration rather than code.
     let (ui, mut talk_rx) = ui::Ui::start().await;
+    let transcript = transcript::Transcript::open();
     let (jobs_tx, mut jobs_rx) = mpsc::channel::<tool::Done>(8);
     // Without acoustic echo cancellation the microphone hears the speaker, so
     // voice-triggered barge-in fires on IRA's own reply. Disarming it makes
@@ -777,6 +786,18 @@ async fn main() -> Result<()> {
                         if !reply.is_empty() {
                             tracing::info!(ira = %reply, "reply");
                             ui.send(ui::Event::Reply { text: reply.clone() });
+                            if let Some(t) = turn.as_ref() {
+                                use std::sync::atomic::Ordering::Relaxed;
+                                transcript.append(&transcript::Entry {
+                                    at: transcript::now(),
+                                    turn: t.id,
+                                    user: &user,
+                                    ira: &reply,
+                                    tools: t.timings.tool_calls.load(Relaxed),
+                                    in_tokens: t.timings.in_tokens.load(Relaxed),
+                                    out_tokens: t.timings.out_tokens.load(Relaxed),
+                                });
+                            }
                             history.push((user, reply));
                             // ponytail: fixed-window history. kortex-memory
                             // replaces this with real summarisation and recall.
