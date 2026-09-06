@@ -159,17 +159,22 @@ Postgres + pgvector, Redis and MinIO running, which is a deployment question
 rather than a code one. The adapter is ready for it; nothing has proved the pair
 work together.
 
-### P5 — Companion UI
+### P5 — Companion UI — *done*
 
 Long answers and tool output get somewhere to land.
 
-- Decide the surface: Tauri (Echo is the in-house precedent) or a lightweight
-  always-on-top overlay
-- Live transcript, tool results, long-form answers, diagrams
-- Restore the "on screen" clause — now true
+- Surface decided: a page IRA serves on loopback, read in a browser. Not Tauri,
+  not a GUI crate — see [0009](decisions/0009-the-screen-is-a-served-page.md)
+- Live transcript, tool calls and results, full replies, per-turn timings
+- The "on screen" clause is restored, but only while a page is connected: IRA
+  counts its watchers and will not promise a screen nobody is looking at
 
 **Exit:** a long answer is summarised aloud in two sentences and rendered in full.
 **Depends:** P3 — tool results are most of what it displays.
+
+**Not verified:** that the model actually keeps to two sentences when it knows
+there is a screen. That is the prompt's job and needs a real model; every run so
+far used a stub that says whatever it is told to.
 
 ### P6 — Acoustic echo cancellation
 
@@ -254,7 +259,7 @@ table with real per-stage numbers.
 | Where does kortex-memory run? | It needs Postgres + pgvector, Redis and MinIO. On the GTX 1650 box that competes with whisper for the machine, and stdio versus HTTP/SSE is a real choice. The adapter supports both; nothing has been run. | FR-15 |
 | ~~Sixteen schemas in a voice turn?~~ **Solved.** | `only = [...]` per server. Every schema is sent on every round and a tool-calling turn has two rounds, so exposing all sixteen would put thirty-two schemas in front of the model per turn. | ~~P4~~ |
 | Wingman as a library, or over HTTP? | A library dependency pulls 16 crates in for one call site. Recommendation: HTTP first. | P8 |
-| Which UI framework? | Tauri is the in-house precedent from Echo; an overlay is lighter and more glanceable. | P5 |
+| ~~Which UI framework?~~ **Answered: none.** | A page served on loopback, read in a browser. No dependency, no second build, and the browser supplies scrolling, selection and theming. An overlay remains possible later and consumes the same event stream. | ~~P5~~ |
 
 ## Considered and deferred
 

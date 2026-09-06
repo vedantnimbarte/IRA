@@ -22,6 +22,7 @@ mod metrics;
 mod stt;
 mod tool;
 mod tts;
+mod ui;
 mod vad;
 mod wake;
 
@@ -146,6 +147,22 @@ fn listening_next(
     }
 }
 
+/// Moves to a new state and tells the screen.
+///
+/// One function so the screen cannot drift out of step with the loop: there is
+/// no way to change state without saying so.
+fn go(state: &mut State, next: State, ui: &ui::Ui) {
+    ui.send(ui::Event::State {
+        name: match next {
+            State::Idle => "idle",
+            State::Listening => "listening",
+            State::Holding => "holding",
+            State::Confirming => "confirming",
+        },
+    });
+    *state = next;
+}
+
 /// Refuses a pending confirmation and ends the turn that asked.
 ///
 /// Every path out of Confirming that is not an explicit yes comes through here,
@@ -214,9 +231,10 @@ async fn main() -> Result<()> {
 
     // Tools. The clock is the only built-in; everything else arrives over MCP
     // as configuration rather than code.
+    let ui = ui::Ui::start().await;
     let (confirm_tx, mut confirm_rx) = mpsc::channel::<tool::Confirm>(4);
     let host = {
-        let mut h = tool::Host::new(confirm_tx);
+        let mut h = tool::Host::new(confirm_tx, ui.clone());
         h.add(Arc::new(tool::Clock));
         for t in mcp::connect_all(&cfg.mcp.server).await {
             h.add(t);
@@ -282,7 +300,7 @@ async fn main() -> Result<()> {
                     // Flush an in-flight turn so a replay always produces its
                     // line, even when the file ran out mid-answer. A benchmark
                     // reading nothing cannot tell "fast" from "never started".
-                    log_turn(&mut turn, &tts, hold_base_ms, false, stt_backend, &llm_model);
+                    log_turn(&mut turn, &tts, hold_base_ms, false, stt_backend, &llm_model, &ui);
                     break;
                 };
                 let frame_ms = (frame.len() as u64 * 1000) / audio::SR as u64;
@@ -306,7 +324,7 @@ async fn main() -> Result<()> {
                             silence_ms = 0;
                             utterance_ms = 0;
                             follow_up = false;
-                            state = State::Listening;
+                            go(&mut state, State::Listening, &ui);
                         }
                     }
 
@@ -332,7 +350,7 @@ async fn main() -> Result<()> {
                                     tracing::info!("no speech after wake, back to idle");
                                 }
                                 vad.reset();
-                                state = State::Idle;
+                                go(&mut state, State::Idle, &ui);
                             }
                             Next::Answer => {
                                 cancel = CancellationToken::new();
@@ -349,7 +367,7 @@ async fn main() -> Result<()> {
                                 turn = Some(t);
                                 hold_base_ms = tts.elapsed_ms();
                                 tts.begin_turn();
-                                state = State::Holding;
+                                go(&mut state, State::Holding, &ui);
                                 spawn_turn(
                                     client.clone(),
                                     std::mem::take(&mut utterance),
@@ -359,6 +377,9 @@ async fn main() -> Result<()> {
                                     cancel.clone(),
                                     timings,
                                     host.clone(),
+                                    // Checked as the turn starts: IRA may only
+                                    // promise a screen someone is looking at.
+                                    ui.watchers() > 0,
                                 );
                             }
                         }
@@ -389,7 +410,7 @@ async fn main() -> Result<()> {
                                 tracing::info!("no answer to the confirmation");
                                 deny(&mut pending_confirm, &cancel);
                                 vad.reset();
-                                state = State::Idle;
+                                go(&mut state, State::Idle, &ui);
                             }
                             Next::Answer if !confirm_stt_running => {
                                 confirm_stt_running = true;
@@ -427,7 +448,7 @@ async fn main() -> Result<()> {
                             tracing::info!("barge-in");
                             cancel.cancel();
                             llm_running = false;
-                            log_turn(&mut turn, &tts, hold_base_ms, true, stt_backend, &llm_model);
+                            log_turn(&mut turn, &tts, hold_base_ms, true, stt_backend, &llm_model, &ui);
                             tts.interrupt()?;
                             vad.reset();
                             // Seed the new turn from the pre-roll so the words
@@ -442,9 +463,9 @@ async fn main() -> Result<()> {
                             // of anything; this turn began when they cut in.
                             wake_ms = 0;
                             wake_at = Some(Instant::now());
-                            state = State::Listening;
+                            go(&mut state, State::Listening, &ui);
                         } else if !llm_running && tts.idle() {
-                            log_turn(&mut turn, &tts, hold_base_ms, false, stt_backend, &llm_model);
+                            log_turn(&mut turn, &tts, hold_base_ms, false, stt_backend, &llm_model, &ui);
                             // Hold the floor open briefly so a reply can be
                             // answered without a wake word. This also covers the
                             // failure phrases: after "I didn't catch that", the
@@ -463,7 +484,7 @@ async fn main() -> Result<()> {
                             // the moment the floor opened.
                             wake_ms = 0;
                             wake_at = Some(Instant::now());
-                            state = State::Listening;
+                            go(&mut state, State::Listening, &ui);
                         }
                     }
                 }
@@ -471,6 +492,7 @@ async fn main() -> Result<()> {
 
             Some(req) = confirm_rx.recv() => {
                 tracing::info!(question = %req.question, "confirming");
+                ui.send(ui::Event::Confirm { question: req.question.clone() });
                 // Asked directly rather than through the sentence channel: this
                 // is IRA's own question, not part of the model's reply.
                 if let Err(e) = tts.say(&req.question) {
@@ -485,7 +507,7 @@ async fn main() -> Result<()> {
                 heard_speech = false;
                 silence_ms = 0;
                 utterance_ms = 0;
-                state = State::Confirming;
+                go(&mut state, State::Confirming, &ui);
             }
 
             Some((sentence, tok)) = speech_rx.recv() => {
@@ -507,11 +529,15 @@ async fn main() -> Result<()> {
 
             Some(event) = turn_rx.recv() => {
                 match event {
-                    Turn::Heard(text) => tracing::info!(user = %text, "heard"),
+                    Turn::Heard(text) => {
+                        tracing::info!(user = %text, "heard");
+                        ui.send(ui::Event::Heard { text });
+                    }
                     Turn::Done { user, reply } => {
                         llm_running = false;
                         if !reply.is_empty() {
                             tracing::info!(ira = %reply, "reply");
+                            ui.send(ui::Event::Reply { text: reply.clone() });
                             history.push((user, reply));
                             // ponytail: fixed-window history. kortex-memory
                             // replaces this with real summarisation and recall.
@@ -525,19 +551,21 @@ async fn main() -> Result<()> {
                         tracing::info!(answer = %text, "confirmation answer");
                         match tool::yes_no(&text) {
                             Some(true) => {
+                                ui.send(ui::Event::Answered { yes: true });
                                 if let Some(tx) = pending_confirm.take() {
                                     let _ = tx.send(true);
                                 }
                                 // The turn resumes where it left off.
-                                state = State::Holding;
+                                go(&mut state, State::Holding, &ui);
                             }
                             Some(false) => {
+                                ui.send(ui::Event::Answered { yes: false });
                                 let _ = tts.say(SAY_CANCELLED);
                                 deny(&mut pending_confirm, &cancel);
                                 // Back to Holding so "Cancelled." is actually
                                 // heard; the cancelled turn then drains and the
                                 // follow-up window opens as usual.
-                                state = State::Holding;
+                                go(&mut state, State::Holding, &ui);
                             }
                             None if !confirm_reasked => {
                                 // Ambiguity gets one more chance, then fails
@@ -552,7 +580,7 @@ async fn main() -> Result<()> {
                             None => {
                                 let _ = tts.say(SAY_CANCELLED);
                                 deny(&mut pending_confirm, &cancel);
-                                state = State::Holding;
+                                go(&mut state, State::Holding, &ui);
                             }
                         }
                     }
@@ -568,10 +596,12 @@ async fn main() -> Result<()> {
                         match what {
                             Fail::Stt => {
                                 tracing::error!("stt failed");
+                                ui.send(ui::Event::Failed { what: "transcription".into() });
                                 let _ = tts.say(SAY_STT_FAILED);
                             }
                             Fail::Llm => {
                                 tracing::error!("llm failed");
+                                ui.send(ui::Event::Failed { what: "the model".into() });
                                 // Half a reply plus an apology is worse than
                                 // half a reply. Only speak if nothing was said.
                                 if !spoke_any {
@@ -591,6 +621,7 @@ async fn main() -> Result<()> {
 }
 
 /// Emits the turn line and clears it, so a turn is never logged twice.
+#[allow(clippy::too_many_arguments)]
 fn log_turn(
     turn: &mut Option<metrics::Turn>,
     tts: &tts::Tts,
@@ -598,12 +629,14 @@ fn log_turn(
     barged: bool,
     backend: &str,
     model: &str,
+    ui: &ui::Ui,
 ) {
     if let Some(t) = turn.take() {
         let first_audio = tts
             .first_audio_ms()
             .map(|a| a.saturating_sub(hold_base_ms));
         t.log(first_audio, barged, backend, model);
+        ui.send(t.event(first_audio, barged));
     }
 }
 
@@ -641,6 +674,7 @@ fn spawn_turn(
     cancel: CancellationToken,
     timings: Arc<Timings>,
     host: Arc<tool::Host>,
+    screen: bool,
 ) {
     let cancelled = cancel.clone();
     tokio::spawn(async move {
@@ -668,7 +702,9 @@ fn spawn_turn(
         }
         let _ = out.send(Turn::Heard(text.clone())).await;
 
-        match llm::stream(&client, &history, &text, speech, cancel, &timings, &host).await {
+        match llm::stream(&client, &history, &text, speech, cancel, &timings, &host, screen)
+            .await
+        {
             // A cancelled stream still returns its partial text; that half a
             // sentence must not enter history as if IRA had said it.
             Ok(reply) if !cancelled.is_cancelled() => {

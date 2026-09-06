@@ -163,6 +163,7 @@ directory.
 | `IRA_AUDIO_FILE` | *unset* | Replay a WAV instead of opening the mic (see [TEST-PLAN.md](TEST-PLAN.md)) |
 | `IRA_CLOCK` | *unset* | `virtual` drops replay pacing, for CI |
 | `IRA_CONFIG` | `ira.toml` | MCP servers and per-tool policy |
+| `IRA_UI` | `8180` | Screen port. `off` disables it entirely |
 | `IRA_TAIL_MS` | `3000` | Silence appended after a replayed file. The model's round trip happens inside this window, so a benchmark wanting the whole reply needs more |
 | `IRA_SKIP_WAKE` | *unset* | Start in Listening. openWakeWord does not fire on synthesised speech, so a Piper corpus never gets past Idle |
 | `RUST_LOG` | `ira=info` | Must match the crate name; a rename silently disables logging |
@@ -242,6 +243,30 @@ tracing::info!(
 field exists to explain a bad `total_ms`. Report p50 and p95 over a run, never a
 mean — the tail is what users remember, and one 4-second turn is more damaging
 than twenty 900 ms ones are good.
+
+## The screen
+
+IRA serves one page and one event stream on `127.0.0.1:8180`, loopback only —
+it carries a live transcript of everything said in the room.
+
+- `GET /` — the page.
+- `GET /events` — server-sent events, one JSON object per message, discriminated
+  by `kind`: `state`, `heard`, `reply`, `tool`, `result`, `confirm`,
+  `answered`, `failed`, `turn`.
+
+A page connecting mid-conversation is replayed the last 200 events, so opening
+it shows what just happened rather than an empty screen.
+
+**Nothing here may affect the loop.** A closed tab, a stalled reader or a
+browser that never connects are all a dropped socket. A page that falls behind
+misses events; the broadcast channel drops for a slow reader rather than
+applying backpressure.
+
+**The screen clause in the system prompt is conditional on a page being
+connected.** `Ui::watchers()` is read as the turn starts, and only a non-zero
+count selects the wording that tells the model to say the short version aloud
+and leave the rest on screen. Promising a screen nobody is watching is the same
+defect P1 removed, with extra steps.
 
 ## Tool loop
 

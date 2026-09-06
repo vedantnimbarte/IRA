@@ -105,10 +105,10 @@ after. **Shipped** items already work.
 
 | ID | Requirement | Priority | Phase |
 |---|---|---|---|
-| FR-21 | Show a live transcript of the current conversation | Must | P5 |
-| FR-22 | Render long answers in full while speaking a one-line summary | Must | P5 |
-| FR-23 | Show tool results that do not read aloud well — lists, tables, code | Must | P5 |
-| FR-24 | Stay out of the way when not in use | Should | P5 |
+| FR-21 | Show a live transcript of the current conversation | **Shipped** | P5 |
+| FR-22 | Render long answers in full while speaking a one-line summary | **Shipped** | P5 |
+| FR-23 | Show tool results that do not read aloud well — lists, tables, code | **Shipped** | P5 |
+| FR-24 | Stay out of the way when not in use | **Shipped** | P5 — a tab takes no focus |
 
 ## Non-functional requirements
 
@@ -163,6 +163,6 @@ tell us which phase to invest in next.
 | Question | Why it matters | Needed by |
 |---|---|---|
 | When a long task finishes, may IRA speak unprompted? | It has never spoken without a wake word. Interrupting the user is a different product than waiting quietly. Recommendation: a tone at completion, spoken summary when next idle. | P8 |
-| Is the screen a window or an overlay? | A window is a place you go; an overlay is something that appears. Changes FR-24 substantially, and whether long answers are glanceable or browsable. | P5 |
+| ~~Window or overlay?~~ **Answered: a page.** | Something you visit, in a browser tab. It is browsable rather than glanceable, which is the right trade for long answers and tool output but not for a passing status. An overlay stays possible and would read the same event stream. | ~~P5~~ |
 | What is IRA's personality? | Currently defined only by a brevity instruction. Two sentences is a constraint, not a voice, and the voice is most of what a user remembers. | P5 |
 | ~~Where does memory live?~~ **Answered.** | kortex-memory, an MCP server with sixteen tools over stdio and HTTP/SSE. It is therefore a P4 integration, not a P3 built-in, and IRA does not implement memory itself. | ~~P3~~ |
