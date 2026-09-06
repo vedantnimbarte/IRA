@@ -76,7 +76,7 @@ after. **Shipped** items already work.
 | FR-4 | Begin speaking before the model has finished generating the reply | Shipped | — |
 | FR-5 | Accept a follow-up turn without requiring the wake word again | Shipped | — |
 | FR-6 | Not end the user's turn on a mid-thought pause | Should | P7 |
-| FR-7 | Offer press-to-talk as an alternative activation mode | Should | P6 |
+| FR-7 | Offer press-to-talk as an alternative activation mode | **Shipped** | P6 |
 | FR-8 | Respond to its own name rather than a placeholder wake word | Should | P7 |
 
 ### Reliability and feedback

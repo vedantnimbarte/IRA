@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 const DEFAULT_PORT: u16 = 8180;
 /// Events replayed to a page that connects mid-conversation, so opening it
@@ -55,6 +55,8 @@ pub struct Ui {
     tx: broadcast::Sender<String>,
     watchers: Arc<AtomicUsize>,
     backlog: Arc<Mutex<VecDeque<String>>>,
+    /// `POST /talk`. Opens the floor, or interrupts if IRA is speaking.
+    talk: mpsc::Sender<()>,
 }
 
 impl Ui {
@@ -62,21 +64,27 @@ impl Ui {
     /// What `IRA_UI=off` produces, and what tests use.
     pub fn disabled() -> Self {
         let (tx, _) = broadcast::channel(256);
+        // A sender whose receiver is already gone: pressing talk does nothing.
+        let (talk, _) = mpsc::channel(1);
         Self {
             tx,
             watchers: Arc::new(AtomicUsize::new(0)),
             backlog: Arc::new(Mutex::new(VecDeque::with_capacity(BACKLOG))),
+            talk,
         }
     }
 
     /// Starts the server unless `IRA_UI=off`. `IRA_UI=<port>` moves it.
-    pub async fn start() -> Self {
-        let ui = Self::disabled();
+    ///
+    /// The receiver carries presses of the talk control.
+    pub async fn start() -> (Self, mpsc::Receiver<()>) {
+        let (talk, talk_rx) = mpsc::channel(4);
+        let ui = Self { talk, ..Self::disabled() };
 
         let setting = std::env::var("IRA_UI").unwrap_or_default();
         if setting == "off" {
             tracing::info!("screen disabled");
-            return ui;
+            return (ui, talk_rx);
         }
         let port: u16 = setting.parse().unwrap_or(DEFAULT_PORT);
 
@@ -96,7 +104,7 @@ impl Ui {
             // A port already in use must not stop IRA answering questions.
             Err(e) => tracing::error!("screen unavailable on port {port}: {e}"),
         }
-        ui
+        (ui, talk_rx)
     }
 
     /// How many pages are watching. Zero means IRA must not claim to have put
@@ -125,6 +133,16 @@ async fn serve(mut sock: TcpStream, ui: Ui) {
     let (read, mut write) = sock.split();
     let mut reader = BufReader::new(read);
     if reader.read_line(&mut line).await.is_err() {
+        return;
+    }
+
+    if line.starts_with("POST /talk") {
+        // try_send: a second press while the first is still queued is the same
+        // press. Never block the socket on the loop.
+        let _ = ui.talk.try_send(());
+        let _ = write
+            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            .await;
         return;
     }
 
@@ -218,6 +236,14 @@ const PAGE: &str = r##"<!doctype html>
     border:1px solid var(--accent); border-radius:3px; padding:2px 8px;
   }
   #live { margin-left:auto; font-size:12px; color:var(--muted); }
+  #talk {
+    font:12px ui-monospace,Consolas,monospace; letter-spacing:.08em;
+    text-transform:uppercase; cursor:pointer; color:var(--panel);
+    background:var(--accent); border:1px solid var(--accent);
+    border-radius:3px; padding:4px 12px;
+  }
+  #talk:active { filter:brightness(.85); }
+  #talk:focus-visible { outline:2px solid var(--ink); outline-offset:2px; }
   main { max-width:820px; margin:0 auto; padding:20px; }
   .row { margin-bottom:14px; }
   .who {
@@ -249,6 +275,7 @@ const PAGE: &str = r##"<!doctype html>
 <header>
   <h1>IRA</h1>
   <span id="state">idle</span>
+  <button id="talk" title="Open the floor, or interrupt">talk</button>
   <span id="live">connecting…</span>
 </header>
 <main id="log"><div class="empty">Waiting for the wake word.</div></main>
@@ -272,6 +299,9 @@ function row(cls, who, what) {
   const near = window.innerHeight + window.scrollY >= document.body.offsetHeight - 120;
   if (near) window.scrollTo(0, document.body.scrollHeight);
 }
+
+document.getElementById('talk').onclick = () =>
+  fetch('/talk', { method: 'POST' });
 
 const src = new EventSource('/events');
 src.onopen = () => liveEl.textContent = 'live';
@@ -318,7 +348,7 @@ mod tests {
     #[tokio::test]
     async fn no_watchers_before_anyone_connects() {
         std::env::set_var("IRA_UI", "off");
-        let ui = Ui::start().await;
+        let (ui, _talk) = Ui::start().await;
         assert_eq!(ui.watchers(), 0);
         // Sending into the void is a no-op, not an error.
         ui.send(Event::Heard { text: "hello".into() });
