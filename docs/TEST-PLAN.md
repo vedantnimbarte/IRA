@@ -86,6 +86,20 @@ synthetic corpus.
 rate, so the VAD test needs no resampling. It is the fixture that catches a dead
 VAD.
 
+**Multi-turn replays are built by concatenation**, not committed — they are large
+and trivially regenerable. Splice utterances with a gap of silence between them
+and replay the result:
+
+| Gap | What it exercises |
+|---|---|
+| Longer than the reply | The follow-up window: a second turn with no wake word |
+| Shorter than the reply | Barge-in: the next utterance overlaps the reply's tail |
+| Filled with low-level noise instead of silence | That the VAD threshold still gates the window |
+
+The gap has to be sized against the reply's own length, which is why the same
+file can demonstrate either behaviour — a gap 1 s too short turns a follow-up
+test into a barge-in test.
+
 Synthesising the latency corpus is already proven — Piper is in the repo and its
 output round-tripped correctly through whisper.cpp during the STT work:
 

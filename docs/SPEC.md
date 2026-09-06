@@ -73,9 +73,10 @@ audio frame except where marked otherwise.
 | Listening | `vad_silence && heard_speech` | Listening | `silence_ms += 32` |
 | Listening | `silence_ms >= 700` | Holding | Fresh cancel token; spawn turn; reset VAD; start turn timer |
 | Listening | `utterance_ms >= 20_000` | Holding | As above; log truncation |
-| Listening | `!heard_speech && 3_000 ms` | Idle | Discard utterance; **no sound** (a false wake must not announce itself) |
-| Holding | `barge_ms >= 250 && past grace` | Listening | Cancel token; interrupt TTS; reset VAD; seed utterance from full 1 s pre-roll; `heard_speech = true` |
-| Holding | reply done && tts idle | Listening † | Open follow-up window (P2). Falls through to Idle when it expires |
+| Listening | `!heard_speech && 3_000 ms` after a wake word | Idle | Discard utterance; **no sound** (a false wake must not announce itself) |
+| Listening | `!heard_speech && 2_000 ms` in a follow-up | Idle | Discard utterance; **no sound**. Shorter than the post-wake wait: a wake word is a promise to speak, a finished reply is not |
+| Holding | `barge_ms >= 250 && past grace` | Listening | Cancel token; log the turn as barged; interrupt TTS; reset VAD; seed utterance from full 1 s pre-roll; `heard_speech = true`; reset the turn clock |
+| Holding | reply done && tts idle | Listening | Log the turn; open the follow-up window; seed from pre-roll; reset the turn clock |
 | Holding | tool wants mutate | Confirming | Speak the confirmation question; start 6 s timer; hold the pending call |
 | Confirming | transcript ∈ YES | Holding | Execute the held call; resume the turn |
 | Confirming | transcript ∈ NO | Idle | Drop the call; say "Cancelled."; end the turn |
@@ -84,8 +85,12 @@ audio frame except where marked otherwise.
 | Confirming | `barge_in` | Listening | Drop the call. **Interrupting a confirmation is never consent** |
 | any | `job_complete` (P8) | unchanged | Completion tone now; speak the summary on next entry to Idle |
 
-† Before P2 this transition targets Idle. The follow-up window is the only change
-P2 makes to this table.
+The deadline stops applying the instant speech is heard, or a slow speaker gets
+cut off mid-sentence. `listening_next` in `main.rs` is that decision, extracted so
+the interaction between the three exits can be tested without a microphone.
+
+The follow-up window also covers the failure phrases: after "I didn't catch
+that", the floor is already open and the user can simply say it again.
 
 ### Confirmation grammar
 
@@ -161,7 +166,7 @@ directory.
 endpoint_ms        = 700
 barge_in_ms        = 250
 barge_in_grace_ms  = 300   # measured from first audio out, not turn start
-follow_up_ms       = 2000  # P2
+follow_up_ms       = 2000
 confirm_timeout_ms = 6000
 
 [wake]

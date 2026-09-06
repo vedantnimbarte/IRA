@@ -103,7 +103,7 @@ No state where IRA fails without saying so, or claims something untrue.
 **Exit:** every failure path produces audible output; no cancelled turn can speak.
 **Depends:** P0, for the grace-window fix.
 
-### P2 — Conversation shape
+### P2 — Conversation shape — *done*
 
 Stop making the user say a name before every sentence.
 
