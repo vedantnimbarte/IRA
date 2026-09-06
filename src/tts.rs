@@ -129,8 +129,10 @@ impl Tts {
                             carry = bytes.pop();
                         }
                         let samples: Vec<f32> = bytes
-                            .chunks_exact(2)
-                            .map(|p| i16::from_le_bytes([p[0], p[1]]) as f32 / 32768.0)
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
+                            .map(|p| i16::from_le_bytes(*p) as f32 / 32768.0)
                             .collect();
                         if !samples.is_empty() {
                             let now = started.elapsed().as_millis() as u64;
