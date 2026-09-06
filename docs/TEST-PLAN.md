@@ -4,7 +4,7 @@ The loop's value is a subjective property measured objectively. This document
 defines the corpus, the harness, the numbers and the manual scripts — and states
 plainly which parts cannot be automated and must be judged by a person.
 
-**Automated today:** 45 tests
+**Automated today:** 51 tests, on Windows and Linux in CI
 **State machine coverage:** the barge-in and listening predicates, the confirmation
 grammar and the tool gate; transitions still need the replay harness
 **Release gate:** one week of dogfood
@@ -32,7 +32,8 @@ shapes threaded between openWakeWord's three stages and Silero's recurrent state
 | Screen | The loop stalls on a closed or slow page; IRA promises a screen nobody is watching | 3 tests, plus end-to-end runs with a watcher attached, absent, and hung up mid-turn |
 | Background jobs | A long tool blocks the loop, or a job dies with the turn that asked | 1 test on the detach and the independent token, plus an end-to-end six-second job reported at the next idle |
 | Transcript | A reply containing a newline splits into two records; an unwritable path takes the conversation down | 3 tests |
-| **Another machine** | **Everything** | **None.** IRA has only ever been built and run here |
+| Documentation | Saying something the code stopped doing | 6 tests in `tests/docs.rs`, each proved against the defect it was written for |
+| **Another machine** | **Everything** | CI builds and tests on Linux. Nothing has ever *run* there: no microphone, no speaker, no models |
 | TTS queue | Playback not cleared on interrupt; drain detection wrong | None |
 | Failure paths | Silent failure — the current worst UX defect | None |
 
@@ -170,6 +171,18 @@ become the next question, including the first one. She does not resume the
 abandoned answer.
 **Phase:** every phase. This is the regression test for the product's core claim.
 
+### Documentation
+
+The docs drift silently, because drift is invisible to reading: a table row
+detached from its table renders as a stray line of pipes, a state diagram can
+show a transition that was never built, and a control character can turn a
+copy-paste command into one that does not exist. All three happened.
+
+`tests/docs.rs` checks the module map against `src/`, every `env::var` against
+the environment table, orphaned table rows, column counts, control characters
+and relative links. Each was proved by reintroducing the defect it exists for
+and confirming it fails.
+
 ### T-2 — Think out loud
 **Still expected to fail.** Semantic endpointing was deferred in P7; a 900 ms
 pause still ends the turn at `ENDPOINT_MS`. Raising `ENDPOINT_MS` trades this
@@ -258,13 +271,19 @@ of what matters, once the file-based frame source exists.
 
 | Gate | Runs | Blocks merge |
 |---|---|---|
-| `cargo test` | Every push | Yes |
-| `cargo clippy --all-targets` | Every push | Yes — currently clean, keep it there |
+| `cargo test` | Every push, Windows and Linux | Yes |
+| `cargo clippy --all-targets -- -D warnings` | Every push, both | Yes — a warning fails the build |
+| Documentation checks | Every push, as part of `cargo test` | Yes |
 | `cargo fmt --check` | Every push | **Not yet** — the tree has ~13 pre-existing diffs; needs one formatting commit before this can gate |
 | Loop tests via `IRA_AUDIO_FILE` | Every push, virtual clock | Yes, from P0 |
 | Latency benchmark, local STT | Nightly on the GPU machine | No — report a trend; a threshold here would flake on shared hardware |
 | Fault-injection suite | Every push | Yes, from P1 |
 | Manual scripts T-1, T-3, T-4 | Before each phase sign-off | Yes, by hand |
+
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs the matrix. The
+Linux leg is the only thing in this repository that has ever built IRA anywhere
+but one Windows machine, so it is doing double duty: gating pull requests, and
+being the first evidence that the code is portable at all.
 
 Tests requiring a live service stay skipped-by-default and self-describing,
 following the pattern already in the repo: the ONNX tests skip with a note when
