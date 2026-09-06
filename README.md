@@ -7,12 +7,16 @@
 
 <h1 align="center">IRA</h1>
 
-Duplex voice loop prototype for IRA. Wake word → VAD endpointing → STT → streaming
-LLM → streaming TTS, with barge-in.
+<p align="center">A voice assistant you can interrupt.</p>
 
-This exists to answer one question before anything else gets built: **does talking
-to it feel right?** If the turn-taking is wrong or the latency is bad, no amount of
-tools, memory or UI fixes it. Everything else in IRA is comparatively routine.
+Wake word → endpointing → speech-to-text → streaming model → streaming speech,
+with barge-in. It calls tools, asks before it changes anything, and shows you
+what it is doing on a screen.
+
+The bet is that **turn-taking is the feature**. Speech recognition has been good
+enough for years; what stays broken is being cut off when you pause to think,
+and having to wait out an answer you already know is wrong. A slower model that
+yields the floor correctly beats a smarter one that talks over you.
 
 ## Run
 
@@ -23,174 +27,250 @@ $env:GROQ_API_KEY = "gsk_..."
 cargo run --release
 ```
 
-On Linux or macOS, `./scripts/fetch-models.sh` does the same job. Untested:
-this has only ever been run on Windows.
+On Linux or macOS, `./scripts/fetch-models.sh` does the same job — though see
+[what has not been verified](#what-has-not-been-verified) before trusting it.
 
-Say **"hey Jarvis"**, wait for the chirp, talk. Interrupt her any time.
+Say **"hey Jarvis"**, wait for the chirp, talk. Interrupt her any time. Answer a
+follow-up without saying the wake word again.
+
+`cargo run --release -- doctor` checks models, microphone, keys and local
+engines before you talk to it. The fatal subset of those checks runs on every
+start-up, so a missing key stops the process rather than surfacing as silence
+three seconds into your first sentence.
 
 > **Wear headphones, or use press-to-talk.** There is no acoustic echo
-> cancellation yet, so on speakers the mic hears IRA's own voice and she
-> interrupts herself in a loop. `IRA_PTT=1` disarms voice barge-in and makes the
-> talk control the way to interrupt, which makes speakers usable at the cost of
-> hands-free interruption. See
+> cancellation, so on speakers the microphone hears IRA's own voice and she
+> interrupts herself. `IRA_PTT=1` disarms voice barge-in and makes the talk
+> control the way to interrupt — speakers work, at the cost of hands-free
+> interruption. Why it is not solved properly:
 > [decisions/0010](docs/decisions/0010-press-to-talk-before-echo-cancellation.md).
 
-## Wiring
+## How a turn works
 
 ```
-mic ─┬─ openWakeWord ──── Idle: is that the wake word?
-     ├─ Silero VAD ────── Listening: has the user stopped? (700 ms)
-     │                    Holding:   has the user started? (250 ms → barge-in)
-     └─ utterance buffer ─► Groq Whisper ─► Claude (streaming)
-                                                │ sentence at a time
-                                                ▼
-                                          Piper ─► rodio  (clear() = instant silence)
+        ┌──────────── Idle ─────────────┐
+        │   openWakeWord: 3-stage ONNX  │
+        └───────────────┬───────────────┘
+                        │ wake word, or POST /talk
+        ┌───────────────▼───────────────┐
+        │          Listening            │   Silero VAD, 32 ms chunks
+        │  pause 200 ms → start STT ────┼──► whisper (Groq, or local)
+        │  silence 700 ms → turn is over│    transcription overlaps the wait
+        └───────────────┬───────────────┘
+                        │ transcript in hand
+        ┌───────────────▼───────────────┐
+        │           Holding             │   thinking and speaking are one
+        │  model streams ──► sentences ─┼──► Piper ──► rodio
+        │  barge-in armed the whole time│    duck at a hint, cut when confirmed
+        └───────┬───────────────┬───────┘
+                │               │ a tool wants to change something
+                │               ▼
+                │        ┌─────────────┐
+                │        │ Confirming  │  spoken yes or no; anything else is no
+                │        └─────────────┘
+                │ reply done
+                ▼
+        floor stays open 2 s for a follow-up, then Idle
 ```
 
-| File | Job | Becomes |
-|---|---|---|
-| `audio.rs` | cpal capture, downmix, 16 kHz resample | `ira-audio` |
-| `wake.rs` | openWakeWord 3-model chain | `ira-wake` |
-| `vad.rs` | Silero v5, endpointing + barge-in | `ira-vad` |
-| `stt.rs` | Groq Whisper | `ira-stt` (lift Echo's local path in) |
-| `llm.rs` | Anthropic/OpenAI stream → sentences | `ira-brain` (Wingman as a library) |
-| `tts.rs` | Piper subprocess + rodio | `ira-tts` |
-| `main.rs` | state machine | `ira-daemon` |
+Everything above happens in **one process**. Barge-in works because a single
+process holds the microphone and the speaker at the same instant and shares one
+cancellation token across transcription, generation and playback — interrupting
+is one `cancel()` that drops the HTTP stream mid-flight and clears the audio
+queue in the same frame. That is why IRA is not assembled out of separate
+programs piped together, and it is the constraint every other decision bends
+around: [decisions/0001](docs/decisions/0001-audio-path-stays-in-one-process.md).
 
-## Docs
+| File | Job |
+|---|---|
+| `audio.rs` | cpal capture, downmix, 16 kHz resample; WAV replay for tests |
+| `wake.rs` | openWakeWord: mel → embedding → classifier |
+| `vad.rs` | Silero v5, endpointing and barge-in |
+| `stt.rs` | Transcription over HTTP, cloud or local |
+| `llm.rs` | Streaming generation, sentence splitting, tool loop |
+| `tool.rs` | The `Tool` trait, the registry, the confirmation gate |
+| `mcp.rs` | MCP servers adapted to that trait |
+| `ui.rs` | The screen and its event stream |
+| `main.rs` | The state machine |
+| `metrics.rs` · `doctor.rs` · `config.rs` · `transcript.rs` | Timing, preflight, `ira.toml`, the record |
 
-[docs/INDEX.md](docs/INDEX.md) is the map. In reading order:
-[PRD](docs/PRD.md) (what and why) &middot;
-[ROADMAP](docs/ROADMAP.md) (ten phases to v1.0) &middot;
-[ARCHITECTURE](docs/ARCHITECTURE.md) (how, and why it is shaped this way) &middot;
-[SPEC](docs/SPEC.md) (implementable detail) &middot;
-[TEST-PLAN](docs/TEST-PLAN.md) (how we know it works).
+## Tools
 
-Decisions are recorded individually under [docs/decisions/](docs/decisions/) --
-including the ones that were rejected, and what would change them.
+A tool is a Rust `impl Tool` or a line of `ira.toml`. The registry cannot tell
+them apart and neither can the model.
 
-## Knobs
+```toml
+[[mcp.server]]
+name      = "calendar"
+transport = "stdio"          # or "http"
+command   = "mcp-calendar"
+only      = ["list_events", "create_event"]
 
-Everything worth tuning is a `const` at the top of `main.rs`. Tune by ear, not by
-theory — these numbers are starting guesses, not measurements.
+# What IRA believes, regardless of what the server says about itself.
+# Anything unlisted is assumed to write, and asks first.
+[mcp.server.tools]
+list_events  = { mutates = false, latency = "fast" }
+create_event = { mutates = true,  latency = "slow", confirm = "Add that to your calendar?" }
+```
 
-| Const | Default | Symptom if wrong |
-|---|---|---|
-| `ENDPOINT_MS` | 700 | Too low: cuts you off mid-thought. Too high: feels sluggish. |
-| `BARGE_IN_MS` | 250 | Too low: a cough stops her. Too high: interrupting feels laggy. |
-| `BARGE_IN_GRACE_MS` | 300 | Too low: the tail of your question interrupts its own answer. |
-| wake threshold | 0.5 | Too low: fires on the TV. Too high: you repeat yourself. |
+Anything that changes state asks out loud first, and **only an explicit yes runs
+it** — silence, ambiguity, and interrupting the question are all refusals. A
+server's own description of a tool is never trusted for this, because a tool that
+calls itself harmless and is not would otherwise walk straight through the gate.
 
-Env overrides: `IRA_MODELS`, `IRA_WAKEWORD`, `IRA_VOICE`, `IRA_PIPER`,
-`IRA_STT_URL`, `IRA_LLM_URL`, `IRA_LLM_KEY`, `IRA_LLM_MODEL`,
-`IRA_AUDIO_FILE`, `IRA_SKIP_WAKE`, `IRA_TAIL_MS`, `IRA_CLOCK`, `IRA_CONFIG`,
-`IRA_UI`.
+`latency = "background"` detaches the work: IRA answers immediately, a soft pip
+sounds when it finishes, and the words wait until she next has the floor.
 
-While IRA runs there is a screen at <http://127.0.0.1:8180> — the live
-transcript, tool calls and results, full replies, and each turn's timings.
-`IRA_UI=off` turns it off. IRA only tells the model it has a screen while a page
-is actually open.
+## The screen
 
-`ira doctor` checks models, microphone, keys and local engines before you talk to
-it, and the same fatal checks run on every start-up.
+While IRA runs there is a page at <http://127.0.0.1:8180> — live transcript,
+tool calls and their results, replies in full, and every turn's timings. It is
+a browser tab rather than a window, which is a deliberate trade
+([decisions/0009](docs/decisions/0009-the-screen-is-a-served-page.md)).
 
-## OpenRouter, or any OpenAI-compatible brain
+`POST /talk` takes the floor, or interrupts if IRA is speaking. There is a button
+on the page; binding it to a real hotkey is your OS's job, not IRA's:
+
+```
+curl -X POST http://127.0.0.1:8180/talk
+```
+
+IRA only tells the model it has a screen while a page is actually open.
+`IRA_UI=off` disables it.
+
+## Swapping the brain
 
 Anthropic direct is the default. `IRA_LLM_URL` switches to the OpenAI
-chat-completions format, which OpenRouter, LM Studio, Ollama, vLLM and
-llama.cpp all speak:
+chat-completions format, which OpenRouter, LM Studio, Ollama, vLLM and llama.cpp
+all speak:
 
 ```powershell
 $env:IRA_LLM_URL   = "https://openrouter.ai/api/v1/chat/completions"
 $env:IRA_LLM_KEY   = "sk-or-..."
-$env:IRA_LLM_MODEL = "anthropic/claude-sonnet-4.5"   # OpenRouter's id, not Anthropic's
+$env:IRA_LLM_MODEL = "anthropic/claude-sonnet-4.5"   # the gateway's id, not Anthropic's
 ```
 
-`ANTHROPIC_API_KEY` is then unused. `IRA_LLM_MODEL` is required here because
-every gateway names models differently; `IRA_LLM_KEY` is not, since a local
-server generally wants no key.
-
-Whatever the model, keep it fast. Time-to-first-sentence is what you hear -- a
-reasoning model that thinks for four seconds before its first token feels broken
+Whatever the model, keep it fast. Time-to-first-sentence is what you hear — a
+reasoning model that deliberates four seconds before its first token feels broken
 in a voice loop no matter how good the answer is.
 
-## Local STT
+## Running offline
 
 whisper.cpp's `whisper-server` speaks the same multipart API as Groq, so going
 offline is a URL rather than a code path:
 
 ```powershell
-.\scriptsetch-models.ps1 -Whisper
+.\scripts\fetch-models.ps1 -Whisper
 ```
 
-Opt-in, because it is a bigger download than everything else here combined. It
-reads `nvidia-smi` and picks the build to match: an NVIDIA driver gets the
-cuBLAS 11.8 pack and `small.en`, anything else gets the CPU pack and `tiny.en`.
-Override either with `-Backend` / `-Model`. It prints the two lines to run:
+Opt-in, because it is a bigger download than everything else combined. It reads
+`nvidia-smi` and picks the build to match — an NVIDIA driver gets the cuBLAS 11.8
+pack and `small.en`, anything else the CPU pack and `tiny.en` — then prints the
+two lines to run. Numbers and trade-offs: [BASELINE.md](docs/BASELINE.md).
 
-```powershell
-.\whisper\whisper-server.exe -m .\models\ggml-small.en.bin --host 127.0.0.1 --port 8231
-$env:IRA_STT_URL = "http://127.0.0.1:8231/inference"
-```
+Wake word, endpointing and speech are always local. With `IRA_STT_URL` set, no
+audio leaves the machine at all. The model is the one stage that still needs the
+network.
 
-CUDA is backward compatible, so the 11.8 pack runs on a 12.x driver at the same
-speed for a tenth of the download. Cards newer than CUDA 11.8 (Blackwell) need
-`-Backend cuda12`.
+## Knobs
 
-`GROQ_API_KEY` is then unused. Measured on 8 CPU cores against 2.8 s of speech:
+Everything worth tuning is a `const` at the top of `main.rs`.
 
-| Engine | Latency | Notes |
+| Const | Default | Symptom if wrong |
 |---|---|---|
-| Groq `whisper-large-v3-turbo` | — | Fast, but needs the network and sends your voice off the machine |
-| `tiny.en`, 8 threads | ~750 ms | Offline. Fine on clear speech, drops proper nouns |
-| `base.en`, 8 threads | ~1.5 s | Noticeably sluggish in the loop |
+| `ENDPOINT_MS` | 700 | Too low: cuts you off mid-thought. Too high: sluggish. |
+| `SPECULATE_MS` | 200 | Transcription starts here. The saving is the gap to `ENDPOINT_MS`. |
+| `BARGE_IN_MS` | 250 | Too low: a cough stops her. Too high: interrupting feels laggy. |
+| `BARGE_IN_GRACE_MS` | 300 | Measured from her first sound, not from the start of the turn. |
+| `FOLLOW_UP_MS` | 2000 | How long the floor stays open with no wake word. |
+| `CONFIRM_TIMEOUT_MS` | 6000 | Silence in answer to a confirmation. Silence is not consent. |
+| wake threshold | 0.5 | Too low: fires on the TV. Too high: you repeat yourself. |
 
-That latency sits directly in the gap between you stopping and IRA starting, so
-pick by ear. On a CUDA machine the same server with a GPU build erases the gap;
-this box has integrated graphics, so the numbers above are CPU-only.
+Every environment variable is listed in
+[SPEC.md](docs/SPEC.md#environment-variables). The ones you are most likely to
+want: `IRA_STT_URL`, `IRA_LLM_URL`, `IRA_PTT`, `IRA_UI`, `IRA_CONFIG`,
+`IRA_TRANSCRIPT`.
 
-## Deliberate shortcuts
+## Docs
 
-Each is marked with a `ponytail:` comment at the site.
+[docs/INDEX.md](docs/INDEX.md) is the map. In reading order:
+[PRD](docs/PRD.md) (what and why) ·
+[ROADMAP](docs/ROADMAP.md) (ten phases, and where they got to) ·
+[ARCHITECTURE](docs/ARCHITECTURE.md) (how, and why it is shaped this way) ·
+[SPEC](docs/SPEC.md) (implementable detail) ·
+[BASELINE](docs/BASELINE.md) (measured latency) ·
+[TEST-PLAN](docs/TEST-PLAN.md) (how we know it works).
 
-| Shortcut | Ceiling | Upgrade when |
-|---|---|---|
-| No AEC, headphones assumed | Unusable on speakers | Before any demo not wearing headphones — `webrtc-audio-processing` |
-| Groq STT by default | Not private, dies offline | Set `IRA_STT_URL` -- local costs ~750 ms on CPU |
-| Cheap linear resampler | Slight aliasing | Only if measured word-error-rate suffers |
-| Piper respawn on barge-in | ~250 ms before she can speak again | If interruption recovery feels slow — keep a warm spare |
-| Fixed 8-turn history window | No real memory | Wire up kortex-memory |
-| VAD-only endpointing | Cuts off mid-thought pauses | Add a semantic turn model (smart-turn v2) |
+Decisions live individually under [docs/decisions/](docs/decisions/) — including
+the rejected ones, each with a section saying what would change it.
 
-## Wake word
+## What has not been verified
 
-`hey_jarvis` is a pretrained openWakeWord model, used here so the prototype runs
-today. A real "IRA" model is a Colab training run against the same three-stage
-chain — only `hey_jarvis_v0.1.onnx` changes, no code does.
+Kept here rather than buried, because it is the honest shape of the project.
 
-openWakeWord is Apache-2.0 and free commercially. Porcupine has a built-in
-"jarvis" keyword and is far less code, but its commercial licensing does not fit
-the plan.
+- **A live microphone.** Barge-in, the wake word, ducking, press-to-talk and the
+  follow-up window are all acoustic, and all of them have only ever been
+  exercised by replaying WAV files through the real pipeline.
+- **A real model.** Every measurement so far used a local stub, so
+  time-to-first-token has never been observed above zero. The latency work in
+  [BASELINE.md](docs/BASELINE.md) optimised the transcription half of a budget
+  whose model half is unmeasured.
+- **Another machine.** IRA has only ever been built and run on one Windows box.
+  The POSIX setup script parses and fetches models; its Piper download and
+  whisper.cpp build have never run.
+- **kortex-memory and Wingman.** The MCP adapter is built and tested against a
+  server written to attack it, but neither real integration has been connected.
 
 ## Tests
 
-`cargo test` — 10 tests, no network or mic needed.
+`cargo test` — 45 tests, no network, microphone or API key needed.
 
-Two run the real ONNX models and are the ones that matter: they check the tensor
-shapes threaded through openWakeWord's three stages and Silero's recurrent state
-carry. Get one wrong and you find out here instead of at 3am. They skip with a
-note if `models/` is empty, so a fresh clone still passes.
+They aim at failures that are **silent** rather than loud, because those are the
+ones that survive a code review:
 
-The rest cover what silently corrupts audio: resampler ratio, WAV header, and
-sentence splitting (which must not break on `3.50`).
+- Silero reporting no speech, ever. Feeding it 512 samples where it wants 576
+  runs without error and never fires, so endpointing quietly stops working — a
+  test that only checks "silence reads as silence" passes against a dead VAD.
+  `speech_reads_as_speech` plays a real recording, and is the one that would have
+  caught it.
+- Reading one model's SSE frames with the other's rules: no text, no exception,
+  IRA simply goes mute.
+- A tool from a server that describes itself as harmless walking through the
+  confirmation gate.
+- A sentence from an interrupted turn being spoken after the interruption.
 
-One more skips unless `IRA_STT_URL` points at a running whisper-server: it
-checks that a local engine accepts the WAV bytes `stt.rs` writes, which is the
-one thing a URL swap cannot be assumed to get right.
+Tests needing a real service skip with a note rather than fail, so a fresh clone
+passes: the ONNX ones when `models/` is empty, the local-STT one unless
+`IRA_STT_URL` is set.
 
-The loop itself is tuned by talking to it — there is no test for "feels right".
+Set `IRA_AUDIO_FILE` to replay a WAV instead of opening the microphone — that is
+how the loop itself is exercised, and how the latency numbers were measured.
+There is still no test for "feels right".
+
+## Wake word
+
+`hey_jarvis` is a pretrained openWakeWord model, used so this runs today. A real
+"IRA" model is a Colab training run against the same three-stage chain — only
+`hey_jarvis_v0.1.onnx` changes, no code does.
+
+openWakeWord is Apache-2.0 and free commercially. Porcupine has a built-in
+"jarvis" keyword and is far less code, but its commercial licensing does not fit.
 
 **Wake latency floor:** openWakeWord needs ~2.2 s of audio in its window before
-the classifier can fire at all (76 mel frames to the first embedding, then 16
-embeddings at 80 ms). In use the window is always full, so this only shows up in
-the first couple of seconds after start-up.
+the classifier can fire at all — 76 mel frames to reach the first embedding, then
+16 embeddings at 80 ms each. In use the window is always full, so this only shows
+up in the first couple of seconds after start-up.
+
+## Deliberate shortcuts
+
+Each is marked with a `ponytail:` comment where it lives.
+
+| Shortcut | Ceiling | Upgrade when |
+|---|---|---|
+| No echo cancellation | Headphones or press-to-talk | Someone reports the talk button is not enough |
+| Fixed 8-turn history | No real memory | kortex-memory over MCP |
+| VAD-only endpointing | Cuts off mid-thought pauses | A semantic turn model earns its false positives |
+| Cheap linear resampler | Slight aliasing | Only if word-error-rate measurably suffers |
+| Piper respawn on barge-in | ~250 ms before she can speak again | If interruption recovery feels slow — keep a warm spare |
+| Background jobs in memory | Lost on restart, and reported as lost | Jobs routinely outlive the process |
+| Tool results read as returned | Reads like a machine | Hand them to the model to phrase; it costs a turn nobody waits on |
