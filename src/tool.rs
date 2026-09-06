@@ -13,6 +13,7 @@
 //! -- is kortex-memory, which is an MCP server with sixteen tools, so it arrives
 //! at P4 through the adapter rather than being reimplemented in this file.
 
+use crate::ui::{Event, Ui};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -115,11 +116,14 @@ pub struct Confirm {
 pub struct Host {
     tools: HashMap<String, Arc<dyn Tool>>,
     confirm: mpsc::Sender<Confirm>,
+    /// The screen sees every call and every result. The loop only hears the
+    /// model's summary of them, which is the point of having a screen.
+    ui: Ui,
 }
 
 impl Host {
-    pub fn new(confirm: mpsc::Sender<Confirm>) -> Self {
-        Self { tools: HashMap::new(), confirm }
+    pub fn new(confirm: mpsc::Sender<Confirm>, ui: Ui) -> Self {
+        Self { tools: HashMap::new(), confirm, ui }
     }
 
     pub fn add(&mut self, tool: Arc<dyn Tool>) {
@@ -164,10 +168,26 @@ impl Host {
             }
         }
 
-        match tokio::time::timeout(spec.latency.budget(), tool.call(args, ctx)).await {
+        self.ui.send(Event::Tool {
+            name: name.to_string(),
+            args: args.to_string(),
+        });
+
+        let out = match tokio::time::timeout(spec.latency.budget(), tool.call(args, ctx)).await {
             Ok(r) => r,
             Err(_) => Err(anyhow!("{name} outstayed its budget")),
-        }
+        };
+
+        self.ui.send(match &out {
+            Ok(ToolOutcome::Answer(t)) => Event::Result {
+                name: name.into(),
+                ok: true,
+                text: t.clone(),
+            },
+            Ok(_) => Event::Result { name: name.into(), ok: true, text: "done".into() },
+            Err(e) => Event::Result { name: name.into(), ok: false, text: e.to_string() },
+        });
+        out
     }
 }
 
@@ -266,7 +286,7 @@ mod tests {
     #[tokio::test]
     async fn the_clock_answers_without_confirmation() {
         let (tx, mut rx) = mpsc::channel(1);
-        let mut host = Host::new(tx);
+        let mut host = Host::new(tx, Ui::disabled());
         host.add(Arc::new(Clock));
 
         let out = host.call("clock", json!({}), &ctx()).await.unwrap();
@@ -278,7 +298,7 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_tool_is_an_error_not_a_panic() {
         let (tx, _rx) = mpsc::channel(1);
-        let host = Host::new(tx);
+        let host = Host::new(tx, Ui::disabled());
         assert!(host.call("nope", json!({}), &ctx()).await.is_err());
     }
 
@@ -307,7 +327,7 @@ mod tests {
     #[tokio::test]
     async fn a_tool_over_its_budget_is_abandoned() {
         let (tx, _rx) = mpsc::channel(1);
-        let mut host = Host::new(tx);
+        let mut host = Host::new(tx, Ui::disabled());
         host.add(Arc::new(Overrun));
         let err = host
             .call("overrun", json!({}), &ctx())
@@ -342,7 +362,7 @@ mod tests {
     async fn a_refused_tool_does_not_run() {
         let ran = Arc::new(AtomicBool::new(false));
         let (tx, mut rx) = mpsc::channel::<Confirm>(1);
-        let mut host = Host::new(tx);
+        let mut host = Host::new(tx, Ui::disabled());
         host.add(Arc::new(Writer(ran.clone())));
 
         // Stand in for the loop: hear the question, answer no.
@@ -366,7 +386,7 @@ mod tests {
     async fn a_confirmed_tool_runs() {
         let ran = Arc::new(AtomicBool::new(false));
         let (tx, mut rx) = mpsc::channel::<Confirm>(1);
-        let mut host = Host::new(tx);
+        let mut host = Host::new(tx, Ui::disabled());
         host.add(Arc::new(Writer(ran.clone())));
 
         tokio::spawn(async move {
@@ -383,7 +403,7 @@ mod tests {
     async fn a_dropped_confirmation_is_not_consent() {
         let ran = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel::<Confirm>(1);
-        let mut host = Host::new(tx);
+        let mut host = Host::new(tx, Ui::disabled());
         host.add(Arc::new(Writer(ran.clone())));
 
         // The loop goes away mid-question.

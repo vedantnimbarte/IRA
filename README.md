@@ -77,7 +77,13 @@ theory — these numbers are starting guesses, not measurements.
 
 Env overrides: `IRA_MODELS`, `IRA_WAKEWORD`, `IRA_VOICE`, `IRA_PIPER`,
 `IRA_STT_URL`, `IRA_LLM_URL`, `IRA_LLM_KEY`, `IRA_LLM_MODEL`,
-`IRA_AUDIO_FILE`, `IRA_SKIP_WAKE`, `IRA_TAIL_MS`, `IRA_CLOCK`.
+`IRA_AUDIO_FILE`, `IRA_SKIP_WAKE`, `IRA_TAIL_MS`, `IRA_CLOCK`, `IRA_CONFIG`,
+`IRA_UI`.
+
+While IRA runs there is a screen at <http://127.0.0.1:8180> — the live
+transcript, tool calls and results, full replies, and each turn's timings.
+`IRA_UI=off` turns it off. IRA only tells the model it has a screen while a page
+is actually open.
 
 `ira doctor` checks models, microphone, keys and local engines before you talk to
 it, and the same fatal checks run on every start-up.

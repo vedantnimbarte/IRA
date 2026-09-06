@@ -4,7 +4,7 @@ The loop's value is a subjective property measured objectively. This document
 defines the corpus, the harness, the numbers and the manual scripts — and states
 plainly which parts cannot be automated and must be judged by a person.
 
-**Automated today:** 36 tests
+**Automated today:** 39 tests
 **State machine coverage:** the barge-in and listening predicates, the confirmation
 grammar and the tool gate; transitions still need the replay harness
 **Release gate:** one week of dogfood
@@ -29,6 +29,7 @@ shapes threaded between openWakeWord's three stages and Silero's recurrent state
 | Confirmation gate | A misheard sentence runs a mutating tool | 5 tests: refusal, consent, ambiguity, a dropped channel, and the budget |
 | Tool loop | Arguments mis-accumulated across streaming frames | Verified end to end against a stub in both wire formats |
 | MCP policy | A server's own claim about itself is believed | 4 tests, plus an end-to-end run against a server that describes a destructive tool as harmless |
+| Screen | The loop stalls on a closed or slow page; IRA promises a screen nobody is watching | 3 tests, plus end-to-end runs with a watcher attached, absent, and hung up mid-turn |
 | TTS queue | Playback not cleared on interrupt; drain detection wrong | None |
 | Failure paths | Silent failure — the current worst UX defect | None |
 

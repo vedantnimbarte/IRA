@@ -28,12 +28,28 @@ pub const MODEL: &str = "claude-sonnet-5";
 
 /// Brevity is the whole personality. An assistant that reads paragraphs aloud is
 /// unusable no matter how good the answer is.
-pub const SYSTEM: &str = "You are IRA, a voice assistant. You are being spoken to \
+const SYSTEM_HEAD: &str = "You are IRA, a voice assistant. You are being spoken to \
 and your reply is read aloud, so answer in at most two short sentences. No \
-markdown, no lists, no code blocks, no emoji. If the answer genuinely needs more \
-room, give the one-line version and offer to go into detail if they ask. When you \
-need a tool, call it without saying anything first -- speech cannot be taken back, \
-so never start a sentence you might have to abandon.";
+markdown, no lists, no code blocks, no emoji. ";
+
+/// Said only when a page is actually open. IRA once shipped a prompt telling it
+/// to claim it had "put the detail on screen" when there was no screen at all;
+/// promising one nobody is watching is the same lie with extra steps.
+const SYSTEM_SCREEN: &str = "If the answer needs more room, say the short version \
+aloud and tell them the rest is on the screen -- your full reply is shown there. ";
+
+const SYSTEM_NO_SCREEN: &str = "If the answer genuinely needs more room, give the \
+one-line version and offer to go into detail if they ask. ";
+
+const SYSTEM_TAIL: &str = "When you need a tool, call it without saying anything \
+first -- speech cannot be taken back, so never start a sentence you might have to \
+abandon.";
+
+/// The system prompt, which depends on whether anyone is watching the screen.
+pub fn system(screen: bool) -> String {
+    let middle = if screen { SYSTEM_SCREEN } else { SYSTEM_NO_SCREEN };
+    format!("{SYSTEM_HEAD}{middle}{SYSTEM_TAIL}")
+}
 
 /// Spoken while a `Slow` tool runs. Fixed, because a filler that needs a model
 /// round trip to produce defeats its own purpose.
@@ -204,6 +220,10 @@ fn delta_text(v: &serde_json::Value, openai: bool) -> Option<&str> {
 }
 
 /// Streams the reply, sending each finished sentence to `out`.
+///
+/// Wide because a turn genuinely depends on all of it. A context struct would
+/// move the arguments rather than remove them.
+#[allow(clippy::too_many_arguments)]
 /// Returns the full text. Cancelling drops the HTTP stream mid-flight.
 pub async fn stream(
     client: &reqwest::Client,
@@ -213,15 +233,17 @@ pub async fn stream(
     cancel: CancellationToken,
     timings: &Timings,
     host: &Host,
+    screen: bool,
 ) -> Result<String> {
     let url = std::env::var("IRA_LLM_URL").ok();
     let openai = url.is_some();
+    let system = system(screen);
 
     let mut messages = Vec::new();
     // OpenAI carries the system prompt as the first message; Anthropic takes it
     // as a top-level field.
     if openai {
-        messages.push(json!({"role": "system", "content": SYSTEM}));
+        messages.push(json!({"role": "system", "content": system}));
     }
     for (u, a) in history {
         messages.push(json!({"role": "user", "content": u}));
@@ -234,7 +256,8 @@ pub async fn stream(
 
     for round in 0..MAX_ROUNDS {
         let r = one_round(
-            client, &url, openai, &messages, tools.as_ref(), &out, &cancel, timings, round == 0,
+            client, &url, openai, &system, &messages, tools.as_ref(), &out, &cancel, timings,
+            round == 0,
         )
         .await?;
 
@@ -308,6 +331,7 @@ async fn one_round(
     client: &reqwest::Client,
     url: &Option<String>,
     openai: bool,
+    system: &str,
     messages: &[Value],
     tools: Option<&Vec<Value>>,
     out: &mpsc::Sender<(String, CancellationToken)>,
@@ -322,7 +346,7 @@ async fn one_round(
         "messages": messages,
     });
     if !openai {
-        body["system"] = SYSTEM.into();
+        body["system"] = system.into();
     }
     if let Some(tools) = tools {
         body["tools"] = json!(tools);

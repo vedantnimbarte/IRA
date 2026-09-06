@@ -81,6 +81,27 @@ impl Turn {
     }
 }
 
+impl Turn {
+    /// The same numbers as the log line, for the screen.
+    pub fn event(&self, first_audio_ms: Option<u64>, barged: bool) -> crate::ui::Event {
+        let t = &self.timings;
+        let stt_ms = t.stt_ms.load(Ordering::Relaxed);
+        let ttft_ms = t.ttft_ms.load(Ordering::Relaxed);
+        crate::ui::Event::Turn {
+            id: self.id,
+            total_ms: first_audio_ms.unwrap_or(0),
+            stt_ms,
+            ttft_ms,
+            tts_ms: first_audio_ms
+                .map(|a| a.saturating_sub(stt_ms + ttft_ms))
+                .unwrap_or(0),
+            tool_ms: t.tool_ms.load(Ordering::Relaxed),
+            tools: t.tool_calls.load(Ordering::Relaxed),
+            barged,
+        }
+    }
+}
+
 /// Which STT backend a turn used, for the log line. Local means no audio left
 /// the machine.
 pub fn stt_backend() -> &'static str {

@@ -55,6 +55,7 @@ context, the decision, its consequences, and what would change it.
 | [0006](decisions/0006-background-jobs-return-an-id.md) | Background jobs return an id; no queue, no database | accepted |
 | [0007](decisions/0007-wingman-over-http-not-as-a-library.md) | Wingman over HTTP, not as a library dependency | proposed |
 | [0008](decisions/0008-rejected-assembling-ira-from-echo-and-wingman.md) | Assembling IRA from Echo and Wingman | rejected |
+| [0009](decisions/0009-the-screen-is-a-served-page.md) | The screen is a page IRA serves, not a window it owns | accepted |
 
 ## Looking for something specific?
 
