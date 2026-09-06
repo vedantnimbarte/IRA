@@ -147,7 +147,10 @@ directory.
 | `IRA_LLM_MODEL` | `claude-sonnet-5` | Required with `IRA_LLM_URL` — gateways name models differently |
 | `ANTHROPIC_API_KEY` | *required\** | \*Unless `IRA_LLM_URL` is set |
 | `IRA_CONFIG` | `ira.toml` | *P4* — tool and server configuration |
-| `IRA_AUDIO_FILE` | *unset* | *P0* — replay a WAV instead of opening the mic (see [TEST-PLAN.md](TEST-PLAN.md)) |
+| `IRA_AUDIO_FILE` | *unset* | Replay a WAV instead of opening the mic (see [TEST-PLAN.md](TEST-PLAN.md)) |
+| `IRA_CLOCK` | *unset* | `virtual` drops replay pacing, for CI |
+| `IRA_TAIL_MS` | `3000` | Silence appended after a replayed file. The model's round trip happens inside this window, so a benchmark wanting the whole reply needs more |
+| `IRA_SKIP_WAKE` | *unset* | Start in Listening. openWakeWord does not fire on synthesised speech, so a Piper corpus never gets past Idle |
 | `RUST_LOG` | `ira=info` | Must match the crate name; a rename silently disables logging |
 
 ### `ira.toml` — new at P4
@@ -222,6 +225,20 @@ tracing::info!(
 field exists to explain a bad `total_ms`. Report p50 and p95 over a run, never a
 mean — the tail is what users remember, and one 4-second turn is more damaging
 than twenty 900 ms ones are good.
+
+## VAD input contract
+
+Silero v5's ONNX takes **576 samples per step, not 512**: the 64 samples
+preceding the chunk are prepended as context, exactly as silero-vad's own Python
+wrapper does. `vad.rs` keeps the tail of each chunk and zeroes it on `reset()`.
+
+This is not optional and it fails silently. The input shape is dynamic, so a
+bare 512 runs without error and reports no speech under any condition —
+endpointing never fires, no turn ever completes, and nothing in the logs says
+why. Any test asserting only "silence reads as silence" passes against a VAD in
+that state, which is how it went unnoticed. `speech_reads_as_speech` in `vad.rs`
+is the test that catches it, and it needs the real speech fixture at
+`corpus/speech-16k.wav`.
 
 ## Sentence splitting
 

@@ -31,6 +31,12 @@ pub struct Tts {
     stdin: Option<ChildStdin>,
     /// Millis since process start when piper last produced audio bytes.
     last_audio: Arc<AtomicU64>,
+    /// Millis since process start when audio first reached the speaker for the
+    /// current turn, or 0 for "nothing yet". The barge-in grace window is
+    /// measured from here rather than from the start of the turn: STT and the
+    /// model can spend the whole window before IRA has said a word, which left
+    /// the grace protecting nothing.
+    first_audio: Arc<AtomicU64>,
     started: Instant,
     piper: PathBuf,
     voice: PathBuf,
@@ -59,6 +65,7 @@ impl Tts {
             child: None,
             stdin: None,
             last_audio: Arc::new(AtomicU64::new(0)),
+            first_audio: Arc::new(AtomicU64::new(0)),
             started: Instant::now(),
             piper: piper.to_path_buf(),
             voice: voice.to_path_buf(),
@@ -86,6 +93,7 @@ impl Tts {
 
         let sink = self.sink.clone();
         let last = self.last_audio.clone();
+        let first = self.first_audio.clone();
         let started = self.started;
         let sr = self.sample_rate;
 
@@ -112,7 +120,16 @@ impl Tts {
                             .map(|p| i16::from_le_bytes([p[0], p[1]]) as f32 / 32768.0)
                             .collect();
                         if !samples.is_empty() {
-                            last.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+                            let now = started.elapsed().as_millis() as u64;
+                            last.store(now, Ordering::Relaxed);
+                            // Only the first sample of a turn wins; 0 means the
+                            // turn has produced no sound yet.
+                            let _ = first.compare_exchange(
+                                0,
+                                now.max(1),
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                            );
                             sink.append(SamplesBuffer::new(mono(), sr, samples));
                         }
                     }
@@ -130,6 +147,24 @@ impl Tts {
         self.last_audio
             .store(self.started.elapsed().as_millis() as u64, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Millis since this `Tts` was created. The clock the other timings share.
+    pub fn elapsed_ms(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+
+    /// Millis since start-up when this turn first made a sound, if it has.
+    pub fn first_audio_ms(&self) -> Option<u64> {
+        match self.first_audio.load(Ordering::Relaxed) {
+            0 => None,
+            ms => Some(ms),
+        }
+    }
+
+    /// Called when IRA takes the floor, so `first_audio_ms` measures this turn.
+    pub fn begin_turn(&self) {
+        self.first_audio.store(0, Ordering::Relaxed);
     }
 
     /// Barge-in: silence immediately, then discard piper's in-flight work.
@@ -158,15 +193,30 @@ impl Tts {
 
     /// Short rising blip so you know the wake word landed before IRA speaks.
     pub fn chirp(&self) {
+        self.tone(&[660.0, 880.0], 0.18);
+    }
+
+    /// Falling two-tone for a failure IRA could not say out loud.
+    ///
+    /// This exists because TTS cannot announce its own death: if piper is gone,
+    /// every spoken error message is also gone, and the user gets the silence
+    /// that this whole change is meant to remove. Falling and quieter than the
+    /// wake chirp, so the two are never confused with your back to the machine.
+    pub fn error_tone(&self) {
+        self.tone(&[440.0, 330.0], 0.14);
+    }
+
+    /// A sequence of 40 ms tones, each faded in and out so it clicks rather
+    /// than pops.
+    fn tone(&self, freqs: &[f32], gain: f32) {
         const SR: u32 = 24_000;
-        let mut s = Vec::with_capacity(SR as usize / 10);
-        for freq in [660.0f32, 880.0] {
-            let n = SR as usize / 25; // 40 ms per tone
+        let n = SR as usize / 25; // 40 ms
+        let mut s = Vec::with_capacity(n * freqs.len());
+        for &freq in freqs {
             for k in 0..n {
                 let t = k as f32 / SR as f32;
-                // Fade each tone in and out so it clicks rather than pops.
                 let env = (k as f32 / n as f32 * std::f32::consts::PI).sin();
-                s.push((t * freq * std::f32::consts::TAU).sin() * env * 0.18);
+                s.push((t * freq * std::f32::consts::TAU).sin() * env * gain);
             }
         }
         let sr = NonZero::new(SR).expect("nonzero");
