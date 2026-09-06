@@ -242,6 +242,15 @@ impl Tts {
         self.tone(&[660.0, 880.0], 0.18);
     }
 
+    /// A single soft pip: something you asked for a while ago has finished.
+    ///
+    /// Deliberately not speech. It fires the moment the job lands, which may be
+    /// while you are mid-sentence with someone else; the words wait until IRA
+    /// has the floor legitimately.
+    pub fn pip(&self) {
+        self.tone(&[880.0], 0.12);
+    }
+
     /// Falling two-tone for a failure IRA could not say out loud.
     ///
     /// This exists because TTS cannot announce its own death: if piper is gone,

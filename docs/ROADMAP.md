@@ -236,17 +236,30 @@ older baseline: median `total_ms` 1667 → 1145. The saving lands on
 **Depends:** P0 — and this is what P0 was for. The change is invisible without
 the `turn` line, and could not have been argued for without a number.
 
-### P8 — Background jobs and Wingman
+### P8 — Background jobs and Wingman — *mostly done*
 
 Tools that take minutes, not seconds.
 
-- `Started(JobId)` plumbing; a `HashMap<JobId, JoinHandle>` is enough
-- Proactive speech on completion — IRA speaks with no wake word for the first time
-- Wingman via `serve` HTTP or as a library dependency (decide here, see
-  [0007](decisions/0007-wingman-over-http-not-as-a-library.md))
+- `Started(JobId)`: a tool declaring `latency = "background"` is detached by the
+  host and answered for immediately, so the loop takes the next turn while it
+  runs. Its cancellation token is its own — interrupting the sentence that asked
+  is not a reason to abandon work already agreed to
+- Proactive speech: a pip the instant a job lands, the words at the next `Idle`.
+  See [0011](decisions/0011-a-tone-now-and-words-when-idle.md)
+- Jobs lost at shutdown are counted and said out loud
+- ~~Wingman~~ **not connected.** Nothing in IRA is Wingman-specific: the
+  background machinery is reached by any MCP tool through one line of
+  `ira.toml`. Wingman is not an MCP server, so it still needs its `serve` HTTP
+  surface bridged — the same gap as kortex-memory, and for the same reason
 
 **Exit:** a coding task issued by voice, reported when it finishes.
-**Depends:** P3, P4, and the proactive-speech decision.
+**Met in mechanism**, against a stub MCP server declaring a six-second
+`run_build`: IRA answered "I have started the build" without waiting, returned
+to Idle, then reported "Build passed. Three tests failed in the parser." when it
+landed. Not met against Wingman itself, which has never been run.
+
+**Depends:** P3, P4, and the proactive-speech decision — which
+[0011](decisions/0011-a-tone-now-and-words-when-idle.md) now settles.
 
 ### P9 — v1.0 hardening
 
