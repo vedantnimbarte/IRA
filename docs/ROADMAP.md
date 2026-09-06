@@ -116,7 +116,7 @@ Stop making the user say a name before every sentence.
 Cheapest item on the roadmap — one state transition — and among the most
 noticeable.
 
-### P3 — Tool foundation
+### P3 — Tool foundation — *done*
 
 Tools stop being hypothetical; one works end to end.
 
@@ -126,7 +126,10 @@ Tools stop being hypothetical; one works end to end.
 - Filler speech for `Slow` tools
 - New `Confirming` state for `mutates` tools
 
-**Exit:** memory recall working end to end, including one confirmed write.
+**Exit:** a tool called and answered end to end, and a mutating tool confirmed.
+Memory moved to P4 once kortex-memory turned out to be an MCP server — see the
+open questions below. The clock ships instead: the one tool worth keeping
+in-process rather than spawning a subprocess to read.
 **Depends:** P1. `Confirming` is a state-machine change and should not be stacked
 on a known race.
 **Risk:** spoken sentences cannot be unspoken, so the prompt must enforce
@@ -138,6 +141,8 @@ New tools arrive as config, not code.
 
 - One adapter implementing `Tool`, lifting `wingman-mcp` (rmcp, stdio +
   Streamable-HTTP)
+- kortex-memory as the first server, which delivers FR-15 (recall across
+  sessions) — it speaks both stdio and HTTP/SSE
 - `ira.toml` server list, shaped like Wingman's so entries copy between them
 - Description truncation; `mutates` resolved from our config only
 
@@ -236,7 +241,7 @@ table with real per-stage numbers.
 | Question | Why it matters | Blocks |
 |---|---|---|
 | When a background job finishes, how does IRA tell you? | Speaking unprompted is a capability IRA has never had. Recommendation: earcon at completion, spoken summary when next Idle. | P8 |
-| Does kortex-memory exist? | `main.rs:212` names it as the replacement for the fixed 8-turn window, but there is no such repository on this machine. Either it lives elsewhere, or P3's memory tool begins by building it. | P3 scoping |
+| ~~Does kortex-memory exist?~~ **Answered: yes.** | [vedantnimbarte/kortex-memory](https://github.com/vedantnimbarte/kortex-memory) — a Python MCP server, sixteen tools, stdio and HTTP/SSE, backed by Postgres + pgvector, Redis and MinIO. It reaches IRA through the P4 adapter, so memory is a P4 integration and IRA implements none of it. Open follow-on: sixteen tool schemas is a lot of context to advertise in a latency-critical loop, so P4 likely needs to select a subset. | ~~P3~~ P4 |
 | Wingman as a library, or over HTTP? | A library dependency pulls 16 crates in for one call site. Recommendation: HTTP first. | P8 |
 | Which UI framework? | Tauri is the in-house precedent from Echo; an overlay is lighter and more glanceable. | P5 |
 

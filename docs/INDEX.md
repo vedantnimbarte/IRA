@@ -79,6 +79,6 @@ about immediately:
 
 - **Proactive speech.** When a background job finishes, IRA must speak with no wake
   word for the first time. Blocks P8.
-- **kortex-memory does not exist in this workspace.** `main.rs:212` names it as the
-  replacement for the fixed 8-turn history window. Until its location is known, P3's
-  size is unknown.
+- **kortex-memory is an MCP server**, so memory arrives at P4 through the adapter
+  rather than being built into IRA. Its sixteen tool schemas may be more context
+  than a voice turn should carry, which P4 has to decide.

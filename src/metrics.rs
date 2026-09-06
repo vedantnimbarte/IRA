@@ -17,8 +17,10 @@ use std::sync::Arc;
 pub struct Timings {
     pub stt_ms: AtomicU64,
     pub ttft_ms: AtomicU64,
-    /// Stays 0 until tools land in P3.
+    /// Time spent inside tools, summed over the turn.
     pub tool_ms: AtomicU64,
+    /// How many tools the turn called.
+    pub tool_calls: AtomicU64,
 }
 
 impl Timings {
@@ -69,10 +71,10 @@ impl Turn {
             // NFR-1. Absent when nothing was ever spoken.
             total_ms = first_audio_ms.unwrap_or(0),
             tool_ms = t.tool_ms.load(Ordering::Relaxed),
+            tools = t.tool_calls.load(Ordering::Relaxed),
             spoke = first_audio_ms.is_some(),
             stt_backend,
             llm_model = model,
-            tools = 0,
             barged,
             "turn"
         );

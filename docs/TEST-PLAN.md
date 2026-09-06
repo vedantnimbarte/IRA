@@ -4,8 +4,9 @@ The loop's value is a subjective property measured objectively. This document
 defines the corpus, the harness, the numbers and the manual scripts — and states
 plainly which parts cannot be automated and must be judged by a person.
 
-**Automated today:** 20 tests
-**State machine coverage:** the barge-in predicate; transitions still need the replay harness
+**Automated today:** 29 tests
+**State machine coverage:** the barge-in and listening predicates, the confirmation
+grammar and the tool gate; transitions still need the replay harness
 **Release gate:** one week of dogfood
 
 ## The coverage that is missing
@@ -25,6 +26,8 @@ shapes threaded between openWakeWord's three stages and Silero's recurrent state
 | LLM wire formats | Reading one format's frames with the other's rules → IRA goes mute | 1 test |
 | **State machine** | **Every turn-taking behaviour the product exists for** | Replay harness exists; transitions still uncovered |
 | Barge-in | Interruption ignored, or a cancelled turn still speaks | 2 tests (the predicate) |
+| Confirmation gate | A misheard sentence runs a mutating tool | 5 tests: refusal, consent, ambiguity, a dropped channel, and the budget |
+| Tool loop | Arguments mis-accumulated across streaming frames | Verified end to end against a stub in both wire formats |
 | TTS queue | Playback not cleared on interrupt; drain detection wrong | None |
 | Failure paths | Silent failure — the current worst UX defect | None |
 

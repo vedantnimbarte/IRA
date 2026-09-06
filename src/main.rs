@@ -18,6 +18,7 @@ mod doctor;
 mod llm;
 mod metrics;
 mod stt;
+mod tool;
 mod tts;
 mod vad;
 mod wake;
@@ -28,13 +29,17 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 /// Silence after speech that ends the user's turn.
 const ENDPOINT_MS: u64 = 700;
 /// A wake word with no speech after it was a false trigger.
 const NO_SPEECH_TIMEOUT_MS: u64 = 3_000;
+/// How long IRA waits for a spoken yes or no before treating silence as no.
+/// Generous, because being asked a question and then cut off is worse than
+/// waiting: the alternative to patience here is doing something unasked.
+const CONFIRM_TIMEOUT_MS: u64 = 6_000;
 /// How long the floor stays open after a reply, so a follow-up needs no wake
 /// word. Shorter than the post-wake timeout: after a wake word the user has
 /// announced they are about to speak and deserves patience, whereas holding the
@@ -55,6 +60,13 @@ const BARGE_IN_MS: u64 = 250;
 /// nothing.
 const BARGE_IN_GRACE_MS: u64 = 300;
 
+/// The three waits are meant to differ, and in this order: a pending question
+/// gets the most patience, a wake word next, a follow-up the least. Checked at
+/// compile time because reordering them is a silent change in how IRA feels,
+/// with nothing to fail.
+const _: () = assert!(FOLLOW_UP_MS < NO_SPEECH_TIMEOUT_MS);
+const _: () = assert!(NO_SPEECH_TIMEOUT_MS < CONFIRM_TIMEOUT_MS);
+
 const PRE_ROLL: usize = audio::SR as usize; // 1 s
 /// Audio kept from before the wake word fired, so a fast "IRA, what time is it"
 /// does not lose the "what".
@@ -64,6 +76,7 @@ const PRE_ROLL_KEEP: usize = audio::SR as usize * 2 / 5; // 400 ms
 /// report itself, and a failure the user cannot hear is the same as a crash.
 const SAY_STT_FAILED: &str = "I didn't catch that.";
 const SAY_LLM_FAILED: &str = "I'm having trouble thinking right now.";
+const SAY_CANCELLED: &str = "Cancelled.";
 
 #[derive(Debug, PartialEq)]
 enum State {
@@ -71,6 +84,10 @@ enum State {
     Listening,
     /// Thinking and speaking are one state: IRA has the floor, barge-in armed.
     Holding,
+    /// A tool wants to change something and IRA has asked whether to. A state
+    /// rather than a helper because a refusal must end the turn rather than
+    /// start a new one, and because only yes or no is an answer here.
+    Confirming,
 }
 
 /// Which stage failed, so the loop can say the right thing without a round trip.
@@ -81,6 +98,8 @@ enum Fail {
 
 enum Turn {
     Heard(String),
+    /// What the user said in answer to a confirmation question.
+    Confirmed(String),
     Done { user: String, reply: String },
     /// Transcription returned nothing -- almost always noise after a false wake.
     Empty,
@@ -102,18 +121,38 @@ enum Next {
 ///
 /// Extracted from the loop because the three exits interact: the no-speech
 /// deadline must stop applying the instant speech is heard, or a slow speaker
-/// gets cut off, and the deadline itself depends on whether the user announced
-/// themselves with a wake word or is simply continuing a conversation.
-fn listening_next(heard_speech: bool, silence_ms: u64, utterance_ms: u64, follow_up: bool) -> Next {
+/// gets cut off. The deadline is a parameter because three states wait for
+/// speech with different amounts of patience -- after a wake word, during a
+/// follow-up window, and while a confirmation is pending.
+fn listening_next(
+    heard_speech: bool,
+    silence_ms: u64,
+    utterance_ms: u64,
+    no_speech_deadline_ms: u64,
+) -> Next {
     if !heard_speech {
-        let deadline = if follow_up { FOLLOW_UP_MS } else { NO_SPEECH_TIMEOUT_MS };
-        return if utterance_ms >= deadline { Next::GiveUp } else { Next::Wait };
+        return if utterance_ms >= no_speech_deadline_ms {
+            Next::GiveUp
+        } else {
+            Next::Wait
+        };
     }
     if silence_ms >= ENDPOINT_MS || utterance_ms >= MAX_UTTERANCE_MS {
         Next::Answer
     } else {
         Next::Wait
     }
+}
+
+/// Refuses a pending confirmation and ends the turn that asked.
+///
+/// Every path out of Confirming that is not an explicit yes comes through here,
+/// so there is exactly one place where "not consent" is decided.
+fn deny(pending: &mut Option<oneshot::Sender<bool>>, cancel: &CancellationToken) {
+    if let Some(tx) = pending.take() {
+        let _ = tx.send(false);
+    }
+    cancel.cancel();
 }
 
 /// A sentence may only be spoken while the turn that produced it still holds
@@ -169,6 +208,17 @@ async fn main() -> Result<()> {
     // the TTS handle. Speaking starts before the model finishes writing.
     let (speech_tx, mut speech_rx) = mpsc::channel::<(String, CancellationToken)>(32);
 
+    // Tools. Only the clock is built in: memory is kortex-memory, which is an
+    // MCP server, so it arrives through the P4 adapter rather than being
+    // reimplemented here.
+    let (confirm_tx, mut confirm_rx) = mpsc::channel::<tool::Confirm>(4);
+    let host = {
+        let mut h = tool::Host::new(confirm_tx);
+        h.add(Arc::new(tool::Clock));
+        Arc::new(h)
+    };
+    tracing::info!(tools = host.specs().len(), "tool registry");
+
     let stt_backend = metrics::stt_backend();
     let llm_model = std::env::var("IRA_LLM_MODEL").unwrap_or_else(|_| llm::MODEL.to_string());
 
@@ -197,6 +247,11 @@ async fn main() -> Result<()> {
     // Whether this Listening was entered without a wake word, by IRA holding the
     // floor open after a reply.
     let mut follow_up = false;
+    // The tool waiting on a spoken yes or no, and the question it asked.
+    let mut pending_confirm: Option<oneshot::Sender<bool>> = None;
+    let mut confirm_question = String::new();
+    let mut confirm_reasked = false;
+    let mut confirm_stt_running = false;
     // Whether this turn got any words out. A stream that breaks after two
     // sentences must not append an apology to them.
     let mut spoke_any = false;
@@ -261,7 +316,8 @@ async fn main() -> Result<()> {
                             }
                         }
 
-                        match listening_next(heard_speech, silence_ms, utterance_ms, follow_up) {
+                        let deadline = if follow_up { FOLLOW_UP_MS } else { NO_SPEECH_TIMEOUT_MS };
+                        match listening_next(heard_speech, silence_ms, utterance_ms, deadline) {
                             Next::Wait => {}
                             Next::GiveUp => {
                                 if follow_up {
@@ -296,8 +352,51 @@ async fn main() -> Result<()> {
                                     speech_tx.clone(),
                                     cancel.clone(),
                                     timings,
+                                    host.clone(),
                                 );
                             }
+                        }
+                    }
+
+                    State::Confirming => {
+                        utterance.extend_from_slice(&frame);
+                        utterance_ms += frame_ms;
+                        for speech in vad.push(&frame)? {
+                            if speech {
+                                heard_speech = true;
+                                silence_ms = 0;
+                            } else if heard_speech {
+                                silence_ms += vad::CHUNK_MS;
+                            }
+                        }
+
+                        match listening_next(
+                            heard_speech,
+                            silence_ms,
+                            utterance_ms,
+                            CONFIRM_TIMEOUT_MS,
+                        ) {
+                            Next::Wait => {}
+                            Next::GiveUp => {
+                                // Silence is not consent, and saying so out loud
+                                // would be one more thing to talk over.
+                                tracing::info!("no answer to the confirmation");
+                                deny(&mut pending_confirm, &cancel);
+                                vad.reset();
+                                state = State::Idle;
+                            }
+                            Next::Answer if !confirm_stt_running => {
+                                confirm_stt_running = true;
+                                spawn_confirm(
+                                    client.clone(),
+                                    std::mem::take(&mut utterance),
+                                    turn_tx.clone(),
+                                );
+                                heard_speech = false;
+                                silence_ms = 0;
+                                utterance_ms = 0;
+                            }
+                            Next::Answer => {}
                         }
                     }
 
@@ -364,6 +463,25 @@ async fn main() -> Result<()> {
                 }
             }
 
+            Some(req) = confirm_rx.recv() => {
+                tracing::info!(question = %req.question, "confirming");
+                // Asked directly rather than through the sentence channel: this
+                // is IRA's own question, not part of the model's reply.
+                if let Err(e) = tts.say(&req.question) {
+                    tracing::error!(?e, "tts");
+                }
+                confirm_question = req.question;
+                pending_confirm = Some(req.reply);
+                confirm_reasked = false;
+                confirm_stt_running = false;
+                vad.reset();
+                utterance.clear();
+                heard_speech = false;
+                silence_ms = 0;
+                utterance_ms = 0;
+                state = State::Confirming;
+            }
+
             Some((sentence, tok)) = speech_rx.recv() => {
                 if should_speak(&tok, &state) {
                     match tts.say(&sentence) {
@@ -393,6 +511,42 @@ async fn main() -> Result<()> {
                             // replaces this with real summarisation and recall.
                             if history.len() > 8 {
                                 history.remove(0);
+                            }
+                        }
+                    }
+                    Turn::Confirmed(text) => {
+                        confirm_stt_running = false;
+                        tracing::info!(answer = %text, "confirmation answer");
+                        match tool::yes_no(&text) {
+                            Some(true) => {
+                                if let Some(tx) = pending_confirm.take() {
+                                    let _ = tx.send(true);
+                                }
+                                // The turn resumes where it left off.
+                                state = State::Holding;
+                            }
+                            Some(false) => {
+                                let _ = tts.say(SAY_CANCELLED);
+                                deny(&mut pending_confirm, &cancel);
+                                // Back to Holding so "Cancelled." is actually
+                                // heard; the cancelled turn then drains and the
+                                // follow-up window opens as usual.
+                                state = State::Holding;
+                            }
+                            None if !confirm_reasked => {
+                                // Ambiguity gets one more chance, then fails
+                                // closed. Guessing at "maybe" is how a tool runs
+                                // that nobody agreed to.
+                                confirm_reasked = true;
+                                let _ = tts.say(&confirm_question);
+                                heard_speech = false;
+                                silence_ms = 0;
+                                utterance_ms = 0;
+                            }
+                            None => {
+                                let _ = tts.say(SAY_CANCELLED);
+                                deny(&mut pending_confirm, &cancel);
+                                state = State::Holding;
                             }
                         }
                     }
@@ -447,6 +601,25 @@ fn log_turn(
     }
 }
 
+/// Transcribes a yes-or-no answer.
+///
+/// Deliberately not a full turn: no history, no model, no tools. A confirmation
+/// is only ever read for consent, and routing it through the model would give
+/// the thing being confirmed a chance to talk its way past the question.
+fn spawn_confirm(client: reqwest::Client, audio: Vec<f32>, out: mpsc::Sender<Turn>) {
+    tokio::spawn(async move {
+        let text = match stt::transcribe(&client, &audio, audio::SR).await {
+            Ok(t) => t,
+            Err(e) => {
+                // An unreadable answer is not a yes.
+                tracing::error!(?e, "stt during confirmation");
+                String::new()
+            }
+        };
+        let _ = out.send(Turn::Confirmed(text)).await;
+    });
+}
+
 /// Last `n` samples of the ring buffer, or all of it if it holds fewer.
 fn tail(buf: &VecDeque<f32>, n: usize) -> Vec<f32> {
     buf.iter().skip(buf.len().saturating_sub(n)).copied().collect()
@@ -461,6 +634,7 @@ fn spawn_turn(
     speech: mpsc::Sender<(String, CancellationToken)>,
     cancel: CancellationToken,
     timings: Arc<Timings>,
+    host: Arc<tool::Host>,
 ) {
     let cancelled = cancel.clone();
     tokio::spawn(async move {
@@ -488,7 +662,7 @@ fn spawn_turn(
         }
         let _ = out.send(Turn::Heard(text.clone())).await;
 
-        match llm::stream(&client, &history, &text, speech, cancel, &timings).await {
+        match llm::stream(&client, &history, &text, speech, cancel, &timings, &host).await {
             // A cancelled stream still returns its partial text; that half a
             // sentence must not enter history as if IRA had said it.
             Ok(reply) if !cancelled.is_cancelled() => {
@@ -534,41 +708,57 @@ mod tests {
     /// A follow-up gets less patience than a wake word, and the difference has
     /// to be exactly at the two deadlines.
     #[test]
-    fn a_follow_up_window_closes_sooner_than_a_wake_word_wait() {
+    fn each_state_waits_exactly_as_long_as_it_should() {
         // Just inside each deadline: still waiting.
-        assert_eq!(listening_next(false, 0, FOLLOW_UP_MS - 1, true), Next::Wait);
+        assert_eq!(listening_next(false, 0, FOLLOW_UP_MS - 1, FOLLOW_UP_MS), Next::Wait);
         assert_eq!(
-            listening_next(false, 0, NO_SPEECH_TIMEOUT_MS - 1, false),
+            listening_next(false, 0, NO_SPEECH_TIMEOUT_MS - 1, NO_SPEECH_TIMEOUT_MS),
+            Next::Wait
+        );
+        assert_eq!(
+            listening_next(false, 0, CONFIRM_TIMEOUT_MS - 1, CONFIRM_TIMEOUT_MS),
             Next::Wait
         );
 
         // At the deadline: give the floor back.
-        assert_eq!(listening_next(false, 0, FOLLOW_UP_MS, true), Next::GiveUp);
+        assert_eq!(listening_next(false, 0, FOLLOW_UP_MS, FOLLOW_UP_MS), Next::GiveUp);
         assert_eq!(
-            listening_next(false, 0, NO_SPEECH_TIMEOUT_MS, false),
+            listening_next(false, 0, NO_SPEECH_TIMEOUT_MS, NO_SPEECH_TIMEOUT_MS),
+            Next::GiveUp
+        );
+        assert_eq!(
+            listening_next(false, 0, CONFIRM_TIMEOUT_MS, CONFIRM_TIMEOUT_MS),
             Next::GiveUp
         );
 
-        // The window a wake word buys must not shrink to the follow-up one:
-        // at 2 s after a wake word IRA is still listening.
-        assert_eq!(listening_next(false, 0, FOLLOW_UP_MS, false), Next::Wait);
+        // A wake word's patience must not shrink to the follow-up window's.
+        assert_eq!(listening_next(false, 0, FOLLOW_UP_MS, NO_SPEECH_TIMEOUT_MS), Next::Wait);
     }
 
     /// Once someone is talking, no deadline may cut them off. Only silence or
     /// the hard cap ends a turn.
     #[test]
     fn a_speaker_is_never_cut_off_by_the_no_speech_deadline() {
-        // Long past both deadlines, mid-sentence, brief pause.
-        assert_eq!(listening_next(true, 200, 30_000, true), Next::Answer);
-        assert_eq!(listening_next(true, 0, 10_000, true), Next::Wait);
-        assert_eq!(listening_next(true, 0, 10_000, false), Next::Wait);
+        // Long past every deadline, mid-sentence, brief pause.
+        assert_eq!(listening_next(true, 200, 30_000, FOLLOW_UP_MS), Next::Answer);
+        assert_eq!(listening_next(true, 0, 10_000, FOLLOW_UP_MS), Next::Wait);
+        assert_eq!(listening_next(true, 0, 10_000, CONFIRM_TIMEOUT_MS), Next::Wait);
 
         // Endpoint, exactly at the boundary.
-        assert_eq!(listening_next(true, ENDPOINT_MS - 1, 5_000, false), Next::Wait);
-        assert_eq!(listening_next(true, ENDPOINT_MS, 5_000, false), Next::Answer);
+        assert_eq!(
+            listening_next(true, ENDPOINT_MS - 1, 5_000, NO_SPEECH_TIMEOUT_MS),
+            Next::Wait
+        );
+        assert_eq!(
+            listening_next(true, ENDPOINT_MS, 5_000, NO_SPEECH_TIMEOUT_MS),
+            Next::Answer
+        );
 
         // The hard cap ends a monologue even with no pause at all.
-        assert_eq!(listening_next(true, 0, MAX_UTTERANCE_MS, false), Next::Answer);
+        assert_eq!(
+            listening_next(true, 0, MAX_UTTERANCE_MS, NO_SPEECH_TIMEOUT_MS),
+            Next::Answer
+        );
     }
 
     /// Sentences arriving while the user has the floor are dropped, whatever

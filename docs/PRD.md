@@ -94,7 +94,7 @@ after. **Shipped** items already work.
 
 | ID | Requirement | Priority | Phase |
 |---|---|---|---|
-| FR-15 | Recall facts from earlier conversations, not only the current session | Must | P3 |
+| FR-15 | Recall facts from earlier conversations, not only the current session | Must | P4 |
 | FR-16 | Speak a holding phrase while a slow action runs, rather than going quiet | Must | P3 |
 | FR-17 | Ask for spoken confirmation before any action that changes state, and abort on refusal | Must | P3 |
 | FR-18 | Gain new capabilities by configuration, without a code change or rebuild | Must | P4 |
@@ -165,4 +165,4 @@ tell us which phase to invest in next.
 | When a long task finishes, may IRA speak unprompted? | It has never spoken without a wake word. Interrupting the user is a different product than waiting quietly. Recommendation: a tone at completion, spoken summary when next idle. | P8 |
 | Is the screen a window or an overlay? | A window is a place you go; an overlay is something that appears. Changes FR-24 substantially, and whether long answers are glanceable or browsable. | P5 |
 | What is IRA's personality? | Currently defined only by a brevity instruction. Two sentences is a constraint, not a voice, and the voice is most of what a user remembers. | P5 |
-| Where does memory live, and who owns it? | FR-15 assumes a recall store that does not exist on this machine yet. Whether it is a new component or an existing one changes P3's size considerably. | P3 |
+| ~~Where does memory live?~~ **Answered.** | kortex-memory, an MCP server with sixteen tools over stdio and HTTP/SSE. It is therefore a P4 integration, not a P3 built-in, and IRA does not implement memory itself. | ~~P3~~ |
