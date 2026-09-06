@@ -94,10 +94,10 @@ after. **Shipped** items already work.
 
 | ID | Requirement | Priority | Phase |
 |---|---|---|---|
-| FR-15 | Recall facts from earlier conversations, not only the current session | Must | P4 |
+| FR-15 | Recall facts from earlier conversations, not only the current session | Must | P4 — adapter ready, kortex-memory not yet connected |
 | FR-16 | Speak a holding phrase while a slow action runs, rather than going quiet | Must | P3 |
 | FR-17 | Ask for spoken confirmation before any action that changes state, and abort on refusal | Must | P3 |
-| FR-18 | Gain new capabilities by configuration, without a code change or rebuild | Must | P4 |
+| FR-18 | Gain new capabilities by configuration, without a code change or rebuild | **Shipped** | P4 |
 | FR-19 | Accept a task that takes minutes, and report back when it finishes | Should | P8 |
 | FR-20 | Dictate text into whichever application has focus | Could | P8 |
 

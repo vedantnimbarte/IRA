@@ -14,8 +14,10 @@
 //! needs `webrtc-audio-processing` wired into audio.rs before it is usable.
 
 mod audio;
+mod config;
 mod doctor;
 mod llm;
+mod mcp;
 mod metrics;
 mod stt;
 mod tool;
@@ -196,6 +198,8 @@ async fn main() -> Result<()> {
         anyhow::bail!("{problem}\n\nrun `ira doctor` for the full report");
     }
 
+    let cfg = config::load()?;
+
     let mut wake = wake::WakeWord::new(&models, &wakeword, 0.5)
         .with_context(|| format!("load wake models from {}", models.display()))?;
     let mut vad = vad::Vad::new(&models.join("silero_vad.onnx"), 0.5).context("load silero vad")?;
@@ -208,13 +212,15 @@ async fn main() -> Result<()> {
     // the TTS handle. Speaking starts before the model finishes writing.
     let (speech_tx, mut speech_rx) = mpsc::channel::<(String, CancellationToken)>(32);
 
-    // Tools. Only the clock is built in: memory is kortex-memory, which is an
-    // MCP server, so it arrives through the P4 adapter rather than being
-    // reimplemented here.
+    // Tools. The clock is the only built-in; everything else arrives over MCP
+    // as configuration rather than code.
     let (confirm_tx, mut confirm_rx) = mpsc::channel::<tool::Confirm>(4);
     let host = {
         let mut h = tool::Host::new(confirm_tx);
         h.add(Arc::new(tool::Clock));
+        for t in mcp::connect_all(&cfg.mcp.server).await {
+            h.add(t);
+        }
         Arc::new(h)
     };
     tracing::info!(tools = host.specs().len(), "tool registry");
