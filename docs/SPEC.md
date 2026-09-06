@@ -63,27 +63,33 @@ pub const SLOW_BUDGET_MS: u64 = 15_000;
 
 ## State transitions
 
-Exhaustive. Any state/event pair not listed is a no-op. Events are evaluated per
-audio frame except where marked otherwise.
+Every transition the loop makes. Any state/event pair not listed is a no-op.
+Events are evaluated per audio frame except where marked otherwise.
 
 | State | Event | → State | Actions |
 |---|---|---|---|
-| Idle | `wake_score > 0.5` | Listening | Chirp; reset VAD; seed utterance with 400 ms pre-roll; clear counters |
-| Listening | `vad_speech` | Listening | `heard_speech = true`; `silence_ms = 0` |
+| Idle | a job report is queued | Holding | Speak it; no turn is started, so no `turn` line is emitted |
+| Idle | `wake_score > 0.5`, or the talk control | Listening | Chirp; reset VAD; seed utterance with 400 ms pre-roll; clear counters |
+| Listening | `vad_speech` | Listening | `heard_speech = true`; `silence_ms = 0`; bump the utterance generation |
 | Listening | `vad_silence && heard_speech` | Listening | `silence_ms += 32` |
-| Listening | `silence_ms >= 700` | Holding | Fresh cancel token; spawn turn; reset VAD; start turn timer |
+| Listening | `silence_ms >= 200`, nothing in flight for this generation | Listening | **Start transcribing.** The turn may not be over; if it is not, the result is dropped as stale |
+| Listening | `silence_ms >= 700` | Holding | Start the turn and wait for a transcript — which may already be in hand |
 | Listening | `utterance_ms >= 20_000` | Holding | As above; log truncation |
 | Listening | `!heard_speech && 3_000 ms` after a wake word | Idle | Discard utterance; **no sound** (a false wake must not announce itself) |
 | Listening | `!heard_speech && 2_000 ms` in a follow-up | Idle | Discard utterance; **no sound**. Shorter than the post-wake wait: a wake word is a promise to speak, a finished reply is not |
-| Holding | `barge_ms >= 250 && past grace` | Listening | Cancel token; log the turn as barged; interrupt TTS; reset VAD; seed utterance from full 1 s pre-roll; `heard_speech = true`; reset the turn clock |
-| Holding | reply done && tts idle | Listening | Log the turn; open the follow-up window; seed from pre-roll; reset the turn clock |
-| Holding | tool wants mutate | Confirming | Speak the question; hold the pending call; reset the utterance buffer |
+| Holding | transcript arrives for this generation | Holding | Record `stt_ms`; begin the reply. An empty one gets a tone, a failed one an apology |
+| Holding | no transcript after 15 s | Holding | Say "I didn't catch that". The transcriber always answers, so this means it died |
+| Holding | `barge_ms > 0` (not under `IRA_PTT`) | Holding | Duck to 35 %. Restore if the speech stops without becoming an interruption |
+| Holding | `barge_ms >= 250 && past grace`, or the talk control | Listening | Cancel token; log the turn as barged; interrupt TTS; abandon any pending transcript; reset VAD; seed utterance from the full 1 s pre-roll |
+| Holding | a tool wants to change something | Confirming | Speak the question; hold the pending call; reset the utterance buffer |
+| Holding | reply done && tts idle && no transcript pending | Listening | Log the turn; open the follow-up window; seed from pre-roll |
 | Confirming | `vad_speech` / `vad_silence` | Confirming | Same buffering as Listening, with a 6 s no-speech deadline |
 | Confirming | endpoint | Confirming | Transcribe the answer only — no model, no history, no tools |
 | Confirming | transcript ∈ YES | Holding | Run the held call; the turn resumes where it paused |
 | Confirming | transcript ∈ NO | Holding † | Say "Cancelled."; refuse the call; cancel the turn |
 | Confirming | unrecognised reply | Confirming | Re-ask once, then refuse. **Ambiguity fails closed.** |
 | Confirming | 6 s no speech | Idle | Refuse the call; say nothing. Silence is not consent |
+| any | a background job finishes | unchanged | Pip immediately; queue the report for the next visit to Idle |
 
 † Not Idle, as originally specified: the turn returns to Holding so "Cancelled."
 is actually heard, and the follow-up window then opens as it does after any
@@ -92,11 +98,11 @@ reply — which is what lets the user immediately say what they *did* want.
 A confirmation is transcribed and matched against the grammar directly. It never
 reaches the model, so the thing being confirmed gets no chance to argue its way
 past the question.
-| any | `job_complete` (P8) | unchanged | Completion tone now; speak the summary on next entry to Idle |
 
-The deadline stops applying the instant speech is heard, or a slow speaker gets
-cut off mid-sentence. `listening_next` in `main.rs` is that decision, extracted so
-the interaction between the three exits can be tested without a microphone.
+The no-speech deadline stops applying the instant speech is heard, or a slow
+speaker gets cut off mid-sentence. `listening_next` in `main.rs` is that
+decision, extracted so the interaction between the three exits can be tested
+without a microphone; `should_interrupt` is the same for barge-in.
 
 The follow-up window also covers the failure phrases: after "I didn't catch
 that", the floor is already open and the user can simply say it again.
