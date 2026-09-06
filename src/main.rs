@@ -147,6 +147,19 @@ fn listening_next(
     }
 }
 
+/// Whether this frame should take the floor back from IRA.
+///
+/// The talk control always interrupts: it is a person pressing a button, and
+/// there is nothing to second-guess. Voice barge-in is conditional, because
+/// without echo cancellation a speaker feeds IRA's own reply back into the
+/// microphone and every sentence would interrupt itself.
+fn should_interrupt(ptt: bool, past_grace: bool, barge_ms: u64, talk: bool) -> bool {
+    if talk {
+        return true;
+    }
+    !ptt && past_grace && barge_ms >= BARGE_IN_MS
+}
+
 /// Moves to a new state and tells the screen.
 ///
 /// One function so the screen cannot drift out of step with the loop: there is
@@ -231,7 +244,15 @@ async fn main() -> Result<()> {
 
     // Tools. The clock is the only built-in; everything else arrives over MCP
     // as configuration rather than code.
-    let ui = ui::Ui::start().await;
+    let (ui, mut talk_rx) = ui::Ui::start().await;
+    // Without acoustic echo cancellation the microphone hears the speaker, so
+    // voice-triggered barge-in fires on IRA's own reply. Disarming it makes
+    // speaker mode usable at the cost of hands-free interruption; the talk
+    // control interrupts instead.
+    let ptt = std::env::var("IRA_PTT").is_ok();
+    if ptt {
+        tracing::info!("press-to-talk: barge-in is the talk control, not your voice");
+    }
     let (confirm_tx, mut confirm_rx) = mpsc::channel::<tool::Confirm>(4);
     let host = {
         let mut h = tool::Host::new(confirm_tx, ui.clone());
@@ -276,6 +297,11 @@ async fn main() -> Result<()> {
     let mut confirm_question = String::new();
     let mut confirm_reasked = false;
     let mut confirm_stt_running = false;
+    // Set by the talk control, consumed by the next audio frame. At 80 ms a
+    // frame that is well inside the interruption budget, and it means the
+    // control reuses the state machine rather than duplicating it.
+    let mut talk = false;
+    let mut ducked = false;
     // Whether this turn got any words out. A stream that breaks after two
     // sentences must not append an apology to them.
     let mut spoke_any = false;
@@ -312,7 +338,9 @@ async fn main() -> Result<()> {
 
                 match state {
                     State::Idle => {
-                        if let Some(score) = wake.push(&frame)? {
+                        let woke = wake.push(&frame)?;
+                        if woke.is_some() || talk {
+                            let score = woke.unwrap_or(0.0);
                             let fired = Instant::now();
                             tts.chirp();
                             wake_ms = fired.elapsed().as_millis() as u64;
@@ -444,8 +472,22 @@ async fn main() -> Result<()> {
                             None => true,
                         };
 
-                        if past_grace && barge_ms >= BARGE_IN_MS {
-                            tracing::info!("barge-in");
+                        // Duck at the first hint, restore if it comes to
+                        // nothing. Not while press-to-talk is on: there the
+                        // speech is probably IRA's own, coming back in.
+                        if !ptt {
+                            if barge_ms > 0 && !ducked {
+                                tts.duck();
+                                ducked = true;
+                            } else if barge_ms == 0 && ducked {
+                                tts.unduck();
+                                ducked = false;
+                            }
+                        }
+
+                        if should_interrupt(ptt, past_grace, barge_ms, talk) {
+                            tracing::info!(by = if talk { "talk" } else { "voice" }, "barge-in");
+                            ducked = false;
                             cancel.cancel();
                             llm_running = false;
                             log_turn(&mut turn, &tts, hold_base_ms, true, stt_backend, &llm_model, &ui);
@@ -465,6 +507,10 @@ async fn main() -> Result<()> {
                             wake_at = Some(Instant::now());
                             go(&mut state, State::Listening, &ui);
                         } else if !llm_running && tts.idle() {
+                            if ducked {
+                                tts.unduck();
+                                ducked = false;
+                            }
                             log_turn(&mut turn, &tts, hold_base_ms, false, stt_backend, &llm_model, &ui);
                             // Hold the floor open briefly so a reply can be
                             // answered without a wake word. This also covers the
@@ -488,6 +534,13 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                // Consumed either way: a press must not surface two states later.
+                talk = false;
+            }
+
+            Some(_) = talk_rx.recv() => {
+                tracing::info!("talk");
+                talk = true;
             }
 
             Some(req) = confirm_rx.recv() => {
@@ -801,6 +854,31 @@ mod tests {
             listening_next(true, 0, MAX_UTTERANCE_MS, NO_SPEECH_TIMEOUT_MS),
             Next::Answer
         );
+    }
+
+    /// Press-to-talk exists so speakers work without echo cancellation. If
+    /// voice could still interrupt, it would not solve anything: IRA's own
+    /// reply is what the microphone is hearing.
+    #[test]
+    fn press_to_talk_disarms_the_voice_but_not_the_button() {
+        // Voice, clearly past every threshold.
+        assert!(should_interrupt(false, true, BARGE_IN_MS, false));
+        assert!(!should_interrupt(true, true, BARGE_IN_MS, false));
+        assert!(!should_interrupt(true, true, 10_000, false));
+
+        // The button works in both modes, and does not wait for the grace
+        // window: a person pressing it has already decided.
+        assert!(should_interrupt(true, false, 0, true));
+        assert!(should_interrupt(false, false, 0, true));
+    }
+
+    /// Voice barge-in still needs a confirmed run of speech and the grace
+    /// window, or a cough during the first syllable stops the reply.
+    #[test]
+    fn a_brief_noise_does_not_interrupt() {
+        assert!(!should_interrupt(false, true, BARGE_IN_MS - 1, false));
+        assert!(!should_interrupt(false, false, BARGE_IN_MS, false));
+        assert!(!should_interrupt(false, true, 0, false));
     }
 
     /// Sentences arriving while the user has the floor are dropped, whatever

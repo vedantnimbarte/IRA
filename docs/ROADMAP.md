@@ -176,19 +176,37 @@ Long answers and tool output get somewhere to land.
 there is a screen. That is the prompt's job and needs a real model; every run so
 far used a stub that says whatever it is told to.
 
-### P6 — Acoustic echo cancellation
+### P6 — Acoustic echo cancellation — *partly done*
 
 Usable on speakers. Today, headphones are mandatory.
 
-- `webrtc-audio-processing` wired into `audio.rs`
-- Duck TTS on detected speech instead of hard-cutting, so interruption sounds
-  deliberate
+- ~~`webrtc-audio-processing` wired into `audio.rs`~~ **deferred** — see
+  [0010](decisions/0010-press-to-talk-before-echo-cancellation.md)
+- Press-to-talk: `IRA_PTT=1` disarms voice barge-in, `POST /talk` takes the
+  floor or interrupts. Speakers work today, without hands-free interruption
+- Duck TTS to 35 % at the first hint of speech, cutting only once the
+  interruption is confirmed
 
 **Exit:** a full conversation held on speakers with no self-interruption.
-**Depends:** nothing — touches only `audio.rs`, so it can run in parallel with
-P3–P5.
-**Risk:** the only item that may need real DSP iteration rather than integration.
-Schedule it early against a second developer, not late against a deadline.
+Reachable now with `IRA_PTT=1`; not yet reachable hands-free.
+
+**Why echo cancellation is not here.** Two findings, both from trying it:
+`webrtc-audio-processing` builds its bundled C++ through meson and ninja, which
+turns `cargo build` into a multi-toolchain build and fights P9's exit criterion.
+And echo cancellation is a property of a room — a speaker, an acoustic path, a
+microphone — so no replayed WAV can verify it. Shipping unverified DSP into the
+files [0001](decisions/0001-audio-path-stays-in-one-process.md) closes would
+degrade capture silently. There is also an unsolved precondition: the far-end
+signal must be time-aligned with capture, and rodio does not report output
+timing.
+
+**Fixed along the way.** A long reply was being abandoned before it spoke.
+`Tts::idle()` could not tell "finished speaking" from "piper has not started
+yet": `say()` stamps the audio clock, so 400 ms later an empty queue looked
+idle, and piper needs a second or more to synthesise a long sentence. The
+longer the answer, the more certain the failure — which is the wrong way round,
+and it silently broke the long answers P5 had just shipped. `idle()` now waits
+for what it asked for, bounded so a dead piper cannot strand the loop.
 
 ### P7 — Turn quality
 

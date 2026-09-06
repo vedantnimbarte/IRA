@@ -4,7 +4,7 @@ The loop's value is a subjective property measured objectively. This document
 defines the corpus, the harness, the numbers and the manual scripts — and states
 plainly which parts cannot be automated and must be judged by a person.
 
-**Automated today:** 39 tests
+**Automated today:** 41 tests
 **State machine coverage:** the barge-in and listening predicates, the confirmation
 grammar and the tool gate; transitions still need the replay harness
 **Release gate:** one week of dogfood
@@ -188,6 +188,12 @@ answer starts.
 **Pass:** You hear something within a second or two saying she could not do it.
 Silence is a failure of this test.
 **Phase:** P1
+
+### T-5a — Take the headphones off, with press-to-talk
+**Do:** `IRA_PTT=1`, speakers at normal volume, three turns. Interrupt with the
+talk button rather than your voice.
+**Pass:** she never interrupts herself, and the button stops her.
+**Phase:** P6 — this is the one that is reachable today.
 
 ### T-5 — Take the headphones off
 **Do:** Switch to speakers at normal listening volume. Hold a three-turn

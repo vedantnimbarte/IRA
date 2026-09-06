@@ -164,6 +164,7 @@ directory.
 | `IRA_CLOCK` | *unset* | `virtual` drops replay pacing, for CI |
 | `IRA_CONFIG` | `ira.toml` | MCP servers and per-tool policy |
 | `IRA_UI` | `8180` | Screen port. `off` disables it entirely |
+| `IRA_PTT` | *unset* | Set to disarm voice barge-in. Interrupting becomes the talk control, which is what makes speakers usable without echo cancellation |
 | `IRA_TAIL_MS` | `3000` | Silence appended after a replayed file. The model's round trip happens inside this window, so a benchmark wanting the whole reply needs more |
 | `IRA_SKIP_WAKE` | *unset* | Start in Listening. openWakeWord does not fire on synthesised speech, so a Piper corpus never gets past Idle |
 | `RUST_LOG` | `ira=info` | Must match the crate name; a rename silently disables logging |
@@ -253,6 +254,17 @@ it carries a live transcript of everything said in the room.
 - `GET /events` — server-sent events, one JSON object per message, discriminated
   by `kind`: `state`, `heard`, `reply`, `tool`, `result`, `confirm`,
   `answered`, `failed`, `turn`.
+- `POST /talk` — takes the floor, or interrupts if IRA is speaking. Answers
+  `204`. The page has a button; anything else can use it too, which is how a
+  global hotkey is bound without IRA taking a platform input dependency:
+
+  ```
+  curl -X POST http://127.0.0.1:8180/talk
+  ```
+
+  The press is consumed by the next audio frame rather than acting immediately,
+  so it reuses the state machine rather than duplicating it. At 80 ms frames
+  that is well inside the interruption budget.
 
 A page connecting mid-conversation is replayed the last 200 events, so opening
 it shows what just happened rather than an empty screen.
@@ -267,6 +279,22 @@ connected.** `Ui::watchers()` is read as the turn starts, and only a non-zero
 count selects the wording that tells the model to say the short version aloud
 and leave the rest on screen. Promising a screen nobody is watching is the same
 defect P1 removed, with extra steps.
+
+## Speaking and stopping
+
+`Tts::idle()` decides when a reply is over, and it has two cases rather than
+one. With nothing outstanding, an empty queue plus 400 ms of quiet means
+finished. With a sentence handed to piper that it has not started rendering,
+an empty queue means *not yet* — piper synthesises at roughly a tenth of real
+time, so a long sentence takes over a second to begin. Judging that by the
+400 ms rule abandons the reply before it says a word, and the longer the answer
+the more certain the failure. That case waits up to 10 s, bounded so a dead
+piper cannot strand the loop holding the floor.
+
+Interruption has two stages. At the first hint of speech TTS ducks to 35 %; only
+a confirmed `BARGE_IN_MS` of speech cuts it off. A cough gets the volume back
+and costs nothing. Ducking is disabled under `IRA_PTT`, where the speech the
+microphone hears is most likely IRA's own.
 
 ## Tool loop
 

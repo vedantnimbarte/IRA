@@ -25,9 +25,12 @@ cargo run --release
 
 Say **"hey Jarvis"**, wait for the chirp, talk. Interrupt her any time.
 
-> **Wear headphones.** There is no acoustic echo cancellation yet, so on speakers
-> the mic hears IRA's own voice and she interrupts herself in a loop. This is the
-> single biggest gap between this prototype and something you can ship.
+> **Wear headphones, or use press-to-talk.** There is no acoustic echo
+> cancellation yet, so on speakers the mic hears IRA's own voice and she
+> interrupts herself in a loop. `IRA_PTT=1` disarms voice barge-in and makes the
+> talk control the way to interrupt, which makes speakers usable at the cost of
+> hands-free interruption. See
+> [decisions/0010](docs/decisions/0010-press-to-talk-before-echo-cancellation.md).
 
 ## Wiring
 

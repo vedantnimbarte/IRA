@@ -10,7 +10,7 @@ use rodio::{ChannelCount, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::num::NonZero;
 use std::time::{Duration, Instant};
@@ -24,6 +24,15 @@ fn mono() -> ChannelCount {
 /// Piper gives no end-of-utterance marker, so quiet is the only signal.
 const DRAIN_QUIET: Duration = Duration::from_millis(400);
 
+/// How long piper gets to produce the first sample of a sentence it was asked
+/// for, before we conclude it never will.
+///
+/// Synthesis runs at roughly a tenth of real time, so a long sentence can take
+/// well over a second to start. Judging that by `DRAIN_QUIET` abandons the reply
+/// before it has said a word -- and the longer the answer, the more certain the
+/// failure, which is the wrong way round.
+const SYNTH_GRACE: Duration = Duration::from_secs(10);
+
 pub struct Tts {
     _stream: MixerDeviceSink,
     sink: Arc<Player>,
@@ -31,6 +40,8 @@ pub struct Tts {
     stdin: Option<ChildStdin>,
     /// Millis since process start when piper last produced audio bytes.
     last_audio: Arc<AtomicU64>,
+    /// Piper has been given a sentence it has not started rendering yet.
+    awaiting: Arc<AtomicBool>,
     /// Millis since process start when audio first reached the speaker for the
     /// current turn, or 0 for "nothing yet". The barge-in grace window is
     /// measured from here rather than from the start of the turn: STT and the
@@ -65,6 +76,7 @@ impl Tts {
             child: None,
             stdin: None,
             last_audio: Arc::new(AtomicU64::new(0)),
+            awaiting: Arc::new(AtomicBool::new(false)),
             first_audio: Arc::new(AtomicU64::new(0)),
             started: Instant::now(),
             piper: piper.to_path_buf(),
@@ -93,6 +105,7 @@ impl Tts {
 
         let sink = self.sink.clone();
         let last = self.last_audio.clone();
+        let awaiting = self.awaiting.clone();
         let first = self.first_audio.clone();
         let started = self.started;
         let sr = self.sample_rate;
@@ -122,6 +135,7 @@ impl Tts {
                         if !samples.is_empty() {
                             let now = started.elapsed().as_millis() as u64;
                             last.store(now, Ordering::Relaxed);
+                            awaiting.store(false, Ordering::Relaxed);
                             // Only the first sample of a turn wins; 0 means the
                             // turn has produced no sound yet.
                             let _ = first.compare_exchange(
@@ -146,6 +160,7 @@ impl Tts {
         stdin.flush()?;
         self.last_audio
             .store(self.started.elapsed().as_millis() as u64, Ordering::Relaxed);
+        self.awaiting.store(true, Ordering::Relaxed);
         Ok(())
     }
 
@@ -165,6 +180,22 @@ impl Tts {
     /// Called when IRA takes the floor, so `first_audio_ms` measures this turn.
     pub fn begin_turn(&self) {
         self.first_audio.store(0, Ordering::Relaxed);
+        self.sink.set_volume(1.0);
+    }
+
+    /// Drop to a background level at the first hint of speech, before it has
+    /// been confirmed as an interruption.
+    ///
+    /// A hard cut 250 ms later is correct but sounds like a machine being
+    /// switched off. Ducking first makes the same moment sound like yielding,
+    /// and if the speech turns out to be a cough the volume comes back and
+    /// nothing was lost.
+    pub fn duck(&self) {
+        self.sink.set_volume(0.35);
+    }
+
+    pub fn unduck(&self) {
+        self.sink.set_volume(1.0);
     }
 
     /// Barge-in: silence immediately, then discard piper's in-flight work.
@@ -172,11 +203,16 @@ impl Tts {
         self.sink.clear();
         // clear() also pauses the sink in rodio; re-arm it for the next reply.
         self.sink.play();
+        // A duck must never outlive the turn that caused it, or the next reply
+        // is quiet for no reason anyone could explain.
+        self.sink.set_volume(1.0);
         self.stdin.take();
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();
             let _ = c.wait();
         }
+        // Whatever it had been asked for is gone with it.
+        self.awaiting.store(false, Ordering::Relaxed);
         // ponytail: respawn costs ~200-300 ms, paid only when interrupted. If
         // that lands badly in testing, keep a warm spare process instead.
         self.spawn()
@@ -184,11 +220,21 @@ impl Tts {
 
     /// True once the queue has drained and piper has been quiet a beat.
     pub fn idle(&self) -> bool {
+        if !self.sink.empty() {
+            return false;
+        }
         // saturating: the reader thread can store a timestamp between these two
         // reads, and a wrapped u64 would report "quiet" during active speech.
         let quiet = (self.started.elapsed().as_millis() as u64)
             .saturating_sub(self.last_audio.load(Ordering::Relaxed));
-        self.sink.empty() && quiet > DRAIN_QUIET.as_millis() as u64
+
+        if self.awaiting.load(Ordering::Relaxed) {
+            // Asked for something not yet delivered. An empty queue here means
+            // piper is still thinking, not that the reply is over -- but a dead
+            // piper must not strand the loop holding the floor either.
+            return quiet > SYNTH_GRACE.as_millis() as u64;
+        }
+        quiet > DRAIN_QUIET.as_millis() as u64
     }
 
     /// Short rising blip so you know the wake word landed before IRA speaks.
