@@ -90,16 +90,23 @@ if [ "$WHISPER" = "1" ]; then
         echo "build whisper.cpp (needs cmake and a C++ compiler)"
         tmp=$(mktemp -d)
         git clone --depth 1 --branch v1.7.6 https://github.com/ggml-org/whisper.cpp "$tmp/w"
-        cmake -S "$tmp/w" -B "$tmp/w/build" -DCMAKE_BUILD_TYPE=Release >/dev/null
+        # Static: the binaries are copied out of the build tree below, and a
+        # shared build leaves them looking for libwhisper.so on a path that no
+        # longer exists. ELF has no "next to the executable" search rule, so
+        # this failed on Linux while working on Windows, where DLLs do work
+        # that way.
+        cmake -S "$tmp/w" -B "$tmp/w/build" -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_SHARED_LIBS=OFF >/dev/null
         cmake --build "$tmp/w/build" --config Release -j >/dev/null
         mkdir -p "$root/whisper"
-        # Flattened: the binaries load their ggml libraries from their own
-        # directory, so a preserved build tree gives an exe that cannot start.
-        find "$tmp/w/build" -type f \( -name 'whisper-*' -o -name 'libggml*' -o -name 'libwhisper*' \) \
+        find "$tmp/w/build" -type f -perm -u+x -name 'whisper-*' \
             -exec cp {} "$root/whisper/" \;
         rm -rf "$tmp"
-        [ -x "$root/whisper/whisper-server" ] || {
-            echo "whisper-server missing after build" >&2
+        # Run it, rather than looking at it. A binary that exists and cannot
+        # start is what this catches, and it is otherwise invisible until
+        # something tries to transcribe and gets a connection refused.
+        "$root/whisper/whisper-server" --help >/dev/null 2>&1 || {
+            echo "whisper-server was built but will not run" >&2
             exit 1
         }
     else
