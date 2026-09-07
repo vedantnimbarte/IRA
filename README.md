@@ -239,13 +239,16 @@ Kept here rather than buried, because it is the honest shape of the project.
 - **Another machine.** IRA has only ever been built and run on one Windows box.
   The POSIX setup script parses and fetches models; its Piper download and
   whisper.cpp build have never run.
-- **kortex-memory and Wingman.** Both are connected and both were verified
-  against stubs of their real interfaces — kortex's sixteen MCP tools,
-  Wingman's HTTP API. Neither has been run against the actual daemon.
+- **A coding task that succeeds.** Wingman is connected and `wingman serve`
+  0.3.0 has been run against it — which is how three wrong guesses about its
+  API were found — but no provider credentials work on this machine, so every
+  turn that has completed did so against a stub. kortex-memory is likewise
+  connected and verified against a stub of its sixteen tools, never the real
+  server.
 
 ## Tests
 
-`cargo test` — 54 tests, no network, microphone or API key needed.
+`cargo test` — 58 tests, no network, microphone or API key needed.
 
 They aim at failures that are **silent** rather than loud, because those are the
 ones that survive a code review:

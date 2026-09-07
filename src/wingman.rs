@@ -110,6 +110,89 @@ impl Wingman {
     }
 }
 
+/// What a turn's event stream added up to.
+///
+/// The event names are `wingman_core::AgentEvent` in snake case —
+/// `text_delta`, `thinking_delta`, `tool_start`, `tool_result`, `usage`,
+/// `turn_complete`, `verification`, `stop`, `error` — plus an `end` the daemon
+/// adds when the child process exits.
+///
+/// A turn that fails does so **inside a 200 stream**: the provider is
+/// unreachable, the key is rejected, the verification gate stays red. Only
+/// checking the HTTP status would report every one of those as a success with
+/// nothing to say.
+#[derive(Default)]
+struct Turn {
+    text: String,
+    verification: Option<String>,
+    /// The first error, which is the one that caused the rest.
+    error: Option<String>,
+    stop: Option<String>,
+    exit: Option<i64>,
+    stderr: String,
+}
+
+impl Turn {
+    fn event(&mut self, v: &Value) {
+        match v["type"].as_str().unwrap_or_default() {
+            "text_delta" => self.text.push_str(v["text"].as_str().unwrap_or_default()),
+            // thinking_delta is the model's working-out, not its answer.
+            "verification" => {
+                let passed = v["passed"].as_bool().unwrap_or(false);
+                let summary = v["summary"].as_str().unwrap_or_default();
+                self.verification = Some(if passed {
+                    format!("Checks passed. {summary}")
+                } else {
+                    format!("Checks failed. {summary}")
+                });
+            }
+            "stop" => self.stop = v["reason"].as_str().map(String::from),
+            "error" => {
+                if self.error.is_none() {
+                    self.error = Some(v["message"].as_str().unwrap_or("unknown error").into());
+                }
+            }
+            "end" => {
+                self.exit = v["exit"].as_i64();
+                self.stderr = v["stderr"].as_str().unwrap_or_default().into();
+            }
+            _ => {}
+        }
+    }
+
+    fn outcome(self, events: usize) -> Result<ToolOutcome> {
+        if let Some(e) = self.error {
+            return Err(anyhow!("wingman: {e}"));
+        }
+        // `end_turn` is the only clean finish. `max_turns`, `max_tokens` and
+        // `gate_failed` all mean it stopped short of what was asked, and
+        // reading out whatever it had written by then would imply otherwise.
+        match self.stop.as_deref() {
+            Some("end_turn") | None => {}
+            Some(other) => return Err(anyhow!("wingman stopped early: {other}")),
+        }
+        if let Some(code) = self.exit.filter(|c| *c != 0) {
+            let why = self.stderr.lines().next_back().unwrap_or("no output").trim();
+            return Err(anyhow!("wingman exited {code}: {why}"));
+        }
+
+        let mut out = self.text.trim().to_string();
+        if let Some(v) = self.verification {
+            // The one part of the machinery worth hearing: it is the difference
+            // between "it wrote something" and "it works".
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(&v);
+        }
+        Ok(ToolOutcome::Answer(if out.is_empty() {
+            format!("Wingman finished after {events} events with nothing to say.")
+        } else {
+            out
+        }))
+    }
+}
+
 fn auth(req: reqwest::RequestBuilder, token: &Option<String>) -> reqwest::RequestBuilder {
     match token {
         Some(t) => req.bearer_auth(t),
@@ -171,9 +254,7 @@ impl Tool for Wingman {
 
         let mut stream = resp.bytes_stream();
         let mut buf = String::new();
-        // Only the last assistant text is worth reading aloud; the diffs, tool
-        // calls and verification output belong on the screen.
-        let mut last_text = String::new();
+        let mut turn = Turn::default();
         let mut events = 0usize;
 
         while let Some(chunk) = stream.next().await {
@@ -190,30 +271,20 @@ impl Tool for Wingman {
                 let frame: String = buf.drain(..cut + 2).collect();
                 events += 1;
                 for line in frame.lines() {
+                    // The `event:` name is the payload's own `type`, so the
+                    // data line is the whole story and the name is redundant.
                     let Some(data) = line.trim().strip_prefix("data:") else {
                         continue;
                     };
-                    let Ok(v) = serde_json::from_str::<Value>(data.trim()) else {
-                        continue;
-                    };
-                    if let Some(t) = v["text"].as_str().or_else(|| v["delta"]["text"].as_str()) {
-                        last_text.push_str(t);
-                    }
-                    if v["type"] == "turn.completed" || v["type"] == "turn.finished" {
-                        if let Some(s) = v["summary"].as_str() {
-                            last_text = s.to_string();
-                        }
+                    if let Ok(v) = serde_json::from_str::<Value>(data.trim()) {
+                        turn.event(&v);
                     }
                 }
             }
         }
 
-        tracing::info!(events, "wingman turn finished");
-        Ok(if last_text.trim().is_empty() {
-            ToolOutcome::Answer(format!("Wingman finished after {events} steps."))
-        } else {
-            ToolOutcome::Answer(last_text.trim().to_string())
-        })
+        tracing::info!(events, stop = ?turn.stop, "wingman turn finished");
+        turn.outcome(events)
     }
 }
 
@@ -252,6 +323,75 @@ mod tests {
             .await
             .expect_err("empty task");
         assert!(err.to_string().contains("no task"), "got {err}");
+    }
+
+    /// Feed a turn the events it would have received.
+    fn turn(events: &[Value]) -> Result<ToolOutcome> {
+        let mut t = Turn::default();
+        for e in events {
+            t.event(e);
+        }
+        t.outcome(events.len())
+    }
+
+    #[test]
+    fn a_finished_turn_is_its_text_and_its_verdict() {
+        let out = turn(&[
+            json!({"type": "thinking_delta", "text": "the uploader is in src/"}),
+            json!({"type": "tool_start", "id": "1", "name": "edit", "input": {}}),
+            json!({"type": "text_delta", "text": "Added three retries "}),
+            json!({"type": "text_delta", "text": "with backoff."}),
+            json!({"type": "verification", "passed": true, "summary": "48 tests, 0 failed."}),
+            json!({"type": "stop", "reason": "end_turn"}),
+            json!({"type": "end", "exit": 0, "stderr": ""}),
+        ])
+        .unwrap();
+        let ToolOutcome::Answer(text) = out else { panic!("expected an answer") };
+        assert_eq!(text, "Added three retries with backoff. Checks passed. 48 tests, 0 failed.");
+        assert!(!text.contains("the uploader is in"), "thinking is not the answer");
+    }
+
+    /// The failure the real daemon exposed: a turn that cannot reach its
+    /// provider still returns **200**, and says so only inside the stream.
+    /// Judging by the HTTP status alone reports a dead turn as a success with
+    /// nothing to say.
+    #[test]
+    fn an_error_inside_a_200_stream_is_still_a_failure() {
+        let err = turn(&[
+            json!({"type": "error", "message": "provider error: openrouter returned 401"}),
+            json!({"type": "stop", "reason": "error"}),
+            json!({"type": "end", "exit": 1, "stderr": "wingman: no credentials\n"}),
+        ])
+        .expect_err("an error event must not read as success");
+        assert!(err.to_string().contains("401"), "got {err}");
+    }
+
+    /// Stopping short is not finishing. Reading out the half a change it
+    /// managed, with no mention that the gate is still red, is the worst
+    /// possible summary of a failed build.
+    #[test]
+    fn stopping_short_is_not_finishing() {
+        for reason in ["gate_failed", "max_turns", "max_tokens"] {
+            let err = turn(&[
+                json!({"type": "text_delta", "text": "I changed the parser."}),
+                json!({"type": "stop", "reason": reason}),
+            ])
+            .expect_err("{reason} must not read as a finished turn");
+            assert!(err.to_string().contains(reason), "got {err}");
+        }
+    }
+
+    /// A red gate that reports itself properly still has to be heard.
+    #[test]
+    fn a_failed_check_is_spoken_not_swallowed() {
+        let out = turn(&[
+            json!({"type": "text_delta", "text": "Done."}),
+            json!({"type": "verification", "passed": false, "summary": "2 tests failed."}),
+            json!({"type": "stop", "reason": "end_turn"}),
+        ])
+        .unwrap();
+        let ToolOutcome::Answer(text) = out else { panic!("expected an answer") };
+        assert!(text.contains("Checks failed. 2 tests failed."), "got {text}");
     }
 
     /// Without IRA_WINGMAN_URL there is nothing to connect to, and the tool

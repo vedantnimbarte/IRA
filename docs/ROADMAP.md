@@ -259,7 +259,16 @@ against a stub of Wingman's HTTP API: IRA asked "Send that to Wingman?", heard
 `/v1/projects/ira/turns`, said "I have sent that to Wingman" without waiting,
 returned to Idle, and reported the summary when the turn landed. Saying "No"
 sent nothing at all, and a 429 was reported as a refusal rather than as
-silence. Not met against `wingman serve` itself, which has never been run.
+silence.
+
+`wingman serve` 0.3.0 was then built and run, which corrected three guesses:
+`/v1/projects` returns `{"projects": [...]}` rather than a bare array, the
+event names are `wingman_core::AgentEvent` in snake case rather than the
+`turn.completed` shape assumed, and **a failing turn returns 200** with an
+`error` event inside the stream. IRA now reports that daemon's
+"provider error: openrouter returned 401" as a failure; before the fix it
+would have said "finished after 3 steps". A successful turn against the real
+daemon is still unseen: no provider credentials work on this machine.
 
 **Depends:** P3, P4, and the proactive-speech decision — which
 [0011](decisions/0011-a-tone-now-and-words-when-idle.md) now settles.
@@ -320,7 +329,7 @@ table with real per-stage numbers.
 | When a background job finishes, how does IRA tell you? | Speaking unprompted is a capability IRA has never had. Recommendation: earcon at completion, spoken summary when next Idle. | P8 |
 | Where does kortex-memory run? | Attempted. The one-container image (`make local-build && make local-run`) is the right path — Postgres, Redis, the API, the MCP server and the worker in one container. The build reached its final layer three times and the Docker Desktop engine died each time, ending at "Docker Desktop is unable to start". The blocker is that machine's Docker, not kortex and not IRA. | FR-15 |
 | ~~Sixteen schemas in a voice turn?~~ **Solved.** | `only = [...]` per server. Every schema is sent on every round and a tool-calling turn has two rounds, so exposing all sixteen would put thirty-two schemas in front of the model per turn. | ~~P4~~ |
-| ~~Wingman as a library, or over HTTP?~~ **Answered: HTTP.** | A library dependency pulls 16 crates in for one call site, and the process boundary is what lets a coding turn outlive the conversation that asked for it. Connected and verified against a stub of that API, not against `wingman serve`. | ~~P8~~ |
+| ~~Wingman as a library, or over HTTP?~~ **Answered: HTTP.** | A library dependency pulls 16 crates in for one call site, and the process boundary is what lets a coding turn outlive the conversation that asked for it. Connected, and verified against `wingman serve` 0.3.0 for everything except a turn that succeeds — which needs provider credentials this machine does not have. | ~~P8~~ |
 | ~~Which UI framework?~~ **Answered: none.** | A page served on loopback, read in a browser. No dependency, no second build, and the browser supplies scrolling, selection and theming. An overlay remains possible later and consumes the same event stream. | ~~P5~~ |
 
 ## Considered and deferred

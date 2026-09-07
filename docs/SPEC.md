@@ -287,10 +287,31 @@ One tool, `wingman`, taking one string. It is declared `mutates = true` with
 
 A refused turn — a busy session, a spend ceiling — comes back as a JSON error
 rather than an empty stream, and is reported as a refusal rather than as
-silence. Only the last assistant text is spoken; diffs and tool output go to
-the screen.
+silence.
 
-Verified against a stub of that API, not against `wingman serve`; see
+The stream is `wingman_core::AgentEvent` in snake case, one JSON object per
+`data:` line, the `event:` name being the payload's own `type`. IRA reads five
+of the nine:
+
+| Event | What IRA does |
+|---|---|
+| `text_delta` | Collected. This is the answer |
+| `verification` | Appended as "Checks passed/failed" plus the summary. It is the difference between "it wrote something" and "it works" |
+| `stop` | `end_turn` is the only clean finish. `max_turns`, `max_tokens` and `gate_failed` are reported as stopping short |
+| `error` | The turn failed, whatever the HTTP status said |
+| `end` | A non-zero `exit` is a failure; the last line of `stderr` says why |
+
+`thinking_delta` is the model's working-out rather than its answer, and
+`tool_start`, `tool_result`, `usage` and `turn_complete` are machinery. None of
+them are spoken.
+
+**A failing turn returns 200.** An unreachable provider, a rejected key and a
+red gate all arrive as an `error` event inside a successful stream, so judging
+by the status code alone reports a dead turn as a success with nothing to say.
+
+Verified against `wingman serve` 0.3.0 for connection, project discovery, the
+request shape and the error path; a **successful** coding turn has only been
+seen against a stub, because no provider credentials work on this machine. See
 [ROADMAP.md](ROADMAP.md#open-questions).
 
 Timing and the wake threshold stay `const`s in `main.rs`. They are tuned by ear
