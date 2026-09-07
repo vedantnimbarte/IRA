@@ -239,12 +239,12 @@ Kept here rather than buried, because it is the honest shape of the project.
 - **macOS, and any ARM machine.** CI now runs the POSIX setup script and a full
   turn on Ubuntu x86-64 every push, which is how two real bugs in it were
   found. The Darwin and aarch64 branches of that script have still never run.
-- **A coding task that succeeds.** Wingman is connected and `wingman serve`
-  0.3.0 has been run against it — which is how three wrong guesses about its
-  API were found — but no provider credentials work on this machine, so every
-  turn that has completed did so against a stub. kortex-memory is likewise
-  connected and verified against a stub of its sixteen tools, never the real
-  server.
+- **Anything driven by a real model.** Every measurement and every completed
+  turn used a stub, which is why `ttft_ms` has never been above zero. Wingman
+  is connected to the real `wingman serve` 0.3.0 and a turn runs end to end,
+  but behind a stub it answers and stops — so it has never edited a file or
+  run its verification gate through IRA. kortex-memory is connected and
+  verified against a stub of its sixteen tools, never the real server.
 
 ## Tests
 
