@@ -285,24 +285,56 @@ impl Tool for Clock {
 /// Server-supplied text is an instruction channel; this bounds how much of one.
 pub const DESC_MAX: usize = 1024;
 
-/// Words that count as yes and no. Matched against the whole trimmed
-/// transcript, not as substrings -- "no, don't do that" must not hit "do that".
+const YES: &[&str] = &[
+    "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "do it", "go ahead", "confirm", "send it",
+    "please do",
+];
+const NO: &[&str] = &[
+    "no", "nope", "nah", "cancel", "stop", "dont", "do not", "never mind", "nevermind",
+    "forget it",
+];
+
+/// Lowercased, stripped of punctuation, whitespace collapsed.
+fn normalise(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { ' ' })
+        .collect();
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Whether a spoken answer is a yes, a no, or neither.
+///
+/// Matched against the whole answer rather than as substrings, so "no, don't do
+/// that" does not hit "do it".
+///
+/// A single word said once may still arrive many times. Whisper repeats a short
+/// utterance over the silence that follows it, so a perfectly clear "No." comes
+/// back as "No. No. No. No. No." -- which an exact match reads as gibberish, and
+/// which then fails closed for the wrong reason. With a real microphone that
+/// trailing silence is guaranteed, so the repetition is the normal case rather
+/// than the odd one: an answer made only of one repeated word is that word.
 pub fn yes_no(transcript: &str) -> Option<bool> {
-    let t = transcript
-        .trim()
-        .trim_end_matches(['.', '!', '?'])
-        .to_lowercase();
-    const YES: &[&str] = &[
-        "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "do it", "go ahead", "confirm",
-        "send it", "please do",
-    ];
-    const NO: &[&str] = &[
-        "no", "nope", "nah", "cancel", "stop", "don't", "do not", "never mind", "nevermind",
-        "forget it",
-    ];
+    let t = normalise(transcript);
+    if t.is_empty() {
+        return None;
+    }
     if YES.contains(&t.as_str()) {
+        return Some(true);
+    }
+    if NO.contains(&t.as_str()) {
+        return Some(false);
+    }
+
+    // Every word the same word, whatever it was repeated.
+    let mut words = t.split(' ');
+    let first = words.next()?;
+    if !words.all(|w| w == first) {
+        return None;
+    }
+    if YES.contains(&first) {
         Some(true)
-    } else if NO.contains(&t.as_str()) {
+    } else if NO.contains(&first) {
         Some(false)
     } else {
         None
@@ -331,6 +363,21 @@ mod tests {
         assert_eq!(yes_no("go ahead"), Some(true));
         assert_eq!(yes_no("No"), Some(false));
         assert_eq!(yes_no("never mind"), Some(false));
+
+        // Whisper repeats a short answer over the silence after it. This is
+        // what a real microphone produces, and it must still be an answer.
+        assert_eq!(yes_no("No.
+ No.
+ No.
+ No.
+ No."), Some(false));
+        assert_eq!(yes_no("Yes. Yes. Yes. Yes."), Some(true));
+        assert_eq!(yes_no("go ahead"), Some(true));
+
+        // Repetition of something that is not an answer is still not an answer.
+        assert_eq!(yes_no("maybe maybe maybe"), None);
+        // And a repeated word must not be read as agreement with a different one.
+        assert_eq!(yes_no("yes no yes no"), None);
 
         // Not an answer. Must be None so the caller re-asks rather than acting.
         assert_eq!(yes_no("hmm, maybe"), None);

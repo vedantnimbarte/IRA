@@ -315,7 +315,7 @@ table with real per-stage numbers.
 | Question | Why it matters | Blocks |
 |---|---|---|
 | When a background job finishes, how does IRA tell you? | Speaking unprompted is a capability IRA has never had. Recommendation: earcon at completion, spoken summary when next Idle. | P8 |
-| Where does kortex-memory run? | It needs Postgres + pgvector, Redis and MinIO. On the GTX 1650 box that competes with whisper for the machine, and stdio versus HTTP/SSE is a real choice. The adapter supports both; nothing has been run. | FR-15 |
+| Where does kortex-memory run? | Attempted. The one-container image (`make local-build && make local-run`) is the right path — Postgres, Redis, the API, the MCP server and the worker in one container. The build reached its final layer three times and the Docker Desktop engine died each time, ending at "Docker Desktop is unable to start". The blocker is that machine's Docker, not kortex and not IRA. | FR-15 |
 | ~~Sixteen schemas in a voice turn?~~ **Solved.** | `only = [...]` per server. Every schema is sent on every round and a tool-calling turn has two rounds, so exposing all sixteen would put thirty-two schemas in front of the model per turn. | ~~P4~~ |
 | Wingman as a library, or over HTTP? | A library dependency pulls 16 crates in for one call site. Recommendation: HTTP first. | P8 |
 | ~~Which UI framework?~~ **Answered: none.** | A page served on loopback, read in a browser. No dependency, no second build, and the browser supplies scrolling, selection and theming. An overlay remains possible later and consumes the same event stream. | ~~P5~~ |
