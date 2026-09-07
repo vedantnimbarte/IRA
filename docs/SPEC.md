@@ -114,9 +114,24 @@ search — "no, don't do that" must not match on "do that".
 
 | Class | Accepted |
 |---|---|
-| YES | `yes` `yeah` `yep` `yup` `sure` `ok` `okay` `do it` `go ahead` `confirm` `send it` |
+| YES | `yes` `yeah` `yep` `yup` `sure` `ok` `okay` `do it` `go ahead` `confirm` `send it` `please do` |
 | NO | `no` `nope` `nah` `cancel` `stop` `don't` `do not` `never mind` `forget it` |
 | Anything else | Re-ask once, then NO |
+
+Punctuation and case are stripped before matching, and **an answer made only of
+one word repeated is that word**. Whisper repeats a short utterance over the
+silence that follows it, so a perfectly clear "No." arrives as
+"No. No. No. No. No."; an exact match reads that as gibberish and fails closed
+for the wrong reason. With a real microphone the trailing silence is
+guaranteed, which makes the repetition the normal case rather than the odd one.
+
+Repetition of something that is not an answer is still not an answer, and a mix
+of yes and no words is not an answer either.
+
+The deadline starts when IRA **finishes asking**, not when it starts. It is how
+long the user gets to answer, so it begins when they can — counting from the
+start of the question spends part of their time on IRA's own voice, which is
+the same error as measuring the barge-in grace from the start of a turn.
 
 ## Errors and what the user hears
 
@@ -216,6 +231,33 @@ url       = "http://127.0.0.1:8765"
 [mcp.server.headers]
 Authorization = "Bearer ..."
 ```
+
+### kortex-memory
+
+The memory store named throughout the roadmap. It offers sixteen tools; a voice
+loop should carry two. Every schema is sent to the model on every round and a
+tool-calling turn has two rounds, so exposing all sixteen would put thirty-two
+schemas in front of the model per turn.
+
+```toml
+[[mcp.server]]
+name      = "kortex"
+transport = "stdio"          # or "http" against http://localhost:8765/sse
+command   = "kortex-mcp"
+only      = ["recall", "remember"]
+
+[mcp.server.tools]
+recall   = { mutates = false, latency = "slow" }
+remember = { mutates = true,  latency = "slow", confirm = "Shall I remember that?" }
+```
+
+The other fourteen — `get_memory` by UUID, `list_memories`, `update_memory`,
+`delete_memory`, `link_memories`, `pin_memory`, the session and attachment
+tools, `get_context_bundle` — are things nobody does by voice. They stay
+available to whatever else talks to kortex.
+
+This has been verified against kortex's tool surface but **not against kortex
+itself**; see [ROADMAP.md](ROADMAP.md#open-questions).
 
 Timing and the wake threshold stay `const`s in `main.rs`. They are tuned by ear
 against the `turn` line, not by anyone editing a file, and config surface nobody

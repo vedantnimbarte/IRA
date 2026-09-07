@@ -543,7 +543,14 @@ async fn main() -> Result<()> {
 
                     State::Confirming => {
                         utterance.extend_from_slice(&frame);
-                        utterance_ms += frame_ms;
+                        // The deadline is how long the user gets to answer, so
+                        // it starts when they can: once IRA has finished asking.
+                        // Counting from the start of the question spends part of
+                        // their time on IRA's own voice -- the same error as
+                        // measuring the barge-in grace from the start of a turn.
+                        if heard_speech || tts.idle() {
+                            utterance_ms += frame_ms;
+                        }
                         for speech in vad.push(&frame)? {
                             if speech {
                                 heard_speech = true;
