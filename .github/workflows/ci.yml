@@ -89,16 +89,20 @@ jobs:
           fi
           cat /proc/asound/cards || true
 
-      # Keyed on the script, so a change to it rebuilds whisper.cpp and
-      # re-downloads everything -- which is exactly when that path needs
-      # proving again.
-      - name: Cache models and binaries
+      # Downloads only. whisper/ is deliberately absent: whisper.cpp builds for
+      # the CPU it is built on, so a binary cached from one runner dies with
+      # SIGILL on the next one that lacks an instruction it was compiled to
+      # use. That is not a flake to retry -- it is the same binary a user would
+      # get by copying whisper/ between two of their own machines.
+      #
+      # So it is rebuilt every run, which also means the build path is proven on
+      # every push rather than only when the script changes.
+      - name: Cache the downloads
         uses: actions/cache@v4
         with:
           path: |
             models
             piper
-            whisper
           key: setup-${{ runner.os }}-${{ hashFiles('scripts/fetch-models.sh') }}
 
       # tiny.en rather than base.en: this checks that the pipeline runs, not how

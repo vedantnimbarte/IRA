@@ -85,6 +85,12 @@ if [ "$WHISPER" = "1" ]; then
     # No prebuilt whisper.cpp binaries are published for Linux or macOS, so this
     # builds from source. cmake and a C++ compiler are required; on macOS the
     # build picks up Metal, which makes the GPU question answer itself.
+    #
+    # What it produces is tuned for the CPU it is built on. Do not copy whisper/
+    # to another machine: a binary compiled for an instruction set the other one
+    # lacks dies with SIGILL, and it does so mid-request rather than at start-up,
+    # so the symptom is a transcription that hangs up rather than a clear error.
+    # Run this script there instead.
     if [ -z "$MODEL" ]; then MODEL=base.en; fi
     if [ ! -x "$root/whisper/whisper-server" ]; then
         echo "build whisper.cpp (needs cmake and a C++ compiler)"
