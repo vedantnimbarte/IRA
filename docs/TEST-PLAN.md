@@ -278,12 +278,25 @@ of what matters, once the file-based frame source exists.
 | Loop tests via `IRA_AUDIO_FILE` | Every push, virtual clock | Yes, from P0 |
 | Latency benchmark, local STT | Nightly on the GPU machine | No — report a trend; a threshold here would flake on shared hardware |
 | Fault-injection suite | Every push | Yes, from P1 |
+| Setup script + one turn, Ubuntu | Every push | Yes — the `smoke` job |
 | Manual scripts T-1, T-3, T-4 | Before each phase sign-off | Yes, by hand |
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs the matrix. The
-Linux leg is the only thing in this repository that has ever built IRA anywhere
-but one Windows machine, so it is doing double duty: gating pull requests, and
-being the first evidence that the code is portable at all.
+Linux legs are the only thing in this repository that has ever built IRA
+anywhere but one Windows machine, so they do double duty: gating pull requests,
+and being the evidence that the code is portable at all.
+
+The `smoke` job is the stronger of the two. `test` proves the code compiles off
+Windows; `smoke` proves the README is true — it starts with nothing, runs
+`scripts/fetch-models.sh --whisper`, and then holds a turn through the real
+Silero, the real whisper.cpp and the real Piper, with
+[`scripts/stub-llm.py`](../scripts/stub-llm.py) standing in for the model so no
+key is needed. It asserts on `heard user=` and `reply ira=`, because a job that
+only proves a binary launches is the failure this repository keeps finding.
+
+Its cache is keyed on the hash of `fetch-models.sh`, so editing the script
+rebuilds whisper.cpp from source instead of reusing an artefact built by an
+older version of the instructions under test.
 
 Tests requiring a live service stay skipped-by-default and self-describing,
 following the pattern already in the repo: the ONNX tests skip with a note when
