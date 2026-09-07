@@ -90,6 +90,7 @@ around: [decisions/0001](docs/decisions/0001-audio-path-stays-in-one-process.md)
 | `llm.rs` | Streaming generation, sentence splitting, tool loop |
 | `tool.rs` | The `Tool` trait, the registry, the confirmation gate |
 | `mcp.rs` | MCP servers adapted to that trait |
+| `wingman.rs` | Wingman's own HTTP API adapted to that trait |
 | `ui.rs` | The screen and its event stream |
 | `main.rs` | The state machine |
 | `metrics.rs` · `doctor.rs` · `config.rs` · `transcript.rs` | Timing, preflight, `ira.toml`, the record |
@@ -120,6 +121,26 @@ calls itself harmless and is not would otherwise walk straight through the gate.
 
 `latency = "background"` detaches the work: IRA answers immediately, a soft pip
 sounds when it finishes, and the words wait until she next has the floor.
+
+### Wingman
+
+[Wingman](https://github.com/vedantnimbarte/wingman) is a terminal coding
+agent, and the one capability that is not a line of `ira.toml`: it is an MCP
+*client*, not a server, so IRA speaks its HTTP API directly
+([decisions/0012](docs/decisions/0012-wingman-is-a-built-in-not-an-mcp-shim.md)).
+
+```powershell
+wingman serve                       # defaults to port 8787
+$env:IRA_WINGMAN_URL = "http://127.0.0.1:8787"
+```
+
+That is the whole setup. `IRA_WINGMAN_TOKEN` is needed only if the daemon
+requires one, and `IRA_WINGMAN_PROJECT` only if you want something other than
+the first project it lists. Without `IRA_WINGMAN_URL`, or if nothing answers at
+it, the tool is never registered and the model is never told about it.
+
+Asking for code by voice is a write, so it asks first, and it is a background
+job, so a turn that takes ten minutes does not hold the conversation open.
 
 ## The screen
 
@@ -189,7 +210,7 @@ Everything worth tuning is a `const` at the top of `main.rs`.
 Every environment variable is listed in
 [SPEC.md](docs/SPEC.md#environment-variables). The ones you are most likely to
 want: `IRA_STT_URL`, `IRA_LLM_URL`, `IRA_PTT`, `IRA_UI`, `IRA_CONFIG`,
-`IRA_TRANSCRIPT`.
+`IRA_TRANSCRIPT`, `IRA_WINGMAN_URL`.
 
 ## Docs
 
@@ -218,12 +239,16 @@ Kept here rather than buried, because it is the honest shape of the project.
 - **Another machine.** IRA has only ever been built and run on one Windows box.
   The POSIX setup script parses and fetches models; its Piper download and
   whisper.cpp build have never run.
-- **kortex-memory and Wingman.** The MCP adapter is built and tested against a
-  server written to attack it, but neither real integration has been connected.
+- **A coding task that succeeds.** Wingman is connected and `wingman serve`
+  0.3.0 has been run against it — which is how three wrong guesses about its
+  API were found — but no provider credentials work on this machine, so every
+  turn that has completed did so against a stub. kortex-memory is likewise
+  connected and verified against a stub of its sixteen tools, never the real
+  server.
 
 ## Tests
 
-`cargo test` — 45 tests, no network, microphone or API key needed.
+`cargo test` — 58 tests, no network, microphone or API key needed.
 
 They aim at failures that are **silent** rather than loud, because those are the
 ones that survive a code review:

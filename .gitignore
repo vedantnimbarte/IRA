@@ -7,3 +7,6 @@
 /whisper/
 # Written by IRA at runtime -- a record of your conversations, not source.
 /transcript.jsonl
+
+# wingman serve keeps its index, sessions and memory here.
+.wingman/

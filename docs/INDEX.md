@@ -53,11 +53,12 @@ context, the decision, its consequences, and what would change it.
 | [0004](decisions/0004-write-status-is-ours-not-the-servers.md) | Write status is declared by us, never by the server | accepted |
 | [0005](decisions/0005-slow-tools-get-filler-speech.md) | Slow tools get filler speech | accepted |
 | [0006](decisions/0006-background-jobs-return-an-id.md) | Background jobs return an id; no queue, no database | accepted |
-| [0007](decisions/0007-wingman-over-http-not-as-a-library.md) | Wingman over HTTP, not as a library dependency | proposed |
+| [0007](decisions/0007-wingman-over-http-not-as-a-library.md) | Wingman over HTTP, not as a library dependency | accepted |
 | [0008](decisions/0008-rejected-assembling-ira-from-echo-and-wingman.md) | Assembling IRA from Echo and Wingman | rejected |
 | [0009](decisions/0009-the-screen-is-a-served-page.md) | The screen is a page IRA serves, not a window it owns | accepted |
 | [0010](decisions/0010-press-to-talk-before-echo-cancellation.md) | Press-to-talk ships before echo cancellation | accepted |
 | [0011](decisions/0011-a-tone-now-and-words-when-idle.md) | A tone now, and words when IRA next has the floor | accepted |
+| [0012](decisions/0012-wingman-is-a-built-in-not-an-mcp-shim.md) | Wingman is a built-in, not an MCP shim | accepted |
 
 ## Looking for something specific?
 

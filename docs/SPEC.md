@@ -190,6 +190,9 @@ directory.
 | `IRA_SPECULATE_MS` | `200` | Silence after which transcription starts. Above `ENDPOINT_MS` disables speculation, which is how the two are compared on one machine |
 | `IRA_TAIL_MS` | `3000` | Silence appended after a replayed file. The model's round trip happens inside this window, so a benchmark wanting the whole reply needs more |
 | `IRA_SKIP_WAKE` | *unset* | Start in Listening. openWakeWord does not fire on synthesised speech, so a Piper corpus never gets past Idle |
+| `IRA_WINGMAN_URL` | *unset* | `wingman serve`, e.g. `http://127.0.0.1:8787`. Unset → no `wingman` tool at all |
+| `IRA_WINGMAN_TOKEN` | *unset* | Bearer token. Required only if `/v1/health` reports `auth_required` |
+| `IRA_WINGMAN_PROJECT` | *first listed* | Which project a coding task goes to. Wingman's own allowlist decides what is reachable |
 | `RUST_LOG` | `ira=info` | Must match the crate name; a rename silently disables logging |
 
 ### `ira.toml`
@@ -258,6 +261,58 @@ available to whatever else talks to kortex.
 
 This has been verified against kortex's tool surface but **not against kortex
 itself**; see [ROADMAP.md](ROADMAP.md#open-questions).
+
+### Wingman
+
+Wingman is an MCP *client*, not a server, so it is the one capability that
+cannot arrive as a line of `ira.toml`. It gets `src/wingman.rs`, which speaks
+its HTTP API and implements the same `Tool` trait as everything else, so the
+registry and the model cannot tell it apart from an MCP tool.
+
+| Route | Used for |
+|---|---|
+| `GET /v1/health` | Is a daemon there, and will it want a token. The one unauthenticated route |
+| `GET /v1/projects` | The allowlist, when `IRA_WINGMAN_PROJECT` is unset |
+| `POST /v1/projects/{id}/turns` | `{prompt, model, mode}` in, typed SSE events out |
+
+One tool, `wingman`, taking one string. It is declared `mutates = true` with
+`latency = "background"`:
+
+- **Mutating** because it edits files and runs commands. That is the most
+  expensive thing a misheard sentence could cause, so it goes through the same
+  spoken confirmation as any other write.
+- **Background** because a coding turn takes minutes. It returns
+  `Started`, the loop takes further turns while it runs, and the result is
+  spoken at the next Idle like any other job (see [Background jobs](#background-jobs)).
+
+A refused turn — a busy session, a spend ceiling — comes back as a JSON error
+rather than an empty stream, and is reported as a refusal rather than as
+silence.
+
+The stream is `wingman_core::AgentEvent` in snake case, one JSON object per
+`data:` line, the `event:` name being the payload's own `type`. IRA reads five
+of the nine:
+
+| Event | What IRA does |
+|---|---|
+| `text_delta` | Collected. This is the answer |
+| `verification` | Appended as "Checks passed/failed" plus the summary. It is the difference between "it wrote something" and "it works" |
+| `stop` | `end_turn` is the only clean finish. `max_turns`, `max_tokens` and `gate_failed` are reported as stopping short |
+| `error` | The turn failed, whatever the HTTP status said |
+| `end` | A non-zero `exit` is a failure; the last line of `stderr` says why |
+
+`thinking_delta` is the model's working-out rather than its answer, and
+`tool_start`, `tool_result`, `usage` and `turn_complete` are machinery. None of
+them are spoken.
+
+**A failing turn returns 200.** An unreachable provider, a rejected key and a
+red gate all arrive as an `error` event inside a successful stream, so judging
+by the status code alone reports a dead turn as a success with nothing to say.
+
+Verified against `wingman serve` 0.3.0 for connection, project discovery, the
+request shape and the error path; a **successful** coding turn has only been
+seen against a stub, because no provider credentials work on this machine. See
+[ROADMAP.md](ROADMAP.md#open-questions).
 
 Timing and the wake threshold stay `const`s in `main.rs`. They are tuned by ear
 against the `turn` line, not by anyone editing a file, and config surface nobody

@@ -26,6 +26,7 @@ mod tts;
 mod ui;
 mod vad;
 mod wake;
+mod wingman;
 
 use anyhow::{Context, Result};
 use metrics::Timings;
@@ -303,6 +304,12 @@ async fn main() -> Result<()> {
         h.add(Arc::new(tool::Clock));
         for t in mcp::connect_all(&cfg.mcp.server).await {
             h.add(t);
+        }
+        // Wingman is an MCP client, not a server, so it cannot arrive through
+        // the loop above. It is only registered when it is actually running --
+        // a tool the model can see but cannot use is worse than no tool.
+        if let Some(w) = wingman::Wingman::connect(&client).await {
+            h.add(Arc::new(w));
         }
         Arc::new(h)
     };

@@ -1,6 +1,6 @@
 # 0007 — Wingman over HTTP, not as a library dependency
 
-**Status:** proposed
+**Status:** accepted
 **Date:** 2026-09-06
 
 ## Context
@@ -18,7 +18,8 @@ Wingman also already ships a headless surface: `wingman serve` with an HTTP API,
 Reach Wingman through `wingman serve`'s HTTP API, adapted as one tool with
 `latency = "background"`. Do not take a crate dependency.
 
-Provisional — confirm at P8.
+Confirmed. See [0012](0012-wingman-is-a-built-in-not-an-mcp-shim.md) for where
+that code ended up living.
 
 ## Consequences
 
