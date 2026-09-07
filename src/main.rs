@@ -243,6 +243,11 @@ async fn main() -> Result<()> {
                 // paths, so a rename here silently turns off all logging.
                 .unwrap_or_else(|_| "ira=info".into()),
         )
+        // Colour only for a person watching. Redirected to a file, the escape
+        // codes land between the field name and its value, so `heard user=`
+        // is not a string that appears in the log and grep finds nothing in a
+        // log that plainly contains it.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
 
     let models = std::env::var("IRA_MODELS")
