@@ -32,9 +32,8 @@ pub enum Latency {
     Slow,
     /// Unbounded. Returns [`ToolOutcome::Started`] and reports later.
     ///
-    /// Declared now because it is the shape that forced three outcome variants
-    /// rather than one; nothing returns it until P8 gives jobs a table.
-    #[allow(dead_code)]
+    /// Wingman is the reason this exists: a coding turn takes minutes, and no
+    /// conversation can be held open that long.
     Background,
 }
 
@@ -44,8 +43,8 @@ impl Latency {
         match self {
             Latency::Fast => Duration::from_millis(300),
             Latency::Slow => Duration::from_secs(15),
-            // ponytail: P8 gives these a job table. Nothing declares Background
-            // yet, so this cap is never actually reached.
+            // ponytail: ten minutes is a guess at the longest coding turn worth
+            // waiting for. Raise it if a real Wingman run is ever cut off here.
             Latency::Background => Duration::from_secs(600),
         }
     }

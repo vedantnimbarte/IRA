@@ -236,7 +236,7 @@ older baseline: median `total_ms` 1667 → 1145. The saving lands on
 **Depends:** P0 — and this is what P0 was for. The change is invisible without
 the `turn` line, and could not have been argued for without a number.
 
-### P8 — Background jobs and Wingman — *mostly done*
+### P8 — Background jobs and Wingman — *done*
 
 Tools that take minutes, not seconds.
 
@@ -247,16 +247,19 @@ Tools that take minutes, not seconds.
 - Proactive speech: a pip the instant a job lands, the words at the next `Idle`.
   See [0011](decisions/0011-a-tone-now-and-words-when-idle.md)
 - Jobs lost at shutdown are counted and said out loud
-- ~~Wingman~~ **not connected.** Nothing in IRA is Wingman-specific: the
-  background machinery is reached by any MCP tool through one line of
-  `ira.toml`. Wingman is not an MCP server, so it still needs its `serve` HTTP
-  surface bridged — the same gap as kortex-memory, and for the same reason
+- Wingman, as `src/wingman.rs`: one tool over `wingman serve`'s HTTP API,
+  registered only when `IRA_WINGMAN_URL` names a daemon that answers. It is an
+  MCP *client*, not a server, so it is the one capability that cannot arrive as
+  a line of `ira.toml`. See
+  [0012](decisions/0012-wingman-is-a-built-in-not-an-mcp-shim.md)
 
-**Exit:** a coding task issued by voice, reported when it finishes.
-**Met in mechanism**, against a stub MCP server declaring a six-second
-`run_build`: IRA answered "I have started the build" without waiting, returned
-to Idle, then reported "Build passed. Three tests failed in the parser." when it
-landed. Not met against Wingman itself, which has never been run.
+**Exit:** a coding task issued by voice, reported when it finishes. **Met**,
+against a stub of Wingman's HTTP API: IRA asked "Send that to Wingman?", heard
+"Yes", POSTed `add a retry to the uploader` to
+`/v1/projects/ira/turns`, said "I have sent that to Wingman" without waiting,
+returned to Idle, and reported the summary when the turn landed. Saying "No"
+sent nothing at all, and a 429 was reported as a refusal rather than as
+silence. Not met against `wingman serve` itself, which has never been run.
 
 **Depends:** P3, P4, and the proactive-speech decision — which
 [0011](decisions/0011-a-tone-now-and-words-when-idle.md) now settles.
@@ -317,7 +320,7 @@ table with real per-stage numbers.
 | When a background job finishes, how does IRA tell you? | Speaking unprompted is a capability IRA has never had. Recommendation: earcon at completion, spoken summary when next Idle. | P8 |
 | Where does kortex-memory run? | Attempted. The one-container image (`make local-build && make local-run`) is the right path — Postgres, Redis, the API, the MCP server and the worker in one container. The build reached its final layer three times and the Docker Desktop engine died each time, ending at "Docker Desktop is unable to start". The blocker is that machine's Docker, not kortex and not IRA. | FR-15 |
 | ~~Sixteen schemas in a voice turn?~~ **Solved.** | `only = [...]` per server. Every schema is sent on every round and a tool-calling turn has two rounds, so exposing all sixteen would put thirty-two schemas in front of the model per turn. | ~~P4~~ |
-| Wingman as a library, or over HTTP? | A library dependency pulls 16 crates in for one call site. Recommendation: HTTP first. | P8 |
+| ~~Wingman as a library, or over HTTP?~~ **Answered: HTTP.** | A library dependency pulls 16 crates in for one call site, and the process boundary is what lets a coding turn outlive the conversation that asked for it. Connected and verified against a stub of that API, not against `wingman serve`. | ~~P8~~ |
 | ~~Which UI framework?~~ **Answered: none.** | A page served on loopback, read in a browser. No dependency, no second build, and the browser supplies scrolling, selection and theming. An overlay remains possible later and consumes the same event stream. | ~~P5~~ |
 
 ## Considered and deferred

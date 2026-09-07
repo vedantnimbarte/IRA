@@ -103,6 +103,7 @@ The exhaustive transition table lives in [SPEC.md](SPEC.md).
 | `llm.rs` | Streaming generation, sentence splitting, the tool loop | Config |
 | `tool.rs` | The `Tool` trait, registry, confirmation gate, background jobs | **Trait** |
 | `mcp.rs` | MCP servers adapted to that trait | Config |
+| `wingman.rs` | Wingman's own HTTP API adapted to that trait | Config |
 | `config.rs` | `ira.toml`: servers and per-tool policy | Config |
 | `doctor.rs` | Preflight checks; the fatal subset gates start-up | Closed |
 | `metrics.rs` | Per-turn timing, and the `turn` line | Closed |

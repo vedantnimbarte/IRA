@@ -190,6 +190,9 @@ directory.
 | `IRA_SPECULATE_MS` | `200` | Silence after which transcription starts. Above `ENDPOINT_MS` disables speculation, which is how the two are compared on one machine |
 | `IRA_TAIL_MS` | `3000` | Silence appended after a replayed file. The model's round trip happens inside this window, so a benchmark wanting the whole reply needs more |
 | `IRA_SKIP_WAKE` | *unset* | Start in Listening. openWakeWord does not fire on synthesised speech, so a Piper corpus never gets past Idle |
+| `IRA_WINGMAN_URL` | *unset* | `wingman serve`, e.g. `http://127.0.0.1:8787`. Unset → no `wingman` tool at all |
+| `IRA_WINGMAN_TOKEN` | *unset* | Bearer token. Required only if `/v1/health` reports `auth_required` |
+| `IRA_WINGMAN_PROJECT` | *first listed* | Which project a coding task goes to. Wingman's own allowlist decides what is reachable |
 | `RUST_LOG` | `ira=info` | Must match the crate name; a rename silently disables logging |
 
 ### `ira.toml`
@@ -258,6 +261,37 @@ available to whatever else talks to kortex.
 
 This has been verified against kortex's tool surface but **not against kortex
 itself**; see [ROADMAP.md](ROADMAP.md#open-questions).
+
+### Wingman
+
+Wingman is an MCP *client*, not a server, so it is the one capability that
+cannot arrive as a line of `ira.toml`. It gets `src/wingman.rs`, which speaks
+its HTTP API and implements the same `Tool` trait as everything else, so the
+registry and the model cannot tell it apart from an MCP tool.
+
+| Route | Used for |
+|---|---|
+| `GET /v1/health` | Is a daemon there, and will it want a token. The one unauthenticated route |
+| `GET /v1/projects` | The allowlist, when `IRA_WINGMAN_PROJECT` is unset |
+| `POST /v1/projects/{id}/turns` | `{prompt, model, mode}` in, typed SSE events out |
+
+One tool, `wingman`, taking one string. It is declared `mutates = true` with
+`latency = "background"`:
+
+- **Mutating** because it edits files and runs commands. That is the most
+  expensive thing a misheard sentence could cause, so it goes through the same
+  spoken confirmation as any other write.
+- **Background** because a coding turn takes minutes. It returns
+  `Started`, the loop takes further turns while it runs, and the result is
+  spoken at the next Idle like any other job (see [Background jobs](#background-jobs)).
+
+A refused turn — a busy session, a spend ceiling — comes back as a JSON error
+rather than an empty stream, and is reported as a refusal rather than as
+silence. Only the last assistant text is spoken; diffs and tool output go to
+the screen.
+
+Verified against a stub of that API, not against `wingman serve`; see
+[ROADMAP.md](ROADMAP.md#open-questions).
 
 Timing and the wake threshold stay `const`s in `main.rs`. They are tuned by ear
 against the `turn` line, not by anyone editing a file, and config surface nobody
