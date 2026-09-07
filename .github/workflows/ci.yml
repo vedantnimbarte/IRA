@@ -51,3 +51,112 @@ jobs:
   # cargo fmt is deliberately absent: the tree has pre-existing diffs and
   # gating on it would fail every pull request until someone lands a formatting
   # commit. See docs/TEST-PLAN.md.
+
+  # P9's exit criterion, mechanised: a machine that has only run the setup
+  # script can hold a conversation. Everything here is a fresh Ubuntu runner
+  # with no models, no piper, no whisper and no API key -- which is the closest
+  # thing to "somebody else's computer" this project can reach without owning
+  # a second machine.
+  #
+  # The `test` job above proves the code compiles off Windows. This proves the
+  # instructions in the README are true, which is a different claim and the one
+  # that had never been checked: the Piper download and the whisper.cpp build in
+  # fetch-models.sh had never run anywhere.
+  smoke:
+    name: setup script and one turn (ubuntu)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install ALSA
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      # Piper plays through rodio, which needs an output device to exist at all,
+      # and a CI runner has no sound card. snd-dummy is a real one that goes
+      # nowhere; the ALSA null plugin is the fallback when the module is not
+      # available for the runner's kernel.
+      - name: A sound card that goes nowhere
+        run: |
+          sudo modprobe snd-dummy || true
+          if ! grep -q '\[' /proc/asound/cards 2>/dev/null; then
+            echo "no card; falling back to the ALSA null plugin"
+            printf 'pcm.!default { type null }\nctl.!default { type null }\n' \
+              | sudo tee /etc/asound.conf
+          fi
+          cat /proc/asound/cards || true
+
+      # Downloads only. whisper/ is deliberately absent: whisper.cpp builds for
+      # the CPU it is built on, so a binary cached from one runner dies with
+      # SIGILL on the next one that lacks an instruction it was compiled to
+      # use. That is not a flake to retry -- it is the same binary a user would
+      # get by copying whisper/ between two of their own machines.
+      #
+      # So it is rebuilt every run, which also means the build path is proven on
+      # every push rather than only when the script changes.
+      - name: Cache the downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            models
+            piper
+          key: setup-${{ runner.os }}-${{ hashFiles('scripts/fetch-models.sh') }}
+
+      # tiny.en rather than base.en: this checks that the pipeline runs, not how
+      # well it hears, and it is a third of the download.
+      - name: Run the setup script
+        run: ./scripts/fetch-models.sh --whisper --model tiny.en
+
+      - name: Show what it produced
+        run: ls -l models piper whisper
+
+      - name: Build
+        run: cargo build --release
+
+      - name: One turn, end to end
+        run: |
+          set -eu
+          ./whisper/whisper-server -m models/ggml-tiny.en.bin \
+            --host 127.0.0.1 --port 8231 > whisper.log 2>&1 &
+          python3 scripts/stub-llm.py > llm.log 2>&1 &
+          # whisper-server loads its model before it listens. Failing here,
+          # loudly, beats letting the run continue into a connection-refused
+          # inside IRA -- which reads as an IRA bug and is not one.
+          for i in $(seq 30); do
+            curl -sf -o /dev/null http://127.0.0.1:8231/ && break
+            sleep 1
+          done
+          curl -sf -o /dev/null http://127.0.0.1:8231/ || {
+            echo 'FAIL: whisper-server never started'
+            cat whisper.log
+            exit 1
+          }
+
+          IRA_STT_URL=http://127.0.0.1:8231/inference \
+          IRA_LLM_URL=http://127.0.0.1:8299/v1/chat/completions \
+          IRA_LLM_MODEL=stub \
+          IRA_AUDIO_FILE=corpus/speech-16k.wav \
+          IRA_SKIP_WAKE=1 \
+          IRA_UI=off \
+          IRA_TRANSCRIPT=off \
+          IRA_TAIL_MS=6000 \
+          RUST_LOG=info \
+          timeout 120 ./target/release/ira > ira.log 2>&1
+
+          echo '--- ira.log ---'
+          cat ira.log
+
+          # Heard and answered. Either one missing is a broken pipeline, and
+          # without this the run would pass on a program that started and did
+          # nothing -- which is the exact failure this repository keeps finding.
+          grep -q 'heard .*user=' ira.log \
+            || { echo 'FAIL: nothing was transcribed'; exit 1; }
+          grep -q 'reply .*ira=' ira.log \
+            || { echo 'FAIL: nothing was said back'; exit 1; }
+
+      - name: Logs on failure
+        if: failure()
+        run: tail -n 50 whisper.log llm.log ira.log || true

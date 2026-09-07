@@ -236,9 +236,9 @@ Kept here rather than buried, because it is the honest shape of the project.
   time-to-first-token has never been observed above zero. The latency work in
   [BASELINE.md](docs/BASELINE.md) optimised the transcription half of a budget
   whose model half is unmeasured.
-- **Another machine.** IRA has only ever been built and run on one Windows box.
-  The POSIX setup script parses and fetches models; its Piper download and
-  whisper.cpp build have never run.
+- **macOS, and any ARM machine.** CI now runs the POSIX setup script and a full
+  turn on Ubuntu x86-64 every push, which is how two real bugs in it were
+  found. The Darwin and aarch64 branches of that script have still never run.
 - **A coding task that succeeds.** Wingman is connected and `wingman serve`
   0.3.0 has been run against it — which is how three wrong guesses about its
   API were found — but no provider credentials work on this machine, so every

@@ -273,7 +273,7 @@ daemon is still unseen: no provider credentials work on this machine.
 **Depends:** P3, P4, and the proactive-speech decision — which
 [0011](decisions/0011-a-tone-now-and-words-when-idle.md) now settles.
 
-### P9 — v1.0 hardening — *partly done*
+### P9 — v1.0 hardening — *done, except packaging*
 
 Something another person can install and run.
 
@@ -288,11 +288,28 @@ Something another person can install and run.
   friction apply unchanged
 
 **Exit:** a clean machine goes from download to conversation without reading
-source. **Unproven.** Every Windows-bound assumption found in the source has
-been removed, but IRA has never been built or run anywhere except this machine.
-The POSIX script parses and its model-fetching path was exercised; the Piper
-download and the whisper.cpp build in it have not been run, because both need a
-Linux or macOS box.
+source. **Met on Linux**, by the `smoke` job in
+[ci.yml](../.github/workflows/ci.yml): a fresh Ubuntu runner with no models, no
+piper, no whisper and no API key runs `fetch-models.sh --whisper`, replays a WAV
+through the real pipeline, and fails unless IRA both transcribed something and
+answered. It heard "What is the weather today?" and spoke a reply.
+
+The first run of it was red, which is the point of having written it. Two real
+faults:
+
+- **whisper.cpp could not start.** The script copies the binaries out of the
+  build tree next to their shared libraries, on the assumption that an
+  executable finds libraries in its own directory. Windows does that; ELF does
+  not. `whisper-server` built, copied, was executable, and died on launch —
+  visible only as a connection refused inside IRA half a minute later. Now built
+  static, and the check after it runs the binary rather than testing `-x`.
+- **The log was unreadable to anything but a person.** The subscriber wrote ANSI
+  unconditionally, so `heard user=` is not a string that appears in a redirected
+  log even though that is what the log says. Colour is now conditional on a
+  terminal.
+
+macOS and aarch64 remain unproven: the script's branches for them exist and have
+never run.
 
 **Cost, not just tokens.** Deliberately not implemented. Pricing means a table
 of per-model rates that goes stale silently and is wrong in the direction of
