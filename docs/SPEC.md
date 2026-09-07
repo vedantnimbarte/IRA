@@ -309,9 +309,21 @@ them are spoken.
 red gate all arrive as an `error` event inside a successful stream, so judging
 by the status code alone reports a dead turn as a success with nothing to say.
 
-Verified against `wingman serve` 0.3.0 for connection, project discovery, the
-request shape and the error path; a **successful** coding turn has only been
-seen against a stub, because no provider credentials work on this machine. See
+Verified against `wingman serve` 0.3.0: connection, project discovery, the
+request shape, the error path, and a turn that runs to `stop: end_turn` and is
+spoken at the next Idle.
+
+No provider key is needed to reproduce that last one. Wingman's local backends
+take a base URL instead of a key, so any OpenAI-compatible endpoint will do:
+
+```
+wingman login llamacpp --base-url http://127.0.0.1:8299 --model stub
+```
+
+What that leaves untested is a turn driven by a **real** model. With a stub
+behind it Wingman answers and stops, so it never calls a tool, never edits a
+file and never runs its verification gate — which means the `verification`
+event, the one worth speaking, has still only been seen from a stub. See
 [ROADMAP.md](ROADMAP.md#open-questions).
 
 Timing and the wake threshold stay `const`s in `main.rs`. They are tuned by ear
