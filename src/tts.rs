@@ -33,6 +33,61 @@ const DRAIN_QUIET: Duration = Duration::from_millis(400);
 /// failure, which is the wrong way round.
 const SYNTH_GRACE: Duration = Duration::from_secs(10);
 
+/// Spoken in place of a code block. The model is asked for none, and the screen
+/// carries the reply in full either way; this is what happens when it writes one
+/// anyway, because saying nothing at all is indistinguishable from a crash.
+const CODE_ELIDED: &str = "I've left the code out of what I say.";
+
+/// What Piper is given, from what the model wrote.
+///
+/// The prompt asks for no markdown, and a prompt is not a guarantee: one `**`
+/// that slips through and Piper says "asterisk asterisk". Stripping is cheap
+/// and deterministic, so it happens here rather than being hoped for. Only the
+/// spoken half is stripped -- the screen, the transcript and the history all
+/// keep the reply exactly as written.
+///
+/// `fence` carries "inside a code block" between calls, because a block arrives
+/// over several sentences and only the first of them holds the opening fence.
+/// `None` means the whole chunk was code and the caller should say so instead.
+fn spoken(text: &str, fence: &mut bool) -> Option<String> {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let mut line = line.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            *fence = !*fence;
+            continue;
+        }
+        if *fence {
+            continue;
+        }
+        // Bullets, quotes and headings: punctuation to the eye, noise to the
+        // ear. Matched with the space, so "-5 degrees" stays a temperature.
+        while let Some(rest) = ["- ", "* ", "+ ", "> ", "# "]
+            .iter()
+            .find_map(|m| line.strip_prefix(m))
+        {
+            line = rest.trim_start();
+        }
+        for c in line.chars() {
+            match c {
+                // Emphasis and inline code, which are silent when they work.
+                '*' | '`' | '~' => {}
+                // "main_loop" reads as two words rather than one long one.
+                '_' => out.push(' '),
+                c => out.push(c),
+            }
+        }
+        out.push(' ');
+    }
+
+    let out = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    // An empty chunk is not a code block; there was simply nothing in it.
+    if out.is_empty() && !text.trim().is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
 pub struct Tts {
     _stream: MixerDeviceSink,
     sink: Arc<Player>,
@@ -52,6 +107,11 @@ pub struct Tts {
     piper: PathBuf,
     voice: PathBuf,
     sample_rate: SampleRate,
+    /// Speech state carried between sentences: inside a fenced code block, and
+    /// whether this turn has already said it is leaving code out. Atomics
+    /// because `begin_turn` clears them through a shared reference.
+    fence: AtomicBool,
+    elided: AtomicBool,
 }
 
 impl Tts {
@@ -78,6 +138,8 @@ impl Tts {
             last_audio: Arc::new(AtomicU64::new(0)),
             awaiting: Arc::new(AtomicBool::new(false)),
             first_audio: Arc::new(AtomicU64::new(0)),
+            fence: AtomicBool::new(false),
+            elided: AtomicBool::new(false),
             started: Instant::now(),
             piper: piper.to_path_buf(),
             voice: voice.to_path_buf(),
@@ -156,7 +218,25 @@ impl Tts {
     }
 
     /// Queues one sentence. Piper starts generating as soon as the line lands.
+    ///
+    /// Every route to the speaker comes through here -- the model's sentences,
+    /// tool results, background job reports, IRA's own questions -- so this is
+    /// the one place written text becomes spoken text.
     pub fn say(&mut self, text: &str) -> Result<()> {
+        let mut fence = self.fence.load(Ordering::Relaxed);
+        let line = spoken(text, &mut fence);
+        self.fence.store(fence, Ordering::Relaxed);
+        match line {
+            Some(line) => self.write_line(&line),
+            // Nothing left but code. Said once a turn: repeating it for every
+            // sentence of a long block would be worse than reading the code.
+            None if !self.elided.swap(true, Ordering::Relaxed) => self.write_line(CODE_ELIDED),
+            // Silence here is deliberate, and the screen still has all of it.
+            None => Ok(()),
+        }
+    }
+
+    fn write_line(&mut self, text: &str) -> Result<()> {
         let stdin = self.stdin.as_mut().ok_or_else(|| anyhow!("piper stdin closed"))?;
         writeln!(stdin, "{}", text.replace('\n', " "))?;
         stdin.flush()?;
@@ -182,6 +262,10 @@ impl Tts {
     /// Called when IRA takes the floor, so `first_audio_ms` measures this turn.
     pub fn begin_turn(&self) {
         self.first_audio.store(0, Ordering::Relaxed);
+        // A code block cannot span two turns, and each turn gets its own chance
+        // to say it left one out.
+        self.fence.store(false, Ordering::Relaxed);
+        self.elided.store(false, Ordering::Relaxed);
         self.sink.set_volume(1.0);
     }
 
@@ -287,5 +371,40 @@ impl Drop for Tts {
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The system prompt asks for no markdown. This is what protects the ear
+    /// when the model does it anyway -- a failure that is audible but silent in
+    /// every test that only checks the text IRA meant to say.
+    #[test]
+    fn markdown_never_reaches_piper() {
+        let mut fence = false;
+        assert_eq!(
+            spoken("**Yes**, it is in `src/main.rs`.", &mut fence).as_deref(),
+            Some("Yes, it is in src/main.rs."),
+        );
+        assert_eq!(spoken("- first
+- second", &mut fence).as_deref(), Some("first second"));
+        // A bullet needs its space. This is a temperature.
+        assert_eq!(spoken("-5 degrees.", &mut fence).as_deref(), Some("-5 degrees."));
+    }
+
+    /// A block opens in one sentence and closes several later, so the state has
+    /// to survive between calls or the code is read out loud.
+    #[test]
+    fn a_code_block_is_left_out_across_sentences() {
+        let mut fence = false;
+        assert_eq!(spoken("Here you go:
+```rust", &mut fence).as_deref(), Some("Here you go:"));
+        assert!(fence, "the block is still open");
+        assert_eq!(spoken("fn main() { println!(\"hi\"); }", &mut fence), None);
+        assert_eq!(spoken("```
+That is all.", &mut fence).as_deref(), Some("That is all."));
+        assert!(!fence, "the block closed");
     }
 }
