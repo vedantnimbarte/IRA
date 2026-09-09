@@ -156,6 +156,10 @@ on the page; binding it to a real hotkey is your OS's job, not IRA's:
 curl -X POST http://127.0.0.1:8180/talk
 ```
 
+A browser may press it only from IRA's own page: this route opens the
+microphone, and a cross-origin post needs no reply to have its effect. Clients
+that send no `Origin` or `Sec-Fetch-Site`, curl included, are unaffected.
+
 IRA only tells the model it has a screen while a page is actually open.
 `IRA_UI=off` disables it.
 
@@ -248,7 +252,7 @@ Kept here rather than buried, because it is the honest shape of the project.
 
 ## Tests
 
-`cargo test` — 58 tests, no network, microphone or API key needed.
+`cargo test` — 61 tests, no network, microphone or API key needed.
 
 They aim at failures that are **silent** rather than loud, because those are the
 ones that survive a code review:
@@ -263,6 +267,9 @@ ones that survive a code review:
 - A tool from a server that describes itself as harmless walking through the
   confirmation gate.
 - A sentence from an interrupted turn being spoken after the interruption.
+- A page in another tab pressing talk. `POST /talk` opens the microphone, and
+  loopback does not stop a cross-origin post from any site you have open.
+- Markdown reaching Piper, so a stray `**` is read out as "asterisk asterisk".
 
 Tests needing a real service skip with a note rather than fail, so a fresh clone
 passes: the ONNX ones when `models/` is empty, the local-STT one unless

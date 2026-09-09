@@ -57,6 +57,9 @@ pub struct Ui {
     backlog: Arc<Mutex<VecDeque<String>>>,
     /// `POST /talk`. Opens the floor, or interrupts if IRA is speaking.
     talk: mpsc::Sender<()>,
+    /// The port being served, so `POST /talk` can tell its own page from
+    /// someone else's.
+    port: u16,
 }
 
 impl Ui {
@@ -71,6 +74,7 @@ impl Ui {
             watchers: Arc::new(AtomicUsize::new(0)),
             backlog: Arc::new(Mutex::new(VecDeque::with_capacity(BACKLOG))),
             talk,
+            port: DEFAULT_PORT,
         }
     }
 
@@ -79,14 +83,14 @@ impl Ui {
     /// The receiver carries presses of the talk control.
     pub async fn start() -> (Self, mpsc::Receiver<()>) {
         let (talk, talk_rx) = mpsc::channel(4);
-        let ui = Self { talk, ..Self::disabled() };
-
         let setting = std::env::var("IRA_UI").unwrap_or_default();
+        let port: u16 = setting.parse().unwrap_or(DEFAULT_PORT);
+        let ui = Self { talk, port, ..Self::disabled() };
+
         if setting == "off" {
             tracing::info!("screen disabled");
             return (ui, talk_rx);
         }
-        let port: u16 = setting.parse().unwrap_or(DEFAULT_PORT);
 
         // Loopback only. This carries a live transcript of everything said in
         // the room; it does not belong on a network interface.
@@ -128,6 +132,44 @@ impl Ui {
     }
 }
 
+/// Whether this `POST /talk` came from IRA's own page.
+///
+/// Binding to loopback is not the defence it looks like: `POST /talk` opens the
+/// microphone, and any page in any tab can post to 127.0.0.1 cross-origin. It
+/// needs no reply, so CORS never blocks it -- the request has already had its
+/// effect by the time the browser discards the response.
+///
+/// A browser labels its own page's fetch `same-origin` and anything else
+/// `cross-site`. curl sends neither header, which is why the documented
+/// `curl -X POST` still works: this refuses browsers that say they are
+/// elsewhere, not clients that say nothing.
+async fn same_origin<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R, port: u16) -> bool {
+    let mine = [format!("http://127.0.0.1:{port}"), format!("http://localhost:{port}")];
+    let mut line = String::new();
+    let mut ok = true;
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            // A truncated request is not one to act on.
+            Ok(0) | Err(_) => return false,
+            Ok(_) => {}
+        }
+        let Some((name, value)) = line.trim_end().split_once(':') else {
+            // The blank line ends the headers; anything else malformed is not
+            // a header we were looking for.
+            break;
+        };
+        let value = value.trim();
+        match name.trim().to_ascii_lowercase().as_str() {
+            "sec-fetch-site" => ok &= value.eq_ignore_ascii_case("same-origin"),
+            // The fallback for a browser too old to send Sec-Fetch-Site.
+            "origin" => ok &= mine.iter().any(|m| m == value),
+            _ => {}
+        }
+    }
+    ok
+}
+
 async fn serve(mut sock: TcpStream, ui: Ui) {
     let mut line = String::new();
     let (read, mut write) = sock.split();
@@ -137,6 +179,16 @@ async fn serve(mut sock: TcpStream, ui: Ui) {
     }
 
     if line.starts_with("POST /talk") {
+        if !same_origin(&mut reader, ui.port).await {
+            tracing::warn!("cross-site talk press refused");
+            let _ = write
+                .write_all(b"HTTP/1.1 403 Forbidden
+Connection: close
+
+")
+                .await;
+            return;
+        }
         // try_send: a second press while the first is still queued is the same
         // press. Never block the socket on the loop.
         let _ = ui.talk.try_send(());
@@ -367,6 +419,32 @@ mod tests {
             PAGE.matches("<script>").count(),
             PAGE.matches("</script>").count()
         );
+    }
+
+    /// The microphone is one cross-origin POST away from any open tab, and
+    /// loopback does not stand in the way of it.
+    #[tokio::test]
+    async fn a_cross_site_page_cannot_press_talk() {
+        let req = |extra: &str| {
+            std::io::Cursor::new(format!("Host: 127.0.0.1:8180
+{extra}
+").into_bytes())
+        };
+
+        assert!(!same_origin(&mut req("Sec-Fetch-Site: cross-site
+"), 8180).await);
+        assert!(!same_origin(&mut req("Origin: https://evil.example
+"), 8180).await);
+        // Its own page, and a different port's page, are not the same thing.
+        assert!(!same_origin(&mut req("Origin: http://127.0.0.1:3000
+"), 8180).await);
+
+        assert!(same_origin(&mut req("Sec-Fetch-Site: same-origin
+"), 8180).await);
+        assert!(same_origin(&mut req("Origin: http://127.0.0.1:8180
+"), 8180).await);
+        // curl, which is the documented way to bind a real hotkey.
+        assert!(same_origin(&mut req(""), 8180).await);
     }
 
     #[test]
