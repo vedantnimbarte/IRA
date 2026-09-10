@@ -92,6 +92,7 @@ around: [decisions/0001](docs/decisions/0001-audio-path-stays-in-one-process.md)
 | `mcp.rs` | MCP servers adapted to that trait |
 | `wingman.rs` | Wingman's own HTTP API adapted to that trait |
 | `ui.rs` | The screen and its event stream |
+| `orb.rs` | The overlay: a drawn globe on a layered window, same stream |
 | `main.rs` | The state machine |
 | `metrics.rs` · `doctor.rs` · `config.rs` · `transcript.rs` | Timing, preflight, `ira.toml`, the record |
 
@@ -162,6 +163,44 @@ that send no `Origin` or `Sec-Fetch-Site`, curl included, are unaffected.
 
 IRA only tells the model it has a screen while a page is actually open.
 `IRA_UI=off` disables it.
+
+### The orb
+
+A tab does not tell you IRA is running while you are working in something else.
+So there is also a small always-on-top globe in the bottom-left corner, over
+whatever you are doing:
+
+| | |
+|---|---|
+| pale blue and lilac, barely moving | idle — running, waiting for the wake word |
+| cyan and aqua, quickening | listening |
+| violet and blue, folding over | thinking |
+| cyan and magenta, moving fast | speaking — interrupt her |
+| warm pink and amber, almost still | asking whether to do something |
+| grey, nothing moving | IRA is not running, or has stopped |
+
+Click it to take the floor, click again to interrupt: it is the talk control,
+which is otherwise a button on a page you would have to go and find. The window
+hit-tests by alpha, so a click that misses the orb goes to whatever is behind it
+rather than to IRA.
+
+A pearl sphere with iridescent light moving inside it: colour drifting under
+the surface, pale ribbons flowing across and folding over each other. There is
+no text and no meter, so state is carried by which colours are in it and how
+fast they move — which is the whole vocabulary this kind of orb has.
+
+It reads the same events the page reads, straight off the broadcast. It is
+**drawn** rather than rendered: a webview window cannot be made transparent on
+Windows 11, and five ways of asking were measured before giving up on it, so the
+orb is a rasterised bitmap pushed to a layered window. That is also why it has
+no HTML and needs no WebView2 —
+[decisions/0013](docs/decisions/0013-the-orb-is-an-overlay-on-the-same-stream.md).
+
+The orb deliberately does **not** count as a screen: it shows a colour, not a
+transcript, and IRA must not claim to have put anything on it. `IRA_ORB=off`
+disables it. Windows only for now, and every way it can fail — no display, a
+window that will not open, a bitmap that will not allocate — is a missing light
+and never a broken IRA.
 
 ## Swapping the brain
 
@@ -252,7 +291,7 @@ Kept here rather than buried, because it is the honest shape of the project.
 
 ## Tests
 
-`cargo test` — 61 tests, no network, microphone or API key needed.
+`cargo test` — 66 tests, no network, microphone or API key needed.
 
 They aim at failures that are **silent** rather than loud, because those are the
 ones that survive a code review:
@@ -270,6 +309,13 @@ ones that survive a code review:
 - A page in another tab pressing talk. `POST /talk` opens the microphone, and
   loopback does not stop a cross-origin post from any site you have open.
 - Markdown reaching Piper, so a stray `**` is read out as "asterisk asterisk".
+- A state the orb has no colour for. It keeps the last one it knew and says
+  nothing, so the light is simply wrong from then on.
+- The orb losing its transparency and becoming a square on top of your work.
+  `the_corners_are_clear_in_every_state` rasterises a frame and reads the alpha
+  back, which is the whole claim without needing a window.
+- The orb going white. A broken blur, a mask that clips everything and a grey
+  palette all still paint a perfectly convincing sphere.
 
 Tests needing a real service skip with a note rather than fail, so a fresh clone
 passes: the ONNX ones when `models/` is empty, the local-STT one unless

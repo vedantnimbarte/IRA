@@ -21,3 +21,26 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml = "0.8"
 rmcp = { version = "3", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
+
+# The orb, an always-on-top overlay. Windows-only on purpose: the event loop
+# runs on a spawned thread, which is a Windows affordance, and a target-specific
+# dependency also keeps webkit2gtk out of the Linux CI job for a feature that
+# platform does not get. decisions/0013.
+[target.'cfg(windows)'.dependencies]
+# The orb, an always-on-top overlay. Windows-only on purpose, and a
+# target-specific dependency keeps all of it out of the Linux CI job for a
+# feature that platform does not get. decisions/0013.
+#
+# The orb is drawn, not rendered: a webview window cannot be made transparent,
+# and a transparent window is the whole point of an overlay. tiny-skia is a
+# pure-Rust rasteriser with no C dependency and no build step, and between them
+# these two are a far smaller tree than the webview stack they replace -- the
+# window itself is ~120 lines of Win32 rather than a windowing crate.
+tiny-skia = "0.11"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }

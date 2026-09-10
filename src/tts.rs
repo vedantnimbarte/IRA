@@ -304,6 +304,16 @@ impl Tts {
         self.spawn()
     }
 
+    /// Whether sound is leaving the speaker this instant.
+    ///
+    /// Deliberately not `!idle()`: `idle` waits out a quiet grace and forgives
+    /// a piper that has been asked for a sentence it has not delivered, both of
+    /// which are right for deciding a turn is over and wrong for a light that
+    /// claims she is talking. This is the queue and nothing else.
+    pub fn speaking(&self) -> bool {
+        !self.sink.empty()
+    }
+
     /// True once the queue has drained and piper has been quiet a beat.
     pub fn idle(&self) -> bool {
         if !self.sink.empty() {

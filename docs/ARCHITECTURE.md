@@ -109,6 +109,7 @@ The exhaustive transition table lives in [SPEC.md](SPEC.md).
 | `metrics.rs` | Per-turn timing, and the `turn` line | Closed |
 | `transcript.rs` | The JSONL record of what was said | Config |
 | `ui.rs` | The served page and its event stream | Closed |
+| `orb.rs` | The overlay: a drawn globe on a layered window, same stream | Closed |
 
 Which phase touched what is history now, and lives in
 [ROADMAP.md](ROADMAP.md) rather than here.
