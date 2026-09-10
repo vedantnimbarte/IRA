@@ -226,6 +226,43 @@ before there is a settings window to type one into. It never prints a value
 back, and neither does the settings page — both are told only whether one is
 stored.
 
+### The HTTP surface
+
+Everything IRA serves, on loopback only
+([0018](decisions/0018-integrating-other-tools.md)).
+
+| Route | Guard | Does |
+|---|---|---|
+| `GET /` · `GET /settings` | none | The screen, and the settings page |
+| `GET /events` | none | Server-sent events. The integration point for anything watching |
+| `GET /state` | none | One object: state, watchers, tool names, running jobs, skill count |
+| `POST /talk` | states-no-origin allowed | Takes the floor, or interrupts |
+| `POST /say` | states-no-origin allowed | Queues words for when she next has the floor |
+| `POST /settings` | states-no-origin allowed | Saves one of the six provider values |
+| `POST /settings/admin` | **must state its origin** | Servers, tool policy, skills, sign-in |
+| `GET /oauth/callback` | the `state` parameter | Where a provider redirects after a sign-in |
+
+Two guard levels, and the difference is deliberate. The first refuses a browser
+that says it is elsewhere but allows a client that says nothing at all, so the
+documented `curl -X POST /talk` works — right for opening a microphone or
+queueing a sentence, neither of which can run anything. `/settings/admin` can
+make IRA spawn a process, so silence is not evidence there.
+
+`/oauth/callback` cannot be origin-guarded at all: a redirect from a provider is
+cross-site by definition. Its guard is the `state` — issued by IRA, held in
+memory, removed when used, so a replayed redirect matches nothing.
+
+```
+curl -X POST http://127.0.0.1:8180/say \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "The build finished."}'
+```
+
+Never interrupts. A pip sounds immediately and the words wait for the floor, the
+same path a finished background job takes. Capped at 500 characters, and refused
+rather than queued when the queue is full — IRA already having more to say than
+she can get through is not improved by adding to it.
+
 ### MCP servers
 
 Added, edited and switched off in the settings window; stored in `ira.local.db`
@@ -257,6 +294,45 @@ Per tool, from the same window:
 
 Saving a policy reconnects that server, because a tool's spec is built when it
 connects.
+
+**Try it** runs one tool from the window with typed JSON arguments and shows the
+raw result. It bypasses the confirmation gate on purpose: that gate exists
+because the *model* chose the tool, and here a person pressed a button with the
+tool's name on it. The tool's own latency budget still applies, so a hung server
+fails the same way it would inside a turn.
+
+#### What a server is given
+
+Most useful servers need a credential of their own. Names are in `mcp_env`;
+values are in the OS keyring at `IRA/env/<server>/<NAME>` and are never shown
+again — the same split the six provider keys follow.
+
+```
+ira mcp env github GITHUB_TOKEN ghp_...
+ira mcp env github GITHUB_HOST            # recorded, no value yet
+```
+
+A variable named but never given a value is **not passed at all**, rather than
+passed empty — many servers read an empty string as "configured" and then fail
+obscurely. The child still inherits the rest of the environment, because `PATH`
+is how a command is found; what it does not inherit is IRA's own keys, which
+have not been in the environment since 0015.
+
+Changes take effect when the server reconnects. Removing a server wipes its
+keyring entries first, then its rows — the rows are what say which entries
+exist, so the other order would orphan them.
+
+#### Signing in
+
+For a hosted server that wants OAuth rather than a static header. rmcp does
+discovery, dynamic client registration, PKCE, the exchange and the refresh;
+`oauth.rs` supplies the redirect (`http://127.0.0.1:<port>/oauth/callback`), the
+token store (the keyring, rewritten on every refresh), and the table of
+half-finished sign-ins keyed by CSRF state.
+
+Press **Sign in**, finish at the provider in the tab that opens, and the server
+reconnects with a token that refreshes itself. `Forget` deletes the tokens and
+the client registration. Only the client id and the scopes are in the database.
 
 #### `ira.toml`, imported once
 
@@ -339,6 +415,21 @@ for every round; a body costs only the turn that asked for it — the same trade
 Bodies are held in memory and the tool resolves a name against that list, so its
 arguments contain no path and it performs no file IO. `name` is an `enum` in the
 schema, so the model cannot ask for a skill that does not exist.
+
+**A skill may be a folder instead of a file**, when it carries something:
+
+```text
+skills/standup.md               instructions only
+skills/standup/SKILL.md         instructions, plus the files beside them
+skills/standup/template.md
+```
+
+Files are *listed* to the model and fetched one at a time with
+`skill(name, file)` — the same trade as the bodies themselves, so a 200 KB
+template is not in every prompt that mentions the skill. A skill can only fetch
+its own files: `file` is an enum across every skill in the schema, and the
+membership check happens when it is called. Writing from the window produces the
+flat form unless the folder already exists.
 
 A missing `skills/` directory is normal. The `skill` tool is registered only
 while at least one skill is loaded and on — it appears and disappears with them

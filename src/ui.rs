@@ -73,6 +73,9 @@ pub struct Ui {
     /// What the settings page needs to change the running IRA, rather than just
     /// a stored value. Filled in once, after the tool registry exists.
     admin: Arc<std::sync::OnceLock<Admin>>,
+    /// The last state the loop announced, so `GET /state` can answer without
+    /// the caller having to watch the stream from the beginning.
+    state: Arc<Mutex<&'static str>>,
 }
 
 /// The settings page's reach into the running process.
@@ -82,6 +85,11 @@ pub struct Ui {
 /// registry for the life of the process.
 pub struct Admin {
     pub host: std::sync::Weak<crate::tool::Host>,
+    /// Words for IRA to say when she next has the floor. The same queue a
+    /// finished background job lands on, because it is the same problem:
+    /// something outside the conversation has news, and interrupting a turn to
+    /// deliver it would be worse than waiting.
+    pub say: mpsc::Sender<(String, bool)>,
     /// The same channel a mutating tool asks down. Spawning a process someone
     /// typed into a web page is at least as much of a write as sending an
     /// email, so it goes through the gate that already exists.
@@ -103,6 +111,7 @@ impl Ui {
             port: DEFAULT_PORT,
             served: false,
             admin: Arc::new(std::sync::OnceLock::new()),
+            state: Arc::new(Mutex::new("idle")),
         }
     }
 
@@ -197,6 +206,59 @@ impl Ui {
         rx.await.unwrap_or(false)
     }
 
+    /// Cap on what one `POST /say` may queue. IRA reads this aloud, and there
+    /// is no way to skip a sentence except by interrupting her.
+    const SAY_MAX: usize = 500;
+
+    /// Reads a `{text}` body and queues it to be spoken when IRA next has the
+    /// floor. Never interrupts: a build that finished is not more important
+    /// than the sentence someone is in the middle of.
+    fn queue_say(&self, body: &[u8]) -> String {
+        let Some(admin) = self.admin.get() else {
+            return error("IRA is not running yet");
+        };
+        let Ok(v) = serde_json::from_slice::<Value>(body) else {
+            return error("that was not something to say");
+        };
+        let text = v["text"].as_str().unwrap_or_default().trim();
+        if text.is_empty() {
+            return error("nothing to say");
+        }
+        if text.chars().count() > Self::SAY_MAX {
+            return error(format!("too long -- {} characters at most", Self::SAY_MAX));
+        }
+        // try_send, not send: this route must never wait on the loop. A full
+        // queue means IRA is already behind on things to say, and the honest
+        // answer is to refuse rather than to pile on.
+        match admin.say.try_send((text.to_string(), true)) {
+            Ok(()) => json!({ "queued": text.chars().count() }).to_string(),
+            Err(_) => error("she already has more to say than she can get through"),
+        }
+    }
+
+    /// What IRA is doing, for a script that would rather poll than hold the
+    /// event stream open.
+    fn state_json(&self) -> String {
+        let host = self.host();
+        let (tools, jobs) = match host.as_deref() {
+            Some(h) => {
+                let mut names: Vec<String> = h.specs().into_iter().map(|s| s.name).collect();
+                names.sort();
+                (names, h.running())
+            }
+            None => (Vec::new(), 0),
+        };
+        json!({
+            "state": self.state.lock().map(|s| *s).unwrap_or("unknown"),
+            "watchers": self.watchers(),
+            "running": host.is_some(),
+            "tools": tools,
+            "jobs": jobs,
+            "skills": crate::skills::count(),
+        })
+        .to_string()
+    }
+
     /// The event stream, for a consumer inside this process. The orb reads
     /// this instead of connecting to the socket the browser uses.
     ///
@@ -222,6 +284,13 @@ impl Ui {
     }
 
     pub fn send(&self, event: Event) {
+        // Remembered on the way past, so a poll of `GET /state` does not have
+        // to replay the backlog to work out where the loop got to.
+        if let Event::State { name } = &event {
+            if let Ok(mut s) = self.state.lock() {
+                *s = name;
+            }
+        }
         let Ok(json) = serde_json::to_string(&event) else {
             return;
         };
@@ -355,6 +424,54 @@ Connection: close
     // Saving changes what IRA runs with and stores a key, so it is guarded
     // exactly as `POST /talk` is: a browser that says it is somewhere else is
     // refused, and a client that says nothing -- curl -- is not.
+    // Where a provider sends the browser back after a sign-in. Not guarded by
+    // origin, and cannot be: the whole point is that it arrives as a top-level
+    // navigation from somewhere else. What guards it is the `state` -- issued
+    // by us, held in memory, good for exactly one callback -- so a forged
+    // redirect matches nothing.
+    if line.starts_with("GET /oauth/callback") {
+        let answer = oauth_callback(&ui, &line).await;
+        let body = format!(
+            "<!doctype html><meta charset=utf-8>\
+             <title>IRA</title>\
+             <style>body{{font:15px/1.6 system-ui;margin:12vh auto;max-width:30rem;padding:0 1.5rem}}</style>\
+             <p>{answer}</p><p>You can close this tab.</p>"
+        );
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+             Cache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = write.write_all(head.as_bytes()).await;
+        let _ = write.write_all(body.as_bytes()).await;
+        return;
+    }
+
+    // Something outside the conversation has news. Guarded like `POST /talk`
+    // rather than like the admin route -- a client that states no origin is
+    // allowed, because being scriptable from curl, a CI job or a build hook is
+    // the entire point. It queues words; it cannot run anything.
+    if line.starts_with("POST /say") {
+        let h = read_headers(&mut reader, ui.port).await;
+        if !h.same_origin {
+            tracing::warn!("cross-site say refused");
+            let _ = write.write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n").await;
+            return;
+        }
+        let body = read_body(&mut reader, h.length).await;
+        let answer = ui.queue_say(&body);
+        reply_json(&mut write, if answer.starts_with("{\"error") { 400 } else { 200 }, &answer).await;
+        return;
+    }
+
+    // What IRA is doing, for something that wants to poll rather than hold the
+    // event stream open. Read-only, so no guard beyond loopback -- the same
+    // reasoning as `GET /events`, which already carries far more.
+    if line.starts_with("GET /state") {
+        reply_json(&mut write, 200, &ui.state_json()).await;
+        return;
+    }
+
     // Servers, their per-tool policy, and skills. One route with an `op` rather
     // than six: they share a guard, a body reader and an answer shape, and six
     // near-identical branches of an HTTP parser is the thing worth avoiding.
@@ -512,9 +629,26 @@ fn settings_state(ui: &Ui) -> String {
                     })
                 })
                 .collect();
+            let env: Vec<Value> = crate::db::env_names(&s.name)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|n| {
+                    let set = crate::settings::secret::read(
+                        &crate::settings::secret::env_key(&s.name, &n),
+                    )
+                    .ok()
+                    .flatten()
+                    .is_some();
+                    // Whether a value is stored, never the value itself -- the
+                    // same rule the six provider keys follow.
+                    json!({ "name": n, "set": set })
+                })
+                .collect();
             json!({
                 "name": s.name,
                 "transport": s.transport,
+                "env": env,
+                "signed_in": crate::db::oauth_get(&s.name).ok().flatten().is_some(),
                 "command": s.command,
                 "args": s.args,
                 "url": s.url,
@@ -589,6 +723,26 @@ async fn admin_op(ui: &Ui, body: &[u8]) -> String {
             .await
             .map(Some),
         "tool_policy" => save_policy(ui, &v).await.map(|()| None),
+        "env_save" => save_env(&v).map(Some),
+        // Returns a URL rather than state: the page has to open it, because
+        // signing in happens at the provider's site and not here.
+        "oauth_begin" => {
+            return match begin_sign_in(ui, &name).await {
+                Ok(url) => json!({ "open": url }).to_string(),
+                Err(e) => error(format!("{e:#}")),
+            }
+        }
+        "oauth_forget" => crate::oauth::forget(&name).map(|()| None),
+        "env_delete" => delete_env(&v).map(|()| None),
+        // Call one tool by hand, before you are mid-sentence discovering it
+        // does not work. The result is shown raw -- this is a wiring check, not
+        // a conversation, and a model's phrasing of a failure would hide it.
+        "tool_try" => {
+            return match try_tool(ui, &v).await {
+                Ok(text) => json!({ "tried": v["tool"], "text": text }).to_string(),
+                Err(e) => error(format!("{e:#}")),
+            }
+        }
         "skill_save" => crate::skills::write(
             &name,
             v["description"].as_str().unwrap_or_default(),
@@ -734,6 +888,151 @@ async fn connect(ui: &Ui, s: &crate::db::Server) -> anyhow::Result<String> {
     }
 }
 
+/// Starts a sign-in for one server and returns the URL to open.
+async fn begin_sign_in(ui: &Ui, name: &str) -> anyhow::Result<String> {
+    let s = crate::db::server_get(name)?
+        .ok_or_else(|| anyhow::anyhow!("no such server: {name}"))?;
+    let url = s
+        .url
+        .filter(|u| !u.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("only a server with a URL can sign in"))?;
+    let scopes = crate::db::oauth_get(name)?.unwrap_or_default().scopes;
+    let redirect = format!("http://127.0.0.1:{}/oauth/callback", ui.port);
+    crate::oauth::begin(name, &url, &redirect, &scopes).await
+}
+
+/// Finishes a sign-in and connects the server it was for.
+///
+/// Returns the sentence shown in the tab the provider redirected. Deliberately
+/// plain prose: whoever is reading it has just been bounced through two sites
+/// and wants to know whether it worked.
+async fn oauth_callback(ui: &Ui, request_line: &str) -> String {
+    let query = request_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|p| p.split_once('?'))
+        .map(|(_, q)| q)
+        .unwrap_or_default();
+    let param = |want: &str| {
+        query
+            .split('&')
+            .filter_map(|p| p.split_once('='))
+            .find(|(k, _)| *k == want)
+            .map(|(_, v)| crate::oauth::percent_decode(v))
+    };
+
+    // The provider says no by redirecting with an error, not by failing to
+    // redirect, so this is the ordinary refusal path rather than an edge case.
+    if let Some(e) = param("error") {
+        let described = param("error_description").unwrap_or_default();
+        tracing::warn!("sign-in refused: {e} {described}");
+        return format!("The sign-in was refused: {e}. {described}");
+    }
+
+    let (Some(code), Some(state)) = (param("code"), param("state")) else {
+        return "That callback was missing its code.".into();
+    };
+
+    let server = match crate::oauth::finish(&code, &state).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("sign-in did not complete: {e:#}");
+            return format!("The sign-in did not complete: {e:#}");
+        }
+    };
+
+    match crate::db::server_get(&server) {
+        Ok(Some(s)) if s.enabled => match connect(ui, &s).await {
+            Ok(note) => format!("Signed in. {note}"),
+            Err(e) => format!("Signed in, but {server} did not connect: {e:#}"),
+        },
+        _ => format!("Signed in to {server}."),
+    }
+}
+
+/// Records a variable a server is given, and puts its value in the keyring.
+///
+/// The name goes in the database and the value never does. An empty value
+/// records the name without a value, which is how you add `GITHUB_TOKEN` now
+/// and paste it in later; `mcp.rs` passes nothing at all in that case rather
+/// than an empty string, which many servers read as "configured".
+fn save_env(v: &Value) -> anyhow::Result<String> {
+    let server = v["server"].as_str().unwrap_or_default();
+    let name = v["name"].as_str().unwrap_or_default().trim();
+    // An environment variable name, and nothing that could be a shell trick.
+    let plain = !name.is_empty()
+        && name.len() <= 128
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !name.starts_with(|c: char| c.is_ascii_digit());
+    if server.is_empty() || !plain {
+        anyhow::bail!("a variable name is letters, digits and underscores");
+    }
+
+    crate::db::env_add(server, name)?;
+    let value = v["value"].as_str().unwrap_or_default();
+    let key = crate::settings::secret::env_key(server, name);
+    if value.is_empty() {
+        // An empty box on an existing variable means "leave it alone", not
+        // "erase it" -- clearing is the Remove button, which is unambiguous.
+        return Ok(format!("{name} recorded for {server}."));
+    }
+    crate::settings::secret::write(&key, value)?;
+    Ok(format!("{name} saved to the keyring. Reconnect {server} to use it."))
+}
+
+fn delete_env(v: &Value) -> anyhow::Result<()> {
+    let server = v["server"].as_str().unwrap_or_default();
+    let name = v["name"].as_str().unwrap_or_default();
+    if server.is_empty() || name.is_empty() {
+        anyhow::bail!("which variable, on which server?");
+    }
+    crate::settings::secret::delete(&crate::settings::secret::env_key(server, name))?;
+    crate::db::env_delete(server, name)
+}
+
+/// Runs one tool directly, bypassing the model.
+///
+/// **And bypassing the confirmation gate**, deliberately: a person pressing
+/// "Try it" on a named tool in their own settings window *is* the confirmation,
+/// and asking out loud for a button they just pressed is theatre. The gate
+/// exists because the model chose the tool; here the user did.
+async fn try_tool(ui: &Ui, v: &Value) -> anyhow::Result<String> {
+    let name = v["tool"].as_str().unwrap_or_default();
+    let host = ui
+        .host()
+        .ok_or_else(|| anyhow::anyhow!("IRA is not running, so there is nothing to try"))?;
+    let args: Value = match v["args"].as_str().map(str::trim).filter(|a| !a.is_empty()) {
+        Some(text) => serde_json::from_str(text)
+            .map_err(|e| anyhow::anyhow!("those arguments are not JSON: {e}"))?,
+        None => json!({}),
+    };
+
+    let tool = host
+        .get(name)
+        .ok_or_else(|| anyhow::anyhow!("no such tool: {name}"))?;
+    let ctx = crate::tool::ToolCtx {
+        transcript: String::new(),
+        cancel: tokio_util::sync::CancellationToken::new(),
+    };
+    // The tool's own budget still applies, so a hung server fails here the same
+    // way it would fail inside a turn.
+    let budget = tool.spec().latency.budget();
+    match tokio::time::timeout(budget, tool.call(args, &ctx)).await {
+        Ok(Ok(crate::tool::ToolOutcome::Answer(text))) => Ok(text),
+        Ok(Ok(crate::tool::ToolOutcome::Started(id))) => {
+            Ok(format!("Started as background job {id}."))
+        }
+        Ok(Ok(_)) => Ok("Done. It reported nothing back.".into()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(anyhow::anyhow!(
+            "no answer within {}s",
+            budget.as_secs().max(1)
+        )),
+    }
+}
+
 async fn toggle_server(ui: &Ui, name: &str, on: bool) -> anyhow::Result<String> {
     let mut s = crate::db::server_get(name)?
         .ok_or_else(|| anyhow::anyhow!("no such server: {name}"))?;
@@ -767,7 +1066,7 @@ fn delete_server(ui: &Ui, name: &str) -> anyhow::Result<()> {
     if let Some(host) = ui.host() {
         host.remove_server(name);
     }
-    crate::db::server_delete(name)
+    crate::mcp::forget(name)
 }
 
 /// Saves one tool's policy and reconnects the server it belongs to, because a
@@ -994,6 +1293,14 @@ const SETTINGS: &str = r##"<!doctype html>
   .note { margin:14px 0 0; min-height:1.4em; color:var(--muted); font-size:12.5px; }
   .note.is-set { color:var(--good); }
   .note.is-bad { color:var(--bad); }
+  /* A tool'"'"'s raw answer. Monospace and scrollable because it is JSON as often
+     as it is prose, and wrapping it would make a one-line result three. */
+  .result {
+    margin:8px 0 0; padding:8px 10px; max-height:14em; overflow:auto;
+    background:var(--sunk); border:1px solid var(--line); border-radius:6px;
+    font:400 12px/1.5 var(--mono); white-space:pre-wrap; overflow-wrap:anywhere;
+  }
+  .result.is-bad { color:var(--bad); }
 
   @media (prefers-reduced-motion:reduce) {
     * { transition:none !important; }
@@ -1273,6 +1580,110 @@ function toolRow(server, t) {
   const paceRow = el('label', 'labelled');
   paceRow.append(el('span', 'small', 'How long it takes'), pace);
   wrap.append(paceRow);
+
+  // Run it now, without talking to her. Finding out a tool is misconfigured
+  // mid-sentence is the worst time to find out.
+  const args = box('Try it with', '', '{"query": "hello"}');
+  const run = el('button', 'ghost', 'Try it');
+  const out = el('pre', 'result');
+  out.hidden = true;
+  run.onclick = async () => {
+    out.hidden = false;
+    out.className = 'result';
+    out.textContent = 'Running…';
+    try {
+      const r = await fetch('/settings/admin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ op: 'tool_try', tool: t.name, args: args.input.value }),
+      });
+      const answer = await r.json();
+      out.className = answer.error ? 'result is-bad' : 'result';
+      out.textContent = answer.error || answer.text || '(nothing)';
+    } catch (e) {
+      out.className = 'result is-bad';
+      out.textContent = 'IRA is not answering.';
+    }
+  };
+  const tryRow = el('div', 'form-actions');
+  tryRow.append(run);
+  wrap.append(args.wrap, tryRow, out);
+  return wrap;
+}
+
+// What this server is given. Values go to the keyring and are never shown
+// again, exactly like the six provider keys above.
+function envBlock(s) {
+  const wrap = el('div', 'tool');
+  wrap.append(el('p', 'small', 'What it is given'));
+  if (!s.env.length) {
+    wrap.append(el('p', 'row-sub', 'Nothing. Most servers need a token or a URL of their own.'));
+  }
+  for (const v of s.env) {
+    const r = el('div', 'row');
+    const text = el('div', 'row-text');
+    text.append(el('span', 'row-name', v.name),
+      el('span', 'row-sub', v.set ? 'Stored. Not shown again.' : 'No value yet — it is not passed at all.'));
+    const remove = el('button', 'link', 'Remove');
+    remove.onclick = () => admin({ op: 'env_delete', server: s.name, name: v.name }, 'Removing…');
+    text.append(remove);
+    r.append(text);
+    wrap.append(r);
+  }
+
+  const name = box('Name', '', 'GITHUB_TOKEN');
+  const value = box('Value', '', 'Stored in the keyring, never in a file');
+  value.input.type = 'password';
+  const add = el('button', null, 'Add');
+  add.onclick = () => admin({
+    op: 'env_save', server: s.name,
+    name: name.input.value.trim(), value: value.input.value,
+  }, 'Saving…');
+  const actions = el('div', 'form-actions');
+  actions.append(add);
+  wrap.append(name.wrap, value.wrap, actions);
+  wrap.append(el('p', 'row-sub', 'Reconnect the server for a change here to take effect.'));
+  return wrap;
+}
+
+// Signing in, for a hosted server that wants OAuth rather than a header.
+function signInBlock(s) {
+  const wrap = el('div', 'tool');
+  wrap.append(el('p', 'small', 'Signing in'));
+  wrap.append(el('p', 'row-sub', s.signed_in
+    ? 'Signed in. The token is in the keyring and refreshes itself.'
+    : 'Not signed in. Only needed if this server asks you to.'));
+
+  const actions = el('div', 'form-actions');
+  const go = el('button', null, s.signed_in ? 'Sign in again' : 'Sign in');
+  go.onclick = async () => {
+    const line = document.getElementById('note');
+    line.className = 'note';
+    line.textContent = 'Asking ' + s.name + ' how to sign in…';
+    const r = await fetch('/settings/admin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op: 'oauth_begin', name: s.name }),
+    });
+    const answer = await r.json();
+    if (!r.ok || answer.error) {
+      line.className = 'note is-bad';
+      line.textContent = answer.error || 'That did not work.';
+      return;
+    }
+    // A new tab, not this one: losing the settings page mid-sign-in would
+    // leave you looking at a provider with no way back.
+    line.className = 'note';
+    line.textContent = 'Finish signing in in the tab that just opened.';
+    window.open(answer.open, '_blank', 'noopener');
+  };
+  actions.append(go);
+  if (s.signed_in) {
+    const forget = el('button', 'ghost', 'Forget');
+    forget.onclick = () => admin({ op: 'oauth_forget', name: s.name }, 'Forgetting…');
+    actions.append(forget);
+  }
+  wrap.append(actions);
   return wrap;
 }
 
@@ -1297,6 +1708,8 @@ function serversStage() {
     r.querySelector('.row-text').append(open);
 
     panel.append(serverForm(s));
+    panel.append(envBlock(s));
+    if (s.transport === 'http') panel.append(signInBlock(s));
     for (const t of s.tools) panel.append(toolRow(s.name, t));
     if (s.enabled && !s.connected) {
       panel.append(el('p', 'warn', 'Nothing answered, so there are no tools to configure. Fix it above and save to try again.'));

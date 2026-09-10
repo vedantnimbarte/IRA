@@ -60,6 +60,9 @@ pub struct Skill {
     pub name: String,
     pub summary: String,
     pub body: String,
+    /// Files this skill carries, if it is a folder rather than a lone file.
+    /// Named in the body it hands back, and fetched one at a time.
+    pub files: Vec<String>,
 }
 
 /// The enabled skills, in name order. An `RwLock` rather than a `OnceLock`
@@ -100,23 +103,88 @@ pub fn body_of(name: &str) -> Result<String> {
     std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))
 }
 
+/// Whether a name is safe to turn into a path.
+fn plain(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// The file a skill name refers to.
+///
+/// Two shapes are allowed, and this picks whichever exists:
+///
+/// ```text
+///   skills/standup.md             a skill that is only instructions
+///   skills/standup/SKILL.md       a skill with files beside it
+/// ```
+///
+/// The second is [0016](../docs/decisions/0016-skills-are-markdown-loaded-by-a-tool-call.md)'s
+/// own "what would change this": a skill that wants to carry a template or a
+/// checklist. Writing still produces the flat form unless the directory is
+/// already there, so nobody gets a folder they did not ask for.
 ///
 /// Refuses anything that is not a plain name, so a name arriving over the
 /// settings port cannot climb out of the directory or pick up an extension of
 /// its own. Every read and write in this module goes through here.
 fn path_for(name: &str) -> Result<PathBuf> {
-    let ok = !name.is_empty()
-        && name.len() <= 64
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-    if !ok {
+    if !plain(name) {
         return Err(anyhow!(
             "a skill name is letters, digits, dashes and underscores: {name:?}"
         ));
     }
+    let bundled = dir().join(name).join("SKILL.md");
+    if bundled.is_file() {
+        return Ok(bundled);
+    }
     Ok(dir().join(format!("{name}.md")))
+}
+
+/// What a bundled skill carries beside its instructions, newest names last.
+///
+/// Listed rather than read: the model is told these exist and can ask for one,
+/// which keeps a 200 KB template out of every prompt that merely mentions the
+/// skill.
+fn bundled_files(name: &str) -> Vec<String> {
+    let folder = dir().join(name);
+    let Ok(entries) = std::fs::read_dir(&folder) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        // SKILL.md is the skill itself, not something it carries.
+        .filter(|f| f != "SKILL.md")
+        .collect();
+    out.sort();
+    out
+}
+
+/// One file from a skill's folder.
+///
+/// The two names are checked separately and joined here, so neither can
+/// contribute a `..`: the skill must be a plain name, and the file must be a
+/// plain filename with no separator in it at all.
+pub fn bundled_file(skill: &str, file: &str) -> Result<String> {
+    if !plain(skill) {
+        return Err(anyhow!("no such skill: {skill:?}"));
+    }
+    let safe_file = !file.is_empty()
+        && file.len() <= 128
+        && !file.contains(['/', '\\'])
+        && file != "."
+        && file != ".."
+        && !file.starts_with('.');
+    if !safe_file {
+        return Err(anyhow!("no such file: {file:?}"));
+    }
+    let path = dir().join(skill).join(file);
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("read {}", path.display()))?;
+    Ok(truncate(&text, BODY_MAX))
 }
 
 /// Writes a skill's file and reloads.
@@ -177,6 +245,24 @@ fn unquote(value: &str) -> String {
     out
 }
 
+/// Writes a skill file verbatim, front matter and all, then reloads.
+///
+/// What `ira skill add <name> <file.md>` uses: a skill someone else wrote
+/// already has its own front matter, and re-generating it from a parsed
+/// description would drop anything this parser does not know about.
+pub fn write_raw(name: &str, text: &str) -> Result<()> {
+    let path = path_for(name)?;
+    if parse(name, text).is_none() {
+        return Err(anyhow!("a skill with no text has nothing to load"));
+    }
+    std::fs::create_dir_all(dir()).with_context(|| format!("create {}", dir().display()))?;
+    let temp = path.with_extension("md.new");
+    std::fs::write(&temp, text).with_context(|| format!("write {}", temp.display()))?;
+    std::fs::rename(&temp, &path).with_context(|| format!("replace {}", path.display()))?;
+    reload();
+    Ok(())
+}
+
 /// Deletes a skill's file, then reloads -- which is what removes its row.
 pub fn delete(name: &str) -> Result<()> {
     let path = path_for(name)?;
@@ -208,16 +294,36 @@ pub fn reload() {
     match std::fs::read_dir(dir) {
         Ok(entries) => {
             for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().is_none_or(|e| e != "md") {
-                    continue;
-                }
-                let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
-                    continue;
+                // Either `standup.md`, or `standup/SKILL.md` for a skill that
+                // carries files. Both resolve to the same name.
+                let (path, name) = {
+                    let p = entry.path();
+                    if p.is_dir() {
+                        let inner = p.join("SKILL.md");
+                        if !inner.is_file() {
+                            continue;
+                        }
+                        let Some(n) = p.file_name().and_then(|s| s.to_str()) else {
+                            continue;
+                        };
+                        (inner, n.to_string())
+                    } else {
+                        if p.extension().is_none_or(|e| e != "md") {
+                            continue;
+                        }
+                        let Some(n) = p.file_stem().and_then(|s| s.to_str()) else {
+                            continue;
+                        };
+                        (p.clone(), n.to_string())
+                    }
                 };
+                let name = name.as_str();
                 match std::fs::read_to_string(&path) {
                     Ok(text) => match parse(name, &text) {
-                        Some(skill) => found.push((skill, path.display().to_string())),
+                        Some(mut skill) => {
+                            skill.files = bundled_files(name);
+                            found.push((skill, path.display().to_string()))
+                        }
                         // An empty file is a skill with nothing to say. Saying
                         // so beats it silently never being chosen.
                         None => tracing::warn!(skill = name, "skill is empty, ignoring it"),
@@ -318,6 +424,7 @@ fn parse(name: &str, text: &str) -> Option<Skill> {
         name: name.to_string(),
         summary: truncate(&summary, SUMMARY_MAX),
         body: truncate(body, BODY_MAX),
+        files: Vec::new(),
     })
 }
 
@@ -376,6 +483,15 @@ impl Tool for SkillTool {
         );
         for s in skills {
             description.push_str(&format!("\n- {}: {}", s.name, s.summary));
+            if !s.files.is_empty() {
+                description.push_str(&format!(" (carries {})", s.files.join(", ")));
+            }
+        }
+        if skills.iter().any(|s| !s.files.is_empty()) {
+            description.push_str(
+                "\n\nSome carry files. Ask for one with `file`, and only when the \
+                 instructions tell you to -- they are not loaded otherwise.",
+            );
         }
 
         ToolSpec {
@@ -391,6 +507,15 @@ impl Tool for SkillTool {
                         // of "load ../../secrets" this tool would otherwise
                         // have to defend against.
                         "enum": skills.iter().map(|s| &s.name).collect::<Vec<_>>(),
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "One of the files that skill carries. \
+                                        Omit to get the instructions themselves.",
+                        // Enumerated for the same reason as the name. A skill
+                        // with no files contributes nothing, so this is empty
+                        // unless something is genuinely fetchable.
+                        "enum": skills.iter().flat_map(|s| &s.files).collect::<Vec<_>>(),
                     }
                 },
                 "required": ["name"]
@@ -412,7 +537,30 @@ impl Tool for SkillTool {
             .iter()
             .find(|s| s.name == name)
             .ok_or_else(|| anyhow!("no such skill: {name}"))?;
-        Ok(ToolOutcome::Answer(skill.body.clone()))
+
+        // A file, if one was asked for and this skill actually carries it. The
+        // membership check is what stops one skill reaching another's files --
+        // the enum in the schema is the union across every skill, so it alone
+        // is not enough.
+        if let Some(file) = args["file"].as_str().filter(|f| !f.is_empty()) {
+            if !skill.files.iter().any(|f| f == file) {
+                return Err(anyhow!("{name} does not carry {file}"));
+            }
+            let name = skill.name.clone();
+            // Dropped before the read: the list is behind an RwLock every turn
+            // wants, and a slow disk must not hold it.
+            drop(loaded);
+            return Ok(ToolOutcome::Answer(bundled_file(&name, file)?));
+        }
+
+        let mut body = skill.body.clone();
+        if !skill.files.is_empty() {
+            body.push_str(&format!(
+                "\n\nFiles you can ask for by name: {}.",
+                skill.files.join(", ")
+            ));
+        }
+        Ok(ToolOutcome::Answer(body))
     }
 }
 
@@ -513,6 +661,32 @@ mod tests {
         for good in ["standup", "take-notes", "meeting_notes", "v2"] {
             assert!(path_for(good).is_ok(), "{good:?} was refused");
         }
+    }
+
+    /// A bundled skill joins two names into a path, so both halves have to be
+    /// checked. The enum in the schema is the union across every skill, which
+    /// means it alone would let one skill fetch another's file -- the
+    /// membership check in `call` is what actually stops that, and this covers
+    /// the half that turns a filename into a path.
+    #[test]
+    fn a_bundled_filename_cannot_climb_out_of_its_skill() {
+        for bad in [
+            "../../../etc/passwd",
+            "../standup.md",
+            "sub/dir.md",
+            r"sub\dir.md",
+            ".ssh",
+            ".",
+            "..",
+            "",
+        ] {
+            assert!(
+                bundled_file("standup", bad).is_err(),
+                "{bad:?} was accepted as a bundled filename"
+            );
+        }
+        // And a bad skill name is refused before the filename matters at all.
+        assert!(bundled_file("../secrets", "template.md").is_err());
     }
 
     /// The tool takes a name from a fixed list, never a path, so no argument it

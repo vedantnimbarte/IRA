@@ -42,6 +42,38 @@ pub async fn connect(cfg: &Server) -> Result<Vec<Arc<dyn Tool>>> {
             cmd.args(&cfg.args);
             // Otherwise a server's own logging lands in the middle of IRA's.
             cmd.stderr(std::process::Stdio::null());
+            // What this server was given, out of the keyring. Most useful MCP
+            // servers need a credential of their own -- a GitHub token, a
+            // database URL -- and before this the only way to supply one was to
+            // set it in the shell that launched IRA, which is exactly the
+            // pattern 0015 removed for IRA's own keys.
+            //
+            // The child still inherits the rest of the environment: PATH and
+            // friends are how a command is found at all. What it does not
+            // inherit is IRA's keys, which have not been in the environment
+            // since 0015 -- so a server gets what it was given and nothing else
+            // that matters.
+            for name in crate::db::env_names(&cfg.name).unwrap_or_default() {
+                match crate::settings::secret::read(&crate::settings::secret::env_key(
+                    &cfg.name, &name,
+                )) {
+                    Ok(Some(value)) => {
+                        cmd.env(&name, value);
+                    }
+                    // Named but never given a value: pass nothing rather than
+                    // an empty string, which many servers read as "configured".
+                    Ok(None) => tracing::warn!(
+                        server = %cfg.name,
+                        var = %name,
+                        "no value stored for this variable, not passing it"
+                    ),
+                    Err(e) => tracing::error!(
+                        server = %cfg.name,
+                        var = %name,
+                        "could not read it from the keyring: {e:#}"
+                    ),
+                }
+            }
             let process = TokioChildProcess::new(cmd)?;
             Arc::new(().serve(process).await?)
         }
@@ -57,10 +89,22 @@ pub async fn connect(cfg: &Server) -> Result<Vec<Arc<dyn Tool>>> {
                     reqwest::header::HeaderValue::from_str(v)?,
                 );
             }
-            let transport = StreamableHttpClientTransport::from_config(
-                StreamableHttpClientTransportConfig::with_uri(url).custom_headers(headers),
-            );
-            Arc::new(().serve(transport).await?)
+            let config =
+                StreamableHttpClientTransportConfig::with_uri(url.clone()).custom_headers(headers);
+
+            // A server that has been signed in to gets a client that carries
+            // its token and refreshes it; everything else gets the plain one.
+            // Checked here rather than at save time because a token expires and
+            // a refresh happens on connect, so this is the only place that
+            // knows the truth.
+            match crate::oauth::client(&cfg.name, &url).await? {
+                Some(authed) => Arc::new(
+                    ()
+                        .serve(StreamableHttpClientTransport::with_client(authed, config))
+                        .await?,
+                ),
+                None => Arc::new(().serve(StreamableHttpClientTransport::from_config(config)).await?),
+            }
         }
         other => return Err(anyhow!("unknown transport: {other}")),
     };
@@ -107,6 +151,29 @@ pub async fn connect(cfg: &Server) -> Result<Vec<Arc<dyn Tool>>> {
         );
     }
     Ok(tools)
+}
+
+/// Removes a server, and everything it was trusted with.
+///
+/// The keyring first, and deliberately: `db::server_delete` drops the rows that
+/// say *which* variables this server had, so wiping the values afterwards would
+/// have nothing left to look them up by. Deleting the rows and leaving the
+/// secrets behind is the quiet failure this exists to prevent -- a token for a
+/// server nobody can see any more, sitting in Credential Manager.
+///
+/// Every keyring failure is logged and stepped over rather than returned: a
+/// removal that stops half way is worse than one that could not tidy up.
+pub fn forget(server: &str) -> Result<()> {
+    for name in crate::db::env_names(server).unwrap_or_default() {
+        let key = crate::settings::secret::env_key(server, &name);
+        if let Err(e) = crate::settings::secret::delete(&key) {
+            tracing::error!(server, var = %name, "could not remove it from the keyring: {e:#}");
+        }
+    }
+    if let Err(e) = crate::oauth::forget(server) {
+        tracing::error!(server, "could not remove the sign-in: {e:#}");
+    }
+    crate::db::server_delete(server)
 }
 
 /// Connects to one server, giving up after [`CONNECT_TIMEOUT`].

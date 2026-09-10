@@ -6,14 +6,20 @@
 //! added the MCP servers, their per-tool policy, and which skills are on --
 //! everything the settings window can edit, in one place it can write to.
 //!
-//! Four tables, none of them large:
+//! Six tables, none of them large:
 //!
 //! ```text
 //!   settings      name → value          URLs and model ids (keys are in the keyring)
 //!   mcp_server    one row per server    transport, command, url, headers
 //!   mcp_tool      one row per tool      exposed, mutates, latency, confirm
+//!   mcp_env       one row per variable  names only -- values are in the keyring
+//!   mcp_oauth     one row per server    client id and scopes -- tokens are in the keyring
 //!   skill         one row per file      which are on, and what they say they do
 //! ```
+//!
+//! **Nothing secret is in here.** Every table that touches a credential stores
+//! the *name* of one and leaves the value in the OS keyring, which is the same
+//! split 0015 made for IRA'"'"'s own keys.
 //!
 //! **Connections are opened per call.** These are a handful of rows edited by
 //! hand in a window; the open costs nothing next to the save it is part of, and
@@ -36,8 +42,15 @@ pub const PATH: &str = "ira.local.db";
 /// ceremony around a schema that fits on a screen. The day a column has to
 /// *change* is the day this needs a real migration, and that day is not today.
 ///
-/// ponytail: no schema versioning. Add it when a column has to change type or
-/// meaning, not when one is added -- `IF NOT EXISTS` covers additions.
+/// **`IF NOT EXISTS` covers a new table, not a new column.** An existing
+/// database already has `mcp_server`, so a column added to that statement would
+/// silently never appear for anyone who had run IRA before. New data therefore
+/// goes in a new table -- which is why per-server environment variables are
+/// `mcp_env` rather than a column on `mcp_server`, and it is the better shape
+/// anyway.
+///
+/// ponytail: no schema versioning. The day a column has to change type or
+/// meaning is the day this needs real migrations. Until then, add tables.
 fn open() -> Result<Connection> {
     let conn = Connection::open(PATH).with_context(|| format!("open {PATH}"))?;
     conn.execute_batch(
@@ -71,6 +84,21 @@ fn open() -> Result<Connection> {
              path        TEXT NOT NULL,
              description TEXT NOT NULL DEFAULT '',
              enabled     INTEGER NOT NULL DEFAULT 1
+         );
+         -- Which variables a server is given, never their values. A value is a
+         -- credential and lives in the OS keyring under IRA/env/<server>/<name>,
+         -- for the same reason IRA's own keys are not in this file.
+         CREATE TABLE IF NOT EXISTS mcp_env (
+             server TEXT NOT NULL,
+             name   TEXT NOT NULL,
+             PRIMARY KEY (server, name)
+         );
+         -- Servers that sign in rather than carrying a static header. Only the
+         -- client id is here; tokens are in the keyring and refresh themselves.
+         CREATE TABLE IF NOT EXISTS mcp_oauth (
+             server    TEXT PRIMARY KEY,
+             client_id TEXT,
+             scopes    TEXT NOT NULL DEFAULT '[]'
          );",
     )
     .context("create the tables")?;
@@ -265,6 +293,8 @@ pub fn server_set(s: &Server) -> Result<()> {
 pub fn server_delete(name: &str) -> Result<()> {
     let conn = open()?;
     conn.execute("DELETE FROM mcp_tool WHERE server = ?1", (name,))?;
+    conn.execute("DELETE FROM mcp_env WHERE server = ?1", (name,))?;
+    conn.execute("DELETE FROM mcp_oauth WHERE server = ?1", (name,))?;
     conn.execute("DELETE FROM mcp_server WHERE name = ?1", (name,))
         .with_context(|| format!("remove server {name}"))?;
     Ok(())
@@ -290,6 +320,87 @@ pub fn tool_policy_set(server: &str, tool: &str, p: &ToolPolicy) -> Result<()> {
             ),
         )
         .with_context(|| format!("save policy for {server}/{tool}"))?;
+    Ok(())
+}
+
+// ---------------------------------------------------- per-server environment --
+
+/// The variables a server is given, by name. Values are in the keyring.
+pub fn env_names(server: &str) -> Result<Vec<String>> {
+    if !exists() {
+        return Ok(Vec::new());
+    }
+    let conn = open()?;
+    let mut q = conn.prepare("SELECT name FROM mcp_env WHERE server = ?1 ORDER BY name")?;
+    let rows = q.query_map((server,), |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn env_add(server: &str, name: &str) -> Result<()> {
+    open()?
+        .execute(
+            "INSERT INTO mcp_env (server, name) VALUES (?1, ?2)
+             ON CONFLICT(server, name) DO NOTHING",
+            (server, name),
+        )
+        .with_context(|| format!("record {name} for {server}"))?;
+    Ok(())
+}
+
+pub fn env_delete(server: &str, name: &str) -> Result<()> {
+    open()?
+        .execute(
+            "DELETE FROM mcp_env WHERE server = ?1 AND name = ?2",
+            (server, name),
+        )
+        .with_context(|| format!("forget {name} for {server}"))?;
+    Ok(())
+}
+
+// -------------------------------------------------------------------- oauth --
+
+/// What is remembered about a server that signs in. Tokens are not here.
+#[derive(Debug, Clone, Default)]
+pub struct OAuth {
+    pub client_id: Option<String>,
+    pub scopes: Vec<String>,
+}
+
+pub fn oauth_get(server: &str) -> Result<Option<OAuth>> {
+    if !exists() {
+        return Ok(None);
+    }
+    let conn = open()?;
+    let mut q = conn.prepare("SELECT client_id, scopes FROM mcp_oauth WHERE server = ?1")?;
+    let mut rows = q.query_map((server,), |r| {
+        let scopes: String = r.get(1)?;
+        Ok(OAuth {
+            client_id: r.get(0)?,
+            scopes: serde_json::from_str(&scopes).unwrap_or_default(),
+        })
+    })?;
+    Ok(rows.next().transpose()?)
+}
+
+pub fn oauth_set(server: &str, o: &OAuth) -> Result<()> {
+    open()?
+        .execute(
+            "INSERT INTO mcp_oauth (server, client_id, scopes) VALUES (?1, ?2, ?3)
+             ON CONFLICT(server) DO UPDATE SET
+                 client_id = excluded.client_id,
+                 scopes    = excluded.scopes",
+            (
+                server,
+                &o.client_id,
+                serde_json::to_string(&o.scopes).unwrap_or_else(|_| "[]".into()),
+            ),
+        )
+        .with_context(|| format!("save sign-in for {server}"))?;
+    Ok(())
+}
+
+pub fn oauth_delete(server: &str) -> Result<()> {
+    open()?.execute("DELETE FROM mcp_oauth WHERE server = ?1", (server,))?;
     Ok(())
 }
 
@@ -377,6 +488,19 @@ pub fn skills_prune(keep: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// The working directory is process-wide, and `PATH` is relative to it, so a
+/// test that moves it moves it for every other test running at that moment.
+/// Every test that does so takes this first.
+///
+/// Not a niceness: two tests each chdir-ing to their own temp directory
+/// produced a failure that looked like a lost database row, which is a long way
+/// from the actual cause.
+#[cfg(test)]
+pub fn cwd_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,9 +508,7 @@ mod tests {
     /// Every test here writes the one database in the working directory, so
     /// they share a temp directory and a lock rather than racing each other.
     fn in_a_fresh_db<T>(f: impl FnOnce() -> T) -> T {
-        use std::sync::Mutex;
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::db::cwd_lock();
 
         let dir = std::env::temp_dir().join("ira-db-test");
         std::fs::create_dir_all(&dir).unwrap();

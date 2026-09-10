@@ -355,7 +355,102 @@ enum Round {
     Tool(Call, String),
 }
 
+/// Turns a raw tool result into one sentence a person would say.
+///
+/// A background job's result is whatever its tool returned -- JSON, a diff
+/// stat, a stack trace -- and reading that aloud sounds like a machine. This is
+/// one non-streaming round with no tools and no history: cheap, and nobody is
+/// waiting on it, because by definition the job already finished.
+///
+/// **Falls back to the raw text on any failure.** A phrasing pass that fails
+/// must not lose the result; hearing it awkwardly is far better than not
+/// hearing it. That is also why this never returns an error.
+pub async fn phrase(client: &reqwest::Client, name: &str, ok: bool, result: &str) -> String {
+    let raw = format!(
+        "{name} {}. {result}",
+        if ok { "finished" } else { "failed" }
+    );
+    // Long results are truncated before they go out: this is a summary request
+    // and the tail of a 40 KB log adds nothing a first sentence would use.
+    let clipped: String = result.chars().take(4_000).collect();
+    let ask = format!(
+        "A background job called {name} has {}. Tell the user in one short \
+         sentence, spoken aloud, no markdown. Say what happened, not that you \
+         are reporting it. Here is what it returned:\n\n{clipped}",
+        if ok { "finished" } else { "failed" }
+    );
+
+    match phrase_once(client, &ask).await {
+        Ok(text) if !text.trim().is_empty() => text.trim().to_string(),
+        Ok(_) => raw,
+        Err(e) => {
+            tracing::warn!("could not phrase the job report, reading it raw: {e:#}");
+            raw
+        }
+    }
+}
+
+/// One non-streaming completion. Deliberately not sharing [`one_round`]: that
+/// one exists to stream sentences into speech while it is still arriving, and
+/// everything it does -- the sentence splitter, the tool loop, the
+/// time-to-first-token mark -- is wrong for a single sentence nobody is waiting
+/// on.
+async fn phrase_once(client: &reqwest::Client, ask: &str) -> Result<String> {
+    let url = crate::settings::get("IRA_LLM_URL");
+    let openai = url.is_some();
+    let messages = json!([{ "role": "user", "content": ask }]);
+    let system = "You are IRA. One short spoken sentence. No markdown, no lists.";
+
+    let mut body = json!({
+        "model": crate::settings::get("IRA_LLM_MODEL").unwrap_or_else(|| MODEL.into()),
+        "max_tokens": 100,
+        "messages": messages,
+    });
+    if openai {
+        body["messages"] = json!([
+            { "role": "system", "content": system },
+            { "role": "user", "content": ask },
+        ]);
+    } else {
+        body["system"] = system.into();
+    }
+
+    let req = match &url {
+        Some(url) => match crate::settings::get("IRA_LLM_KEY") {
+            Some(key) => client.post(url).bearer_auth(key),
+            None => client.post(url),
+        },
+        None => client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("anthropic-version", "2023-06-01")
+            .header(
+                "x-api-key",
+                crate::settings::get("ANTHROPIC_API_KEY")
+                    .ok_or_else(|| anyhow!("ANTHROPIC_API_KEY not set"))?,
+            ),
+    };
+
+    let resp = req
+        .timeout(std::time::Duration::from_secs(20))
+        .json(&body)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("llm {}: {}", resp.status(), resp.text().await?));
+    }
+    let v: Value = resp.json().await?;
+    // The two shapes, read the same way they are read while streaming.
+    Ok(if openai {
+        v["choices"][0]["message"]["content"].as_str().unwrap_or_default().to_string()
+    } else {
+        v["content"][0]["text"].as_str().unwrap_or_default().to_string()
+    })
+}
+
 /// Issues one request and streams it, speaking sentences as they complete.
+///
+/// Wide for the same reason `stream` is: a round genuinely depends on all of
+/// it, and a context struct would move the arguments rather than remove them.
 #[allow(clippy::too_many_arguments)]
 async fn one_round(
     client: &reqwest::Client,

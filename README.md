@@ -99,6 +99,7 @@ around: [decisions/0001](docs/decisions/0001-audio-path-stays-in-one-process.md)
 | `orb.rs` | The overlay: a drawn globe on a layered window, same stream |
 | `main.rs` | The state machine |
 | `skills.rs` | `skills/*.md`: user-written instructions, loaded on demand |
+| `cli.rs` · `oauth.rs` | The window from a terminal; signing in to a hosted server |
 | `settings.rs` | Keys in the OS keyring, URLs and model ids in SQLite |
 | `db.rs` | `ira.local.db`: settings, servers, tool policy, the skill index |
 | `metrics.rs` · `doctor.rs` · `config.rs` · `transcript.rs` | Timing, preflight, the server list, the record |
@@ -126,9 +127,55 @@ calls itself harmless and is not would otherwise walk straight through the gate.
 Mark a tool read-only in the window and it stops asking; a tool nobody has
 marked keeps asking, because *absent* and *safe* are not the same answer.
 
+**Give a server what it needs.** Most want a credential of their own — a GitHub
+token, a database URL. Add it under the server in the window, or:
+
+```bash
+ira mcp env github GITHUB_TOKEN ghp_...
+```
+
+Values go to the keyring, never to a file, and a variable with no value is not
+passed at all rather than passed empty. A hosted server that wants OAuth instead
+gets a **Sign in** button; the token lands in the keyring and refreshes itself.
+
+**Try a tool before you talk to her.** Every connected tool has a *Try it* box
+in the window — typed arguments, raw result. Finding out a server is
+misconfigured mid-sentence is the worst time to find out.
+
 Servers, their per-tool policy and which skills are on live in `ira.local.db`.
 If you have an old `ira.toml`, it is imported once on the first start and then
 never read again ([decisions/0017](docs/decisions/0017-servers-and-skills-are-configured-in-the-window.md)).
+
+### From a terminal
+
+Everything the window does, for provisioning a machine or reaching one over SSH:
+
+```bash
+ira mcp add github stdio npx -y @modelcontextprotocol/server-github
+```
+
+`ira mcp ls · add · env · rm` and `ira skill ls · add · on · off · rm`. These
+write the database and connect nothing — a server added here comes up at the
+next start. They do not ask before saving a command either, because a terminal
+on this machine already is the authorisation.
+
+## Talking to IRA from something else
+
+She is not only a thing that calls tools; she is a thing your tools can call.
+
+```bash
+curl -X POST http://127.0.0.1:8180/say -H 'Content-Type: application/json' -d '{"text": "The build finished."}'
+```
+
+A pip sounds immediately and the words wait until she next has the floor — the
+same path a finished background job takes, so a deploy that lands mid-sentence
+never interrupts you. `GET /state` is a poll for what she is doing; `GET /events`
+is the live stream and is what the screen and the orb both read.
+
+Both are guarded like the talk button: a browser claiming to be elsewhere is
+refused, a client that says nothing — curl, a CI job — is not. Neither can run
+anything. The route that *can*, `POST /settings/admin`, is stricter. Full table:
+[SPEC.md](docs/SPEC.md#the-http-surface).
 
 Setting a tool to run in the background detaches the work: IRA answers immediately, a soft pip
 sounds when it finishes, and the words wait until she next has the floor.
@@ -182,6 +229,11 @@ system prompt would cost more per turn than most turns contain — the same
 reason a server has a switch per tool. Bodies are read once at start-up and held
 in memory, so the tool that serves them takes a name from a fixed list and never
 touches a path.
+
+A skill that needs to carry something — a template, a checklist — can be a
+folder instead: `skills/standup/SKILL.md` with the files beside it. They are
+listed to her and fetched one at a time, so a long template is not in every
+prompt that merely mentions the skill.
 
 Skills are **prompt-level**: text that shapes an answer. Something that *runs* is
 an MCP server, above — and stays one, for the reasons in
@@ -373,7 +425,7 @@ Kept here rather than buried, because it is the honest shape of the project.
 
 ## Tests
 
-`cargo test` — 82 tests, no network, microphone or API key needed.
+`cargo test` — 86 tests, no network, microphone or API key needed.
 
 They aim at failures that are **silent** rather than loud, because those are the
 ones that survive a code review:
@@ -435,4 +487,4 @@ Each is marked with a `ponytail:` comment where it lives.
 | Cheap linear resampler | Slight aliasing | Only if word-error-rate measurably suffers |
 | Piper respawn on barge-in | ~250 ms before she can speak again | If interruption recovery feels slow — keep a warm spare |
 | Background jobs in memory | Lost on restart, and reported as lost | Jobs routinely outlive the process |
-| Tool results read as returned | Reads like a machine | Hand them to the model to phrase; it costs a turn nobody waits on |
+| No schema versioning | A column cannot change type or meaning | The first change that is not a new table |

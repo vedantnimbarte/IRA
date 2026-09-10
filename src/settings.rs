@@ -297,9 +297,23 @@ pub fn set_from_cli(args: &[String]) -> i32 {
 /// to be 80 lines of `unsafe` Win32 that only worked on Windows, and the other
 /// two platforms had no store at all and leaned on the environment -- which is
 /// the thing being removed.
-mod secret {
+pub mod secret {
     use anyhow::{anyhow, Result};
     use keyring::v1::{Entry, Error};
+
+    /// The keyring name for a value a server is given.
+    ///
+    /// Namespaced under `env/` so a server's `GROQ_API_KEY` is a different
+    /// credential from IRA's own -- which is the whole point of giving a server
+    /// its own environment rather than letting it inherit hers.
+    pub fn env_key(server: &str, name: &str) -> String {
+        format!("env/{server}/{name}")
+    }
+
+    /// The keyring name for a server's OAuth tokens.
+    pub fn oauth_key(server: &str) -> String {
+        format!("oauth/{server}")
+    }
 
     /// Namespaced, so IRA's entries are identifiable in each platform's own UI
     /// and cannot collide with anything else storing a key by the same name.
@@ -382,6 +396,7 @@ mod tests {
     /// is one that would have needed escaping in the TOML file this replaced.
     #[test]
     fn a_setting_survives_the_database_round_trip() {
+        let _guard = crate::db::cwd_lock();
         let dir = std::env::temp_dir().join("ira-settings-test");
         std::fs::create_dir_all(&dir).unwrap();
         let cwd = std::env::current_dir().unwrap();

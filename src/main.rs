@@ -14,12 +14,14 @@
 //! needs `webrtc-audio-processing` wired into audio.rs before it is usable.
 
 mod audio;
+mod cli;
 mod config;
 mod db;
 mod doctor;
 mod llm;
 mod mcp;
 mod metrics;
+mod oauth;
 mod settings;
 mod skills;
 #[cfg(windows)]
@@ -289,15 +291,15 @@ async fn main() -> Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let checks = doctor::paths(&models, &wakeword, &voice, &piper);
-    match args.first().map(String::as_str) {
-        Some("doctor") => {
-            let report = doctor::all(&checks).await;
-            std::process::exit(doctor::report(&report));
-        }
-        // The way in on a machine with no keys yet: the fatal check below fires
-        // long before there is a settings window to type one into.
-        Some("set") => std::process::exit(settings::set_from_cli(&args[1..])),
-        _ => {}
+    if args.first().is_some_and(|a| a == "doctor") {
+        let report = doctor::all(&checks).await;
+        std::process::exit(doctor::report(&report));
+    }
+    // set, mcp, skill: everything the window does, from a terminal. The way in
+    // on a machine with no keys yet, since the fatal check below fires long
+    // before there is a window to type one into.
+    if let Some(code) = cli::run(&args) {
+        std::process::exit(code);
     }
     // Anything knowable now must fail now. A missing key that surfaces as
     // silence three seconds into the first sentence looks like a broken product
@@ -337,6 +339,16 @@ async fn main() -> Result<()> {
     }
     let (confirm_tx, mut confirm_rx) = mpsc::channel::<tool::Confirm>(4);
     let confirm_tx_for_ui = confirm_tx.clone();
+    // Words from outside the conversation -- a build that finished, a CI job
+    // that failed -- queued by `POST /say`. Bounded and small: a backlog IRA
+    // cannot get through is worse than a refused request, and the route says so
+    // rather than waiting.
+    // The bool is whether to make a sound on arrival. A job already pipped the
+    // moment it finished -- the pip is the *news*, and it must not wait on a
+    // phrasing round trip -- so its report arrives silently. Words pushed in
+    // from outside by `POST /say` have made no sound yet and do pip.
+    let (say_tx, mut say_rx) = mpsc::channel::<(String, bool)>(8);
+    let say_tx_for_jobs = say_tx.clone();
     // Tools. The clock is the only built-in; everything else arrives over MCP
     // as configuration rather than code.
     let host = {
@@ -366,6 +378,7 @@ async fn main() -> Result<()> {
     ui.set_admin(ui::Admin {
         host: Arc::downgrade(&host),
         confirm: confirm_tx_for_ui,
+        say: say_tx,
     });
 
     let stt_backend = metrics::stt_backend();
@@ -760,6 +773,17 @@ async fn main() -> Result<()> {
                 talk = false;
             }
 
+            Some((text, pip)) = say_rx.recv() => {
+                tracing::info!(chars = text.chars().count(), pip, "say queued");
+                // The same queue a finished job uses: both are news from
+                // outside the turn, and both wait for the floor rather than
+                // taking it.
+                if pip {
+                    tts.pip();
+                }
+                reports.push_back(text);
+            }
+
             Some(done) = jobs_rx.recv() => {
                 let (ok, text) = match done.result {
                     Ok(t) => (true, t),
@@ -770,15 +794,21 @@ async fn main() -> Result<()> {
                 // Heard immediately, wherever the conversation is: this is the
                 // only sound IRA makes that nobody asked for just now.
                 tts.pip();
-                // ponytail: the result is read out as it came back. Handing it
-                // to the model to phrase would read better and costs a turn --
-                // worth it here, because nobody is waiting on a background job.
-                reports.push_back(format!(
-                    "{} {}. {}",
-                    done.name,
-                    if ok { "finished" } else { "failed" },
-                    text
-                ));
+                // Handed to the model to phrase rather than read as returned.
+                // A tool's raw output is JSON or a diff stat, and reading that
+                // aloud sounds like a machine. It costs a round trip and nobody
+                // is waiting on it -- the job has already finished -- and it
+                // falls back to the raw text if the model cannot be reached,
+                // because hearing it awkwardly beats not hearing it.
+                //
+                // Spawned, not awaited: the loop must not stop for a network
+                // call. The report joins the queue whenever it is ready.
+                let phrasing = client.clone();
+                let say = say_tx_for_jobs.clone();
+                tokio::spawn(async move {
+                    let spoken = llm::phrase(&phrasing, &done.name, ok, &text).await;
+                    let _ = say.send((spoken, false)).await;
+                });
             }
 
             Some(_) = talk_rx.recv() => {

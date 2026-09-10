@@ -236,6 +236,14 @@ impl Host {
         tools.values().map(|t| t.spec()).collect()
     }
 
+    /// One tool by name. What the window needs to try a tool by hand: it has
+    /// to hold the tool itself, because the registry cannot run one without
+    /// going through the confirmation gate -- which is right for the model and
+    /// wrong for a button a person just pressed.
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.read().ok()?.get(name).cloned()
+    }
+
     pub fn latency(&self, name: &str) -> Option<Latency> {
         self.tools.read().ok()?.get(name).map(|t| t.spec().latency)
     }
