@@ -35,28 +35,107 @@ use std::sync::{OnceLock, RwLock};
 /// wrong, and the ones worth a window; the tuning constants stay in `main.rs`
 /// where changing them is a decision rather than a preference.
 pub const FIELDS: &[Field] = &[
-    Field::secret("ANTHROPIC_API_KEY", "Anthropic key, for the model"),
-    Field::secret("GROQ_API_KEY", "Groq key, for transcription"),
-    Field::plain("IRA_LLM_URL", "An OpenAI-compatible endpoint, instead of Anthropic"),
-    Field::secret("IRA_LLM_KEY", "Key for that endpoint, if it wants one"),
-    Field::plain("IRA_LLM_MODEL", "Model id, as that provider spells it"),
-    Field::plain("IRA_STT_URL", "A local whisper-server, instead of Groq"),
+    Field {
+        name: "GROQ_API_KEY",
+        label: "Groq key",
+        group: HEARING,
+        about: "",
+        empty: "Needed, unless you run whisper below.",
+        secret: true,
+    },
+    Field {
+        name: "IRA_STT_URL",
+        label: "Local transcription",
+        group: HEARING,
+        about: "A whisper-server here. No audio leaves this machine.",
+        empty: "Transcribing at Groq.",
+        secret: false,
+    },
+    Field {
+        name: "ANTHROPIC_API_KEY",
+        label: "Anthropic key",
+        group: ANSWERING,
+        about: "",
+        empty: "Needed, unless you give another endpoint below.",
+        secret: true,
+    },
+    Field {
+        name: "IRA_LLM_URL",
+        label: "Another endpoint",
+        group: ANSWERING,
+        about: "OpenAI chat-completions format: OpenRouter, LM Studio, Ollama.",
+        empty: "Talking to Anthropic.",
+        secret: false,
+    },
+    Field {
+        name: "IRA_LLM_KEY",
+        label: "Key for that endpoint",
+        group: ANSWERING,
+        about: "A server on this machine usually wants none.",
+        empty: "No key sent.",
+        secret: true,
+    },
+    Field {
+        name: "IRA_LLM_MODEL",
+        label: "Model",
+        group: ANSWERING,
+        about: "The id that provider uses, not Anthropic's.",
+        // Filled in from `llm::MODEL`, so it cannot drift from the real default.
+        empty: "",
+        secret: false,
+    },
 ];
+
+/// The two stages of a turn that leave this machine, in the order they happen.
+///
+/// Not a category scheme invented for the window: everything before
+/// transcription -- the wake word, knowing when you have stopped -- already runs
+/// here, so these six values are exactly the ones that decide what goes out.
+pub const GROUPS: &[Group] = &[
+    Group {
+        id: HEARING,
+        title: "Hearing you",
+        about: "Speech becomes text. Everything before this already happens here.",
+    },
+    Group {
+        id: ANSWERING,
+        title: "Answering",
+        about: "The one stage that still needs the network.",
+    },
+];
+
+const HEARING: &str = "hearing";
+const ANSWERING: &str = "answering";
+
+pub struct Group {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub about: &'static str,
+}
 
 pub struct Field {
     pub name: &'static str,
+    /// What to call it to someone who did not write the code.
+    pub label: &'static str,
+    pub group: &'static str,
     pub about: &'static str,
+    /// What IRA does when this is not set. An empty box should say what happens
+    /// instead of it, rather than only that it is empty.
+    pub empty: &'static str,
     /// Whether this goes to the credential store rather than the file, and is
     /// never sent back to the page.
     pub secret: bool,
 }
 
 impl Field {
-    const fn secret(name: &'static str, about: &'static str) -> Self {
-        Self { name, about, secret: true }
-    }
-    const fn plain(name: &'static str, about: &'static str) -> Self {
-        Self { name, about, secret: false }
+    /// What the window shows under an empty box. The model's default lives in
+    /// `llm.rs`, so it is read from there rather than repeated here.
+    pub fn when_empty(&self) -> String {
+        if self.empty.is_empty() {
+            format!("Using {}.", crate::llm::MODEL)
+        } else {
+            self.empty.into()
+        }
     }
 }
 
@@ -93,6 +172,31 @@ pub fn get(name: &str) -> Option<String> {
 /// settings page is allowed to know about a key.
 pub fn is_set(name: &str) -> bool {
     get(name).is_some()
+}
+
+/// Where a value came from.
+///
+/// Worth telling apart: "saved" and "set in the shell you started her from"
+/// look identical in the window and are answers to different questions --
+/// notably "why is she using that model when I never chose it".
+#[derive(PartialEq, Eq)]
+pub enum Source {
+    Saved,
+    Environment,
+}
+
+pub fn source(name: &str) -> Option<Source> {
+    if let Ok(o) = overrides().read() {
+        if let Some(value) = o.get(name) {
+            // A blank override is a deliberate clear, and masks the
+            // environment rather than falling through to it.
+            return (!value.is_empty()).then_some(Source::Saved);
+        }
+    }
+    std::env::var(name)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(|_| Source::Environment)
 }
 
 /// Loads saved settings over the environment. Called once at start-up.

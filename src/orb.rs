@@ -479,9 +479,12 @@ unsafe extern "system" fn wndproc(
             let press = ORB.with(|cell| {
                 let orb = cell.borrow();
                 let orb = orb.as_ref()?;
-                // Only when the gear is showing. Otherwise the corner of the
-                // orb is a button you cannot see, which is worse than none.
-                if orb.reveal > 0.5 && on_gear(x, y, orb.canvas.width as f32, orb.scale) {
+                // Gated on the pointer being over the orb, which is what
+                // decides the gear exists -- not on the fade being far enough
+                // along, which would make a click landing inside the first
+                // 80 ms take the floor instead. Measured: a fast synthetic
+                // click on the gear did exactly that.
+                if orb.hovered && on_gear(x, y, orb.canvas.width as f32, orb.scale) {
                     orb.ui.served().map(Press::Settings)
                 } else {
                     Some(Press::Talk(orb.ui.clone()))
@@ -552,7 +555,7 @@ impl raw_window_handle::HasWindowHandle for Handle {
 const SETTINGS_CLASS: &[u16] = &[
     b'I' as u16, b'R' as u16, b'A' as u16, b'S' as u16, b'e' as u16, b't' as u16, 0,
 ];
-const SETTINGS_SIZE: (i32, i32) = (560, 720);
+const SETTINGS_SIZE: (i32, i32) = (640, 780);
 
 /// Opens the settings window, or brings it forward if it is already open.
 ///

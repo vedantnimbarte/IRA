@@ -330,9 +330,17 @@ fn settings_state() -> String {
         .map(|f| {
             let mut o = json!({
                 "name": f.name,
+                "label": f.label,
+                "group": f.group,
                 "about": f.about,
+                "empty": f.when_empty(),
                 "secret": f.secret,
                 "set": crate::settings::is_set(f.name),
+                "from": match crate::settings::source(f.name) {
+                    Some(crate::settings::Source::Saved) => "saved",
+                    Some(crate::settings::Source::Environment) => "environment",
+                    None => "",
+                },
             });
             if !f.secret {
                 o["value"] = json!(crate::settings::get(f.name).unwrap_or_default());
@@ -340,7 +348,12 @@ fn settings_state() -> String {
             o
         })
         .collect();
-    serde_json::to_string(&fields).unwrap_or_else(|_| "[]".into())
+    let groups: Vec<Value> = crate::settings::GROUPS
+        .iter()
+        .map(|g| json!({ "id": g.id, "title": g.title, "about": g.about }))
+        .collect();
+    serde_json::to_string(&json!({ "groups": groups, "fields": fields }))
+        .unwrap_or_else(|_| "{}".into())
 }
 
 /// Reads a `{name, value}` body and saves it. Returns the JSON to answer with.
@@ -390,8 +403,18 @@ async fn reply_json<W: tokio::io::AsyncWrite + Unpin>(write: &mut W, status: u16
     let _ = write.write_all(body.as_bytes()).await;
 }
 
-/// The settings window's page: what IRA is configured with, and a box to
-/// change each of it.
+/// The settings window's page.
+///
+/// Laid out as the two stages of a turn that leave this machine, in the order
+/// they happen, rather than as six equal rows: everything before transcription
+/// already runs here, so hearing and answering is what these values actually
+/// divide into. The thread down the left is the only ornament, and it is
+/// carrying that order.
+///
+/// Values are set in a monospace face and nothing else is, because a key or a
+/// URL is read character by character and that is a legibility need rather than
+/// a label style. No web fonts: IRA runs without a network and a settings page
+/// that fetched a typeface would be the only part of her that did not.
 ///
 /// Served rather than built into the window, because the window is a webview
 /// and this is the thing it shows. Same origin as `POST /settings`, so the
@@ -405,148 +428,232 @@ const SETTINGS: &str = r##"<!doctype html>
 <title>IRA — settings</title>
 <style>
   :root {
-    --bg:#f4f6f8; --panel:#fff; --line:#d9dee5; --ink:#191c22;
-    --soft:#3e454f; --muted:#626c7a; --accent:#9e540c;
-    --ok:#1d6b50; --warn:#9e2c2c;
+    --ground:#eef1f5; --surface:#fff; --sunk:#f5f7fa;
+    --ink:#131820; --soft:#3f4956; --muted:#78849a; --faint:#9aa5b8;
+    --line:#dfe4ec; --edge:#cdd5e2;
+    --good:#0d7a68; --bad:#a72f3c; --focus:#2a6df4;
+    /* The orb's own light, sampled from it. Used once, on the thread. */
+    --thread:linear-gradient(180deg,#19a2fe,#7f9bfb,#cc9bfd,#fe84e4,#71fbf0);
+    --sans:"Segoe UI Variable Text","Segoe UI Variable","Segoe UI",system-ui,sans-serif;
+    --display:"Segoe UI Variable Display","Segoe UI Variable","Segoe UI",system-ui,sans-serif;
+    --mono:"Cascadia Mono",Consolas,ui-monospace,monospace;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg:#131519; --panel:#1a1d23; --line:#2c313a; --ink:#e7eaee;
-      --soft:#c3c9d2; --muted:#949daa; --accent:#de9b48;
-      --ok:#4eae87; --warn:#e07373;
+      --ground:#0c1017; --surface:#141a23; --sunk:#10151d;
+      --ink:#e8ecf2; --soft:#b6c0cf; --muted:#7d8899; --faint:#5f6a7a;
+      --line:#222a35; --edge:#2d3745;
+      --good:#4fd6c4; --bad:#f08a94; --focus:#6ba2ff;
     }
   }
   * { box-sizing:border-box; }
+  html { background:var(--ground); }
   body {
-    margin:0; background:var(--bg); color:var(--ink);
-    font:14px/1.55 "Segoe UI",system-ui,sans-serif;
+    margin:0; background:var(--ground); color:var(--ink);
+    font:400 14px/1.55 var(--sans);
+    -webkit-font-smoothing:antialiased;
   }
-  header {
-    position:sticky; top:0; display:flex; align-items:center; gap:12px;
-    padding:12px 20px; background:var(--panel); border-bottom:1px solid var(--line);
+  .page { max-width:600px; margin:0 auto; padding:36px 40px 44px; }
+
+  /* --- the head ------------------------------------------------------- */
+  h1 {
+    font:300 26px/1.2 var(--display); letter-spacing:-.015em;
+    margin:0 0 6px;
   }
-  h1 { margin:0; font-size:13px; letter-spacing:.16em; text-transform:uppercase; }
-  #note { margin-left:auto; font-size:12px; color:var(--muted); }
-  #note.ok { color:var(--ok); } #note.bad { color:var(--warn); }
-  main { max-width:640px; margin:0 auto; padding:20px; }
-  .row { margin-bottom:18px; }
-  label {
-    display:block; font:11px ui-monospace,Consolas,monospace; letter-spacing:.08em;
-    color:var(--soft); margin-bottom:4px;
+  .lede { margin:0; color:var(--muted); font-size:13.5px; max-width:46ch; }
+
+  /* --- a stage -------------------------------------------------------- */
+  .stage { position:relative; padding:30px 0 0 24px; }
+  /* The thread: the one ornament, and it is carrying the order of a turn. */
+  .stage::before {
+    content:""; position:absolute; left:0; top:36px; bottom:12px; width:2px;
+    border-radius:2px; background:var(--thread); opacity:.85;
   }
-  .about { font-size:12px; color:var(--muted); margin:0 0 6px; }
-  .line { display:flex; gap:8px; }
+  .stage:last-of-type::before { bottom:20px; }
+  h2 { font:400 17px/1.3 var(--display); letter-spacing:-.01em; margin:0 0 4px; }
+  .stage > p { margin:0; color:var(--muted); font-size:13px; max-width:52ch; }
+
+  /* --- a field -------------------------------------------------------- */
+  .field { padding:18px 0 16px; border-bottom:1px solid var(--line); }
+  .field:first-of-type { padding-top:20px; }
+  .field:last-child { border-bottom:0; padding-bottom:2px; }
+  .head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .name { font-size:14px; font-weight:600; color:var(--ink); }
+  /* The variable name, because this is what `doctor` and the docs call it. */
+  .var { font:400 11.5px/1 var(--mono); color:var(--faint); }
+  .about { margin:2px 0 0; color:var(--muted); font-size:12.5px; line-height:1.45; max-width:54ch; }
+
+  .control { display:flex; gap:8px; margin-top:10px; align-items:stretch; }
   input {
-    flex:1; min-width:0; padding:7px 10px; border-radius:5px;
-    border:1px solid var(--line); background:var(--panel); color:var(--ink);
-    font:13px ui-monospace,Consolas,monospace;
+    flex:1 1 auto; min-width:0; height:38px; padding:0 12px;
+    border:1px solid var(--edge); border-radius:9px;
+    background:var(--sunk); color:var(--ink);
+    font:400 13px/1 var(--mono);
+    transition:border-color .15s ease, background .15s ease;
   }
-  input:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  input::placeholder { color:var(--faint); font-family:var(--sans); font-size:13px; }
+  input:hover { border-color:var(--muted); }
+  input:focus { outline:none; border-color:var(--focus); background:var(--surface); }
+  input.saved { border-color:var(--good); }
+
+  /* Actions arrive when you are working on a field, so six of them are not
+     competing for attention while you read. */
+  /* A reserved column, so every box is the same width whether or not its
+     field has something to clear. */
+  .actions {
+    display:flex; gap:8px; flex:0 0 152px; opacity:0; pointer-events:none;
+    transform:translateX(-4px);
+    transition:opacity .16s ease, transform .16s ease;
+  }
+  .field.busy .actions { opacity:1; pointer-events:auto; transform:none; }
   button {
-    font:12px ui-monospace,Consolas,monospace; letter-spacing:.06em;
-    cursor:pointer; color:var(--panel); background:var(--accent);
-    border:1px solid var(--accent); border-radius:5px; padding:0 14px;
+    height:38px; padding:0 15px; border-radius:9px; cursor:pointer;
+    font:600 13px/1 var(--sans);
+    border:1px solid var(--ink); background:var(--ink); color:var(--ground);
+    transition:filter .12s ease;
   }
-  button.quiet { background:transparent; color:var(--muted); border-color:var(--line); }
-  button:active { filter:brightness(.85); }
-  .state { font-size:11px; color:var(--muted); margin-top:4px; min-height:1.2em; }
-  .state.set { color:var(--ok); }
+  button.ghost { background:transparent; color:var(--muted); border-color:var(--edge); font-weight:400; }
+  button:hover { filter:brightness(1.12); }
+  button.ghost:hover { color:var(--ink); border-color:var(--muted); }
+  button:focus-visible, input:focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
+
+  .status { margin:7px 0 0; font-size:12.5px; color:var(--muted); min-height:1.3em; }
+  .status.is-set { color:var(--good); }
+  .status.is-bad { color:var(--bad); }
+
   footer {
-    color:var(--muted); font-size:12px; border-top:1px solid var(--line);
-    margin-top:26px; padding-top:14px;
+    margin-top:30px; padding-top:18px; border-top:1px solid var(--line);
+    color:var(--faint); font-size:12.5px; line-height:1.5; max-width:56ch;
   }
-  code { font-family:ui-monospace,Consolas,monospace; color:var(--soft); }
+  footer code { font:400 12px/1 var(--mono); color:var(--muted); }
+
+  @media (prefers-reduced-motion:reduce) {
+    * { transition:none !important; }
+  }
+  @media (max-width:520px) {
+    .page { padding:36px 22px 48px; }
+    .control { flex-wrap:wrap; }
+    .actions { opacity:1; pointer-events:auto; transform:none; }
+  }
 </style>
 </head>
 <body>
-<header>
-  <h1>IRA — settings</h1>
-  <span id="note">applies immediately</span>
-</header>
-<main id="form"></main>
+<div class="page">
+  <h1>Settings</h1>
+  <p class="lede">Saved here and used by the next thing IRA says. Nothing restarts.</p>
+  <div id="stages"></div>
+  <footer id="foot"></footer>
+</div>
 <script>
-const form = document.getElementById('form');
-const note = document.getElementById('note');
-let fields = [];
+const stages = document.getElementById('stages');
+let state = { groups: [], fields: [] };
 
-function say(text, cls) {
-  note.textContent = text;
-  note.className = cls || '';
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
 }
 
-// A secret is never sent back, so the box starts empty whether or not one is
-// stored and the line underneath says which. Typing replaces it; Clear removes
-// it. There is deliberately no way to read one back out.
-function draw() {
-  form.innerHTML = '';
-  for (const f of fields) {
-    const row = document.createElement('div');
-    row.className = 'row';
+// What the line under a box says. A field that is empty says what IRA does
+// instead of it, rather than only that it is empty.
+function status(f) {
+  if (!f.set) return { text: f.empty, cls: '' };
+  // Where it came from, not just that it has a value: "saved" and "set in the
+  // shell you started her from" answer different questions.
+  if (f.from === 'environment') {
+    return { text: 'Coming from the environment. Saving replaces it.', cls: '' };
+  }
+  if (f.secret) return { text: 'Stored by Windows. Not shown again.', cls: 'is-set' };
+  return { text: 'Saved.', cls: 'is-set' };
+}
 
-    const label = document.createElement('label');
-    label.textContent = f.name;
-    label.htmlFor = f.name;
+function field(f) {
+  const row = el('div', 'field');
 
-    const about = document.createElement('p');
-    about.className = 'about';
-    about.textContent = f.about;
+  const head = el('div', 'head');
+  head.append(el('span', 'name', f.label), el('span', 'var', f.name));
+  row.append(head);
+  if (f.about) row.append(el('p', 'about', f.about));
 
-    const line = document.createElement('div');
-    line.className = 'line';
+  const control = el('div', 'control');
+  const input = el('input');
+  input.id = f.name;
+  input.type = f.secret ? 'password' : 'text';
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  input.value = f.secret ? '' : (f.value || '');
+  input.placeholder = f.secret && f.from === 'saved' ? 'Stored — type to replace'
+    : f.secret && f.set ? 'Set in the environment' : 'Not set';
+  input.setAttribute('aria-describedby', 'status-' + f.name);
 
-    const input = document.createElement('input');
-    input.id = f.name;
-    input.type = f.secret ? 'password' : 'text';
-    input.autocomplete = 'off';
-    input.spellcheck = false;
-    input.value = f.secret ? '' : (f.value || '');
-    input.placeholder = f.secret
-      ? (f.set ? 'stored — type to replace' : 'not set')
-      : 'not set';
+  const actions = el('div', 'actions');
+  const save = el('button', null, f.secret ? 'Save key' : 'Save');
+  save.onclick = () => send(f.name, input.value);
+  actions.append(save);
 
-    const save = document.createElement('button');
-    save.textContent = 'Save';
-    save.onclick = () => send(f.name, input.value);
-
-    const clear = document.createElement('button');
-    clear.textContent = 'Clear';
-    clear.className = 'quiet';
+  // Only offered when there is something to remove.
+  if (f.set) {
+    const clear = el('button', 'ghost', 'Clear');
     clear.onclick = () => { input.value = ''; send(f.name, ''); };
-
-    input.onkeydown = e => { if (e.key === 'Enter') send(f.name, input.value); };
-
-    const state = document.createElement('div');
-    state.className = 'state' + (f.set ? ' set' : '');
-    state.id = 'state-' + f.name;
-    state.textContent = f.set
-      ? (f.secret ? 'stored in the Windows Credential Manager' : 'set')
-      : 'not set';
-
-    line.append(input, save, clear);
-    row.append(label, about, line, state);
-    form.append(row);
+    actions.append(clear);
   }
 
-  const foot = document.createElement('footer');
-  foot.innerHTML =
-    'Keys go to the Windows Credential Manager, never to a file. Everything else '
-    + 'is written to <code>ira.local.toml</code>. Saved values take effect on the '
-    + 'next thing IRA says — nothing needs restarting.';
-  form.append(foot);
+  // The actions belong to the field you are working on.
+  const busy = on => row.classList.toggle('busy', on);
+  input.onfocus = () => busy(true);
+  input.oninput = () => busy(true);
+  input.onblur = () => setTimeout(() => {
+    if (!row.contains(document.activeElement)) busy(false);
+  }, 120);
+  input.onkeydown = e => {
+    if (e.key === 'Enter') send(f.name, input.value);
+    if (e.key === 'Escape') { input.value = f.secret ? '' : (f.value || ''); input.blur(); }
+  };
+
+  control.append(input, actions);
+
+  const s = status(f);
+  const line = el('p', 'status ' + s.cls, s.text);
+  line.id = 'status-' + f.name;
+  line.setAttribute('role', 'status');
+
+  row.append(control, line);
+  return row;
+}
+
+function draw() {
+  stages.replaceChildren();
+  for (const g of state.groups) {
+    const stage = el('section', 'stage');
+    stage.append(el('h2', null, g.title), el('p', null, g.about));
+    for (const f of state.fields.filter(f => f.group === g.id)) stage.append(field(f));
+    stages.append(stage);
+  }
+  document.getElementById('foot').innerHTML =
+    'Keys are held by Windows, in the Credential Manager, and never written to a '
+    + 'file. Everything else is saved in <code>ira.local.toml</code> beside IRA. '
+    + 'Both take the place of the matching environment variable.';
 }
 
 async function load() {
-  try {
-    const r = await fetch('/settings/state');
-    fields = await r.json();
-    draw();
-  } catch (e) {
-    say('could not read settings', 'bad');
-  }
+  const r = await fetch('/settings/state');
+  state = await r.json();
+  const keepScroll = window.scrollY;
+  draw();
+  // The window can restore a scroll position from a previous visit, before
+  // there was anything to scroll. Opening settings at the bottom of the page
+  // looks like a fault; a save in place should not jump you either.
+  window.scrollTo(0, first ? 0 : keepScroll);
+  first = false;
 }
+let first = true;
 
 async function send(name, value) {
-  say('saving…');
+  const input = document.getElementById(name);
+  const line = document.getElementById('status-' + name);
+  line.className = 'status';
+  line.textContent = 'Saving…';
   try {
     const r = await fetch('/settings', {
       method: 'POST',
@@ -555,17 +662,26 @@ async function send(name, value) {
     });
     const answer = await r.json();
     if (!r.ok || answer.error) {
-      say(answer.error || ('save failed: ' + r.status), 'bad');
+      line.className = 'status is-bad';
+      line.textContent = answer.error || ('Not saved: ' + r.status + '.');
       return;
     }
-    say(value.trim() ? (name + ' saved') : (name + ' cleared'), 'ok');
     await load();
+    // The one bit of motion: the box you just saved says so, briefly.
+    const again = document.getElementById(name);
+    if (again) {
+      again.classList.add('saved');
+      setTimeout(() => again.classList.remove('saved'), 1400);
+    }
   } catch (e) {
-    say('save failed: ' + e, 'bad');
+    line.className = 'status is-bad';
+    line.textContent = 'Not saved: ' + e + '.';
   }
 }
 
-load();
+load().catch(() => {
+  stages.append(el('p', 'status is-bad', 'Could not read settings. IRA may have stopped.'));
+});
 </script>
 </body>
 </html>
