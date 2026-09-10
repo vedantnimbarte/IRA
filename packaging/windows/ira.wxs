@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  The Windows installer.
+
+  Built by .github/workflows/release.yml with the WiX 5 dotnet tool:
+
+      wix build packaging/windows/ira.wxs -d Version=0.1.0 -o ira.msi
+
+  Per-user, deliberately. A per-machine install needs administrator rights and
+  lands in Program Files, which the user cannot write to — and IRA writes to
+  her own directory constantly: the settings database, the transcript, the
+  models she downloads on a first run. Those live in %LOCALAPPDATA%\IRA either
+  way (see src/paths.rs), but a program installed somewhere its own user cannot
+  write is a trap waiting for the first feature that forgets. Per-user also
+  means no UAC prompt, which for a single-user desktop assistant is the whole
+  interaction someone should have with an installer.
+
+  Unsigned. SmartScreen will warn on first run until this is signed and has
+  built some reputation; the README says so plainly. To sign, add a signtool
+  step to the release workflow — nothing in this file has to change.
+-->
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="IRA"
+    Manufacturer="Vedant Nimbarte"
+    Version="$(Version)"
+    Scope="perUser"
+    Compressed="yes"
+    Language="1033"
+    Codepage="1252"
+    UpgradeCode="6f2f6c8a-4a5d-4a6b-9b3a-1c9e7d2b5f41">
+    <!--
+      That UpgradeCode is fixed forever. It is the identity every future version
+      upgrades: change it and 0.2.0 installs beside 0.1.0 rather than replacing
+      it, leaving two IRAs, two shortcuts and two entries in Add or Remove
+      Programs.
+    -->
+
+    <SummaryInformation Description="IRA, a voice assistant" />
+
+    <!--
+      Upgrades in place. Without this an installer refuses to run while an older
+      version is present, and the user is told to go and uninstall it first.
+    -->
+    <MajorUpgrade
+      AllowSameVersionUpgrades="yes"
+      DowngradeErrorMessage="A newer version of IRA is already installed. Uninstall it first if you meant to go back." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="ira.ico" SourceFile="assets/ira.ico" />
+    <!-- The icon beside the entry in Add or Remove Programs. -->
+    <Property Id="ARPPRODUCTICON" Value="ira.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/vedantnimbarte/IRA" />
+    <!--
+      Or Add or Remove Programs shows an empty Location, and anything looking
+      for the install path has to guess at it. Set after CostFinalize, which is
+      when INSTALLFOLDER has a value to copy.
+    -->
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLFOLDER]" After="CostFinalize" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="IRA" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ShortcutFolder" Name="IRA" />
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="IRA" Level="1">
+      <ComponentRef Id="Executable" />
+      <ComponentRef Id="StartMenu" />
+    </Feature>
+
+    <Component Id="Executable" Directory="INSTALLFOLDER" Guid="a1c4e0d2-7b91-4e33-8f5c-2d6a0b9e4c17">
+      <File Id="ira.exe" Source="ira.exe" KeyPath="yes" />
+      <!--
+        `ira set`, `ira doctor` and `ira fetch` are how she is configured, and a
+        command nobody can type is not a way to configure anything. Per-user
+        PATH, matching the install: this appends to HKCU, never the system one.
+      -->
+      <Environment
+        Id="AddToPath"
+        Name="PATH"
+        Value="[INSTALLFOLDER]"
+        Action="set"
+        Part="last"
+        System="no"
+        Permanent="no" />
+    </Component>
+
+    <Component Id="StartMenu" Directory="ShortcutFolder" Guid="b2d5f1e3-8c02-4f44-9a6d-3e7b1c0f5d28">
+      <Shortcut
+        Id="IraShortcut"
+        Name="IRA"
+        Description="A voice assistant"
+        Target="[INSTALLFOLDER]ira.exe"
+        WorkingDirectory="INSTALLFOLDER"
+        Icon="ira.ico" />
+      <!-- Or uninstalling leaves an empty IRA folder in the Start menu. -->
+      <RemoveFolder Id="RemoveShortcutFolder" Directory="ShortcutFolder" On="uninstall" />
+      <!--
+        A per-user component needs a per-user key path, and a shortcut is not
+        one. This registry value is what the installer tracks instead.
+      -->
+      <RegistryValue
+        Root="HKCU"
+        Key="Software\IRA"
+        Name="installed"
+        Type="integer"
+        Value="1"
+        KeyPath="yes" />
+    </Component>
+
+    <!--
+      What is deliberately NOT removed on uninstall: %LOCALAPPDATA%\IRA, which
+      holds the settings database, the transcript, the skills someone wrote and
+      the models they downloaded. An upgrade uninstalls the old version, so
+      cleaning that up here would delete a user's conversations and 85 MB of
+      models every time they updated. The README says where it is, for anyone
+      who wants it gone.
+
+      API keys are not there either way — they are in the Windows Credential
+      Manager, which no installer should be reaching into. See decisions/0015.
+    -->
+  </Package>
+</Wix>

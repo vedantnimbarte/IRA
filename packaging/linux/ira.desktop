@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=IRA
+Comment=A voice assistant
+Exec=ira
+Icon=ira
+Categories=Utility;AudioVideo;
+# She has no window of her own on Linux. The orb and the settings window are
+# Windows-only (decisions/0013), so what a launcher starts here is a program
+# that listens, talks, and serves its screen at http://127.0.0.1:8180.
+#
+# Terminal=true on purpose: the first start downloads 85 MB of models and says
+# so, and a missing API key is a message rather than a window. Without a
+# terminal both of those happen where nobody can see them.
+Terminal=true
+Keywords=voice;assistant;speech;

@@ -3,6 +3,12 @@ name = "ira"
 version = "0.1.0"
 edition = "2021"
 
+# The icon, compiled into the executable. Windows asks the binary for it --
+# the taskbar and alt-tab never see the installer's shortcut. Host-gated
+# because it needs rc.exe, and because no other platform has resources.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [dependencies]
 anyhow = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "process", "signal"] }
@@ -42,6 +48,10 @@ tiny-skia = "0.11"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    # Closing the console an installed IRA was given, and pointing what she
+    # would have printed at a log file first. See console.rs.
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
     "Win32_Security_Credentials",
     "Win32_System_LibraryLoader",
     "Win32_UI_HiDpi",

@@ -9,13 +9,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// The setup command for this platform, so an error tells a Linux user to run
-/// something that exists on Linux.
-pub const SETUP: &str = if cfg!(windows) {
-    ".\\scripts\\fetch-models.ps1"
-} else {
-    "./scripts/fetch-models.sh"
-};
+/// What to run when something is missing.
+///
+/// It used to name a platform's shell script, which is right for a checkout
+/// and useless anywhere else: an installed IRA has no `scripts/` directory
+/// beside it, so the remedy named a file the person reading it did not have.
+/// `ira fetch` is the same download, and it is on the machine by definition --
+/// it is the program printing the message.
+pub const SETUP: &str = "ira fetch";
 
 pub enum Level {
     Ok,

@@ -20,6 +20,24 @@
 
 use crate::{db, settings, skills};
 
+/// The two questions that must not start anything.
+///
+/// Answered before the logger, the settings and the skill index, because
+/// `ira --version` printing three lines of start-up first is not a version, and
+/// because either of those can fail on a machine where the question is still a
+/// fair one to ask.
+pub fn early(args: &[String]) -> Option<i32> {
+    match args.first().map(String::as_str)? {
+        "--version" | "-V" => {
+            println!("ira {}", env!("CARGO_PKG_VERSION"));
+            Some(0)
+        }
+        "--help" | "-h" | "help" => Some(help()),
+        _ => None,
+    }
+}
+
+
 /// Dispatches a subcommand. `None` means this was not one, and IRA should
 /// start normally.
 pub fn run(args: &[String]) -> Option<i32> {
@@ -30,6 +48,28 @@ pub fn run(args: &[String]) -> Option<i32> {
         _ => None,
     }
 }
+
+/// What she can be told to do, for someone who installed her and typed `ira
+/// --help` because that is what you type.
+///
+/// Deliberately short. The full surface is in the README and in SPEC.md, and a
+/// terminal is a bad place to read either.
+fn help() -> i32 {
+    println!("ira -- a voice assistant you can interrupt");
+    println!();
+    println!("  ira                          start her");
+    println!("  ira doctor                   check models, microphone and keys");
+    println!("  ira fetch                    download the models, the voice and piper");
+    println!("  ira fetch --whisper          and offline speech-to-text");
+    println!("  ira set <NAME> [value]       a key or a URL; no value clears it");
+    println!("  ira mcp ls|add|env|rm        MCP servers");
+    println!("  ira skill ls|add|on|off|rm   the instructions she is given");
+    println!("  ira --version");
+    println!();
+    println!("Say \"hey Jarvis\", wait for the chirp, and talk. Interrupt any time.");
+    0
+}
+
 
 /// Prints a problem and returns the exit code, so every arm reads as one line.
 fn bad(what: impl std::fmt::Display) -> i32 {

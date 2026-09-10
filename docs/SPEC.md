@@ -166,11 +166,18 @@ All three distinguishable with your back to the machine.
 
 ### Environment variables
 
-Complete current surface. Everything path-shaped resolves relative to the working
-directory.
+Complete current surface. Everything path-shaped resolves relative to the **data
+directory**, which is `IRA_DATA` if it is set, the checkout if the working
+directory holds a `Cargo.toml` naming *this* crate, and the per-user directory
+otherwise:
+`%LOCALAPPDATA%\IRA` on Windows (from `LOCALAPPDATA`), `~/.local/share/ira` on
+Linux (from `XDG_DATA_HOME`, else `HOME`), and `~/Library/Application Support/IRA`
+on macOS. Those three are the platform's own variables, read but never set by
+IRA. An absolute path in any of the variables below still wins over all of it.
 
 | Variable | Default | Effect |
 |---|---|---|
+| `IRA_DATA` | *see above* | The directory everything else defaults into. Set it to run two IRAs side by side, or to keep a checkout from touching an installed copy's state |
 | `IRA_MODELS` | `models` | Directory holding all ONNX weights and the voice |
 | `IRA_WAKEWORD` | `hey_jarvis_v0.1.onnx` | Classifier filename inside `IRA_MODELS` |
 | `IRA_VOICE` | `en_US-amy-medium.onnx` | Piper voice; sample rate read from the sidecar JSON |
@@ -220,6 +227,21 @@ ira set ANTHROPIC_API_KEY sk-ant-...
 ira set IRA_LLM_URL http://127.0.0.1:1234/v1/chat/completions
 ira set IRA_LLM_URL                     # no value clears it
 ```
+```
+ira fetch                               # the models, the voice, piper
+ira fetch --whisper                     # and offline speech-to-text
+ira fetch --whisper --model small.en    # a particular whisper model
+```
+
+`ira fetch` is the same pinned list of URLs as `scripts/fetch-models.*`, in
+the program rather than beside it, because an installed IRA has no `scripts/`
+directory. Files already present are left alone, so it is safe to re-run after
+a download stops part-way. A first start with nothing downloaded runs it
+automatically rather than failing a check, and every "missing" message names
+it. Whisper is opt-in: it is several times the size of everything else, and on
+Linux and macOS upstream publishes no binaries, so there `--whisper` fetches
+the model and prints the cmake commands for the rest.
+
 
 `ira set` exists because the fatal start-up check for a missing key fires long
 before there is a settings window to type one into. It never prints a value

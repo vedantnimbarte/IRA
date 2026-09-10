@@ -99,14 +99,18 @@ fn every_environment_variable_is_documented() {
             continue;
         }
         let text = fs::read_to_string(&path).expect("readable source");
-        for (_, after) in text.match_indices("env::var(\"").map(|(i, m)| (i, &text[i + m.len()..]))
-        {
-            let Some(name) = after.split('"').next() else {
-                continue;
-            };
-            // The table writes them as `| \u{60}NAME\u{60} |`.
-            if !spec.contains(&format!("`{name}`")) {
-                undocumented.push(format!("{} reads {name}", path.display()));
+        // `var_os` as well as `var`: paths.rs reads its directories that way,
+        // because a path is not required to be UTF-8, and a check that only
+        // knew about `var` would have let every one of them go undocumented.
+        for call in ["env::var(\"", "env::var_os(\""] {
+            for (_, after) in text.match_indices(call).map(|(i, m)| (i, &text[i + m.len()..])) {
+                let Some(name) = after.split('"').next() else {
+                    continue;
+                };
+                // The table writes them as `| \u{60}NAME\u{60} |`.
+                if !spec.contains(&format!("`{name}`")) {
+                    undocumented.push(format!("{} reads {name}", path.display()));
+                }
             }
         }
     }

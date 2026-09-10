@@ -33,7 +33,14 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::collections::BTreeMap;
 
-pub const PATH: &str = "ira.local.db";
+/// The database file.
+///
+/// A function rather than a constant because "beside IRA" is no longer a fixed
+/// string: an installed copy writes to the per-user data directory and a
+/// checkout writes to the checkout. See `paths`.
+pub fn path() -> std::path::PathBuf {
+    crate::paths::in_data("ira.local.db")
+}
 
 /// Opens the database, creating it and its tables if they are not there.
 ///
@@ -52,7 +59,8 @@ pub const PATH: &str = "ira.local.db";
 /// ponytail: no schema versioning. The day a column has to change type or
 /// meaning is the day this needs real migrations. Until then, add tables.
 fn open() -> Result<Connection> {
-    let conn = Connection::open(PATH).with_context(|| format!("open {PATH}"))?;
+    let path = path();
+    let conn = Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS settings (
              name  TEXT PRIMARY KEY,
@@ -108,7 +116,7 @@ fn open() -> Result<Connection> {
 /// Whether the database file exists yet. A machine that has never saved
 /// anything is the normal case, and opening would create an empty one.
 fn exists() -> bool {
-    std::path::Path::new(PATH).exists()
+    path().exists()
 }
 
 // ---------------------------------------------------------------- settings --
@@ -488,13 +496,13 @@ pub fn skills_prune(keep: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// The working directory is process-wide, and `PATH` is relative to it, so a
-/// test that moves it moves it for every other test running at that moment.
+/// `IRA_DATA` is process-wide, so a test that points it at its own temp
+/// directory points it there for every other test running at that moment.
 /// Every test that does so takes this first.
 ///
-/// Not a niceness: two tests each chdir-ing to their own temp directory
-/// produced a failure that looked like a lost database row, which is a long way
-/// from the actual cause.
+/// Not a niceness: two tests each redirecting the database to their own temp
+/// directory produced a failure that looked like a lost row, which is a long
+/// way from the actual cause.
 #[cfg(test)]
 pub fn cwd_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -505,19 +513,23 @@ pub fn cwd_lock() -> std::sync::MutexGuard<'static, ()> {
 mod tests {
     use super::*;
 
-    /// Every test here writes the one database in the working directory, so
-    /// they share a temp directory and a lock rather than racing each other.
+    /// Every test here writes the one database, so they share a temp directory
+    /// and a lock rather than racing each other.
+    ///
+    /// `IRA_DATA` rather than a chdir: the database is no longer relative to
+    /// the working directory, and pointing one variable at a temp directory is
+    /// a smaller thing to get wrong than moving the whole process. Without it
+    /// these tests would write the developer's real settings.
     fn in_a_fresh_db<T>(f: impl FnOnce() -> T) -> T {
         let _guard = crate::db::cwd_lock();
 
         let dir = std::env::temp_dir().join("ira-db-test");
         std::fs::create_dir_all(&dir).unwrap();
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&dir).unwrap();
-        let _ = std::fs::remove_file(PATH);
+        std::env::set_var("IRA_DATA", &dir);
+        let _ = std::fs::remove_file(path());
 
         let out = f();
-        std::env::set_current_dir(cwd).unwrap();
+        std::env::remove_var("IRA_DATA");
         out
     }
 

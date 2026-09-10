@@ -18,7 +18,53 @@ enough for years; what stays broken is being cut off when you pause to think,
 and having to wait out an answer you already know is wrong. A slower model that
 yields the floor correctly beats a smarter one that talks over you.
 
+## Install
+
+Download an installer from [Releases](https://github.com/vedantnimbarte/IRA/releases),
+or build her from source below.
+
+| | | |
+|---|---|---|
+| **Windows** | `ira-<version>-x64.msi` | Installs for you only — no administrator rights, no UAC prompt. She lands in the Start menu, and `ira` works in any terminal. |
+| **Linux** | `ira_<version>_amd64.deb` | `sudo apt install ./ira_*.deb`. No orb and no settings window here: `ira set` configures her, and the screen is at `http://127.0.0.1:8180`. |
+| **macOS** | `ira-<version>-aarch64.dmg` | ⚠️ **Unverified.** It compiles, and that is the whole of what is known about it. See [what has not been verified](#what-has-not-been-verified). |
+
+**Nothing is signed.** Windows will say "Windows protected your PC" — choose
+**More info → Run anyway**. macOS will refuse outright: right-click the app and
+choose **Open**. Both are what an unsigned installer looks like, and both stop
+once there is a certificate to sign with.
+
+### The first start
+
+She downloads the wake models, the voice and piper — about 85 MB — the first
+time she runs, and shows progress while she does it. Then give her a key:
+
+```
+ira set ANTHROPIC_API_KEY sk-ant-...
+ira set GROQ_API_KEY gsk_...
+```
+
+Keys go to the operating system's keyring. Everything else — the settings
+database, the transcript, the skills you write and the models above — lives in
+one directory:
+
+| Platform | Directory |
+|---|---|
+| Windows | `%LOCALAPPDATA%\IRA` |
+| Linux | `~/.local/share/ira` |
+| macOS | `~/Library/Application Support/IRA` |
+
+**Uninstalling does not remove it.** An upgrade uninstalls the old version
+first, so deleting it there would throw away your conversations and 85 MB of
+models on every update. Delete the directory yourself if you want her gone
+completely; the keys are in the keyring, under `IRA`.
+
+If a download stops part-way, `ira fetch` picks up where it left off, and
+`ira doctor` says what is still missing.
+
 ## Run
+
+From a checkout:
 
 ```powershell
 .\scripts\fetch-models.ps1
@@ -26,6 +72,12 @@ cargo run --release -- set ANTHROPIC_API_KEY sk-ant-...
 cargo run --release -- set GROQ_API_KEY gsk_...
 cargo run --release
 ```
+
+A checkout keeps its own `models/`, `ira.local.db` and transcript beside it,
+exactly as before — a `Cargo.toml` in the working directory is how she tells a
+checkout from an install ([0019](docs/decisions/0019-installed-rather-than-cloned.md)),
+so a clone and an installed copy on the same machine never touch each other's
+settings.
 
 Keys go to the operating system's keyring, once, and are read from there on
 every start — not from the environment, which puts them in your shell history
@@ -158,6 +210,11 @@ ira mcp add github stdio npx -y @modelcontextprotocol/server-github
 write the database and connect nothing — a server added here comes up at the
 next start. They do not ask before saving a command either, because a terminal
 on this machine already is the authorisation.
+
+`ira fetch` downloads the models, the voice and piper, and `ira fetch
+--whisper` adds offline speech-to-text on top. A first start runs the former
+by itself when the files are missing, so this is the way to retry after a
+download stopped part-way, and the way to add whisper later.
 
 ## Talking to IRA from something else
 
@@ -386,8 +443,8 @@ Every environment variable is listed in
 [SPEC.md](docs/SPEC.md#environment-variables), and the six provider settings —
 which are not environment variables — in
 [the section after it](docs/SPEC.md#provider-settings). The ones you are most
-likely to want: `IRA_STT_URL`, `IRA_LLM_URL`, `IRA_PTT`, `IRA_UI`, `IRA_CONFIG`,
-`IRA_TRANSCRIPT`, `IRA_WINGMAN_URL`.
+likely to want: `IRA_DATA`, `IRA_STT_URL`, `IRA_LLM_URL`, `IRA_PTT`, `IRA_UI`,
+`IRA_CONFIG`, `IRA_TRANSCRIPT`, `IRA_WINGMAN_URL`.
 
 ## Docs
 
@@ -413,9 +470,11 @@ Kept here rather than buried, because it is the honest shape of the project.
   time-to-first-token has never been observed above zero. The latency work in
   [BASELINE.md](docs/BASELINE.md) optimised the transcription half of a budget
   whose model half is unmeasured.
-- **macOS, and any ARM machine.** CI now runs the POSIX setup script and a full
-  turn on Ubuntu x86-64 every push, which is how two real bugs in it were
-  found. The Darwin and aarch64 branches of that script have still never run.
+- **macOS, and any ARM machine.** CI now runs the POSIX setup script and a
+  full turn on Ubuntu x86-64 every push, which is how two real bugs in it
+  were found. The Darwin and aarch64 branches of that script have still
+  never run. The `.dmg` a release publishes is built by CI and has never
+  been opened by anyone: it compiles, and nothing beyond that is known.
 - **Anything driven by a real model.** Every measurement and every completed
   turn used a stub, which is why `ttft_ms` has never been above zero. Wingman
   is connected to the real `wingman serve` 0.3.0 and a turn runs end to end,
