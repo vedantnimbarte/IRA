@@ -51,6 +51,15 @@ refused, a client that says nothing is not.
 a fixed list, so a crafted POST cannot reach through and set an arbitrary
 variable.
 
+**The window is shaped as a turn, not as a list.** The six values are exactly
+the two stages that leave this machine -- everything before transcription
+already runs here -- so they are grouped as hearing and answering, in the order
+they happen, rather than as six equal rows. And each field says where its value
+came from: *saved* and *set in the shell you started her from* look identical
+otherwise, and they are answers to different questions, notably "why is she
+using that model when I never chose it". An empty field says what IRA does
+instead of it -- "Talking to Anthropic" -- rather than only that it is empty.
+
 **The settings window is a webview**, having just spent
 [0013](0013-the-orb-is-an-overlay-on-the-same-stream.md) proving one cannot be
 transparent. Nothing about a settings window wants to be: the orb stays drawn

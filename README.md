@@ -198,7 +198,9 @@ thing IRA says — nothing restarts:
 
 Saved values sit **over** the environment, which still works and still loses to
 them; clearing a field clears it rather than falling back, so there is a way
-back to the default provider from the window.
+back to the default provider from the window. Each field says which of the two
+it is reading, because "saved" and "set in the shell you started her from" look
+identical otherwise, and an empty one says what IRA does instead of it.
 
 Keys never go in a file, and are never read back out — the window is told
 whether one is stored, not what it is, so it cannot show you a key you have
