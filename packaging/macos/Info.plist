@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>IRA</string>
+    <key>CFBundleDisplayName</key>
+    <string>IRA</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.vedantnimbarte.ira</string>
+    <key>CFBundleExecutable</key>
+    <string>ira</string>
+    <key>CFBundleIconFile</key>
+    <string>ira</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleVersion</key>
+    <string>VERSION</string>
+    <key>CFBundleShortVersionString</key>
+    <string>VERSION</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <!--
+      IRA opens the microphone the moment she starts. Without this key macOS
+      does not prompt, it kills the process, and the failure looks like a crash.
+    -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>IRA listens for the wake word and for what you say to her.</string>
+</dict>
+</plist>

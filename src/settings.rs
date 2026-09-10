@@ -207,7 +207,7 @@ pub fn load() {
                 }
             }
         }
-        Err(e) => tracing::error!("could not read {}, ignoring it: {e:#}", db::PATH),
+        Err(e) => tracing::error!("could not read {}, ignoring it: {e:#}", db::path().display()),
     }
 
     for f in FIELDS.iter().filter(|f| f.secret) {
@@ -399,9 +399,8 @@ mod tests {
         let _guard = crate::db::cwd_lock();
         let dir = std::env::temp_dir().join("ira-settings-test");
         std::fs::create_dir_all(&dir).unwrap();
-        let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&dir).unwrap();
-        let _ = std::fs::remove_file(db::PATH);
+        std::env::set_var("IRA_DATA", &dir);
+        let _ = std::fs::remove_file(db::path());
 
         db::settings_set("IRA_LLM_URL", "http://one").unwrap();
         db::settings_set("IRA_LLM_URL", r#"http://x/a"b"#).unwrap();
@@ -410,6 +409,6 @@ mod tests {
         db::settings_delete("IRA_LLM_URL").unwrap();
         assert!(db::settings_all().unwrap().is_empty());
 
-        std::env::set_current_dir(cwd).unwrap();
+        std::env::remove_var("IRA_DATA");
     }
 }

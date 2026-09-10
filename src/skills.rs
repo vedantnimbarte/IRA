@@ -78,7 +78,10 @@ fn cell() -> &'static RwLock<Vec<Skill>> {
 fn dir() -> &'static PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
-        PathBuf::from(std::env::var("IRA_SKILLS").unwrap_or_else(|_| "skills".into()))
+        match std::env::var("IRA_SKILLS") {
+            Ok(dir) => PathBuf::from(dir),
+            Err(_) => crate::paths::in_data("skills"),
+        }
     })
 }
 

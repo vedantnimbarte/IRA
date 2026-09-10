@@ -116,6 +116,22 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      # Two things download the same six files now: the script above, and
+      # `ira fetch` inside the program, which is what an installed IRA uses
+      # because she has no scripts/ directory beside her. Nothing else makes
+      # them agree -- so if `fetch` cannot see what the script just wrote, the
+      # two have drifted on a filename or a path, and this says so here rather
+      # than on somebody's fresh install.
+      - name: The setup script and `ira fetch` must agree
+        run: |
+          set -eu
+          ./target/release/ira fetch > fetch.log 2>&1
+          cat fetch.log
+          grep -q "already here" fetch.log || {
+            echo "FAIL: ira fetch does not see what fetch-models.sh downloaded"
+            exit 1
+          }
+
       - name: One turn, end to end
         run: |
           set -eu

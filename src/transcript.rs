@@ -47,7 +47,7 @@ impl Transcript {
             return Self { path: None };
         }
         let path = if setting.is_empty() {
-            PathBuf::from("transcript.jsonl")
+            crate::paths::in_data("transcript.jsonl")
         } else {
             PathBuf::from(setting)
         };

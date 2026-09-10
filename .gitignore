@@ -7,6 +7,9 @@
 /whisper/
 # Written by IRA at runtime -- a record of your conversations, not source.
 /transcript.jsonl
+# Written when she is started from a shortcut and closes her own console, which
+# only happens to a checkout if IRA_DATA points at one. See src/console.rs.
+/ira.log
 # Written by the settings window: this machine's URLs and model ids. Not keys,
 # which go to the OS keyring -- but this is per-machine either way, unlike
 # ira.toml, which is shareable.
@@ -15,3 +18,10 @@
 
 # wingman serve keeps its index, sessions and memory here.
 .wingman/
+
+# Built by .github/workflows/release.yml, into the working directory.
+/*.msi
+/*.deb
+/*.dmg
+/IRA.app/
+/*.iconset/

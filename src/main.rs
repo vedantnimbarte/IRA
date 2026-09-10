@@ -15,13 +15,17 @@
 
 mod audio;
 mod cli;
+#[cfg(windows)]
+mod console;
 mod config;
 mod db;
 mod doctor;
+mod fetch;
 mod llm;
 mod mcp;
 mod metrics;
 mod oauth;
+mod paths;
 mod settings;
 mod skills;
 #[cfg(windows)]
@@ -248,6 +252,26 @@ fn should_speak(tok: &CancellationToken, state: &State) -> bool {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Before the logger, the settings and the models: `ira --version` and
+    // `ira --help` are questions about the program, not requests to run it.
+    if let Some(code) = cli::early(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        std::process::exit(code);
+    }
+
+    // Decided before the first log line, because it changes where log lines
+    // go. A console IRA was given all to herself is a shortcut launch: it is
+    // closed once she is running, and standard error becomes a file. A console
+    // shared with a shell is the user's terminal and is left alone.
+    //
+    // A subcommand always keeps it -- `ira doctor` printing into a log file
+    // that nobody has been told about is the same as printing nothing.
+    #[cfg(windows)]
+    let hide_console = std::env::args().nth(1).is_none() && console::owned_alone();
+    // Nowhere else has a console to take away: a Linux desktop entry inherits
+    // no terminal in the first place, and its output goes to the journal.
+    #[cfg(not(windows))]
+    let hide_console = false;
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -259,21 +283,58 @@ async fn main() -> Result<()> {
         // codes land between the field name and its value, so `heard user=`
         // is not a string that appears in the log and grep finds nothing in a
         // log that plainly contains it.
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        //
+        // `hide_console` is part of the question: standard error is a terminal
+        // right now and will be a file by the time the interesting lines are
+        // written, so asking only what it is at this moment gets it wrong.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()) && !hide_console)
         .init();
+
+    // Startup and the loop, so that one place can see a failure in either.
+    let result = run(hide_console).await;
+
+    // A shortcut launch has a console nobody asked for and nobody is reading,
+    // and it closes the instant this process exits. Without this, every way a
+    // first run can fail -- no API key, no microphone, a download that did not
+    // finish -- is a window that flashes and is gone, which is the least
+    // debuggable failure a program can have.
+    #[cfg(windows)]
+    if hide_console {
+        if let Err(e) = &result {
+            console::hold(&format!("{e:#}"));
+        }
+    }
+    result
+}
+
+/// Everything after the logging is set up: the checks, the models, the loop.
+///
+/// Split from `main` only so that a failure anywhere in it reaches one place.
+/// See the console note there.
+async fn run(hide_console: bool) -> Result<()> {
+    // Read on Windows, where there is a console to close, and nowhere else.
+    #[cfg(not(windows))]
+    let _ = hide_console;
+    // Before any path below is resolved: on a fresh install nothing here
+    // exists yet, and every writer would otherwise fail one at a time with its
+    // own half-explained error.
+    let data = paths::ensure();
+    tracing::info!(path = %data.display(), "data");
 
     let models = std::env::var("IRA_MODELS")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("models"));
+        .unwrap_or_else(|_| paths::in_data("models"));
     let wakeword = std::env::var("IRA_WAKEWORD").unwrap_or_else(|_| "hey_jarvis_v0.1.onnx".into());
     // Piper ships as piper.exe on Windows and piper everywhere else.
-    let piper = PathBuf::from(std::env::var("IRA_PIPER").unwrap_or_else(|_| {
-        if cfg!(windows) {
-            "piper/piper.exe".into()
+    let piper = match std::env::var("IRA_PIPER") {
+        Ok(p) => PathBuf::from(p),
+        // Piper ships as piper.exe on Windows and piper everywhere else.
+        Err(_) => paths::in_data(if cfg!(windows) {
+            "piper/piper.exe"
         } else {
-            "piper/piper".to_string()
-        }
-    }));
+            "piper/piper"
+        }),
+    };
     let voice = models.join(std::env::var("IRA_VOICE").unwrap_or_else(|_| "en_US-amy-medium.onnx".into()));
 
     // Before anything reads a setting, and before the checks below, which are
@@ -295,15 +356,40 @@ async fn main() -> Result<()> {
         let report = doctor::all(&checks).await;
         std::process::exit(doctor::report(&report));
     }
+    // The weights, the voice and piper. Also runs itself on a first start, a
+    // few lines below -- this is the way to re-run it after a download failed
+    // part-way, and the way to add offline STT later.
+    if args.first().is_some_and(|a| a == "fetch") {
+        std::process::exit(fetch::run(&args[1..], &models, &voice, &piper).await);
+    }
     // set, mcp, skill: everything the window does, from a terminal. The way in
     // on a machine with no keys yet, since the fatal check below fires long
     // before there is a window to type one into.
     if let Some(code) = cli::run(&args) {
         std::process::exit(code);
     }
+    // A first start on a machine that has never had them. Downloading is not a
+    // configuration step someone should have to know about: the alternative is
+    // an installed program that runs once, refuses, and names a shell script
+    // that is not on the machine.
+    //
+    // Only what IRA cannot run without, and only when it is absent -- a second
+    // start costs six `stat` calls. Offline STT stays opt-in behind
+    // `ira fetch --whisper`, being several times the size of all of this.
+    if !fetch::have_everything(&models, &voice, &piper) {
+        tracing::info!("first start: fetching the models, the voice and piper");
+        if let Err(e) = fetch::core_files(&models, &piper).await {
+            tracing::error!("{e:#}");
+        }
+    }
+
     // Anything knowable now must fail now. A missing key that surfaces as
     // silence three seconds into the first sentence looks like a broken product
     // rather than an unconfigured one.
+    //
+    // The checks above were built before the download ran, and they hold only
+    // paths, so they are still the right questions -- but they are asked now,
+    // after it, because the answers may have changed.
     if let Some(problem) = doctor::first_fatal(&doctor::files_and_keys(&checks)) {
         anyhow::bail!("{problem}\n\nrun `ira doctor` for the full report");
     }
@@ -327,6 +413,17 @@ async fn main() -> Result<()> {
     // doing. It reads the broadcast directly rather than the served page.
     #[cfg(windows)]
     orb::spawn(&ui);
+
+    // Everything that could refuse to start has started: the models loaded,
+    // piper is running, the microphone is open and the orb is on screen. Only
+    // now is the console safe to close -- before this, it is where a person
+    // finds out why a shortcut they double-clicked did nothing at all.
+    #[cfg(windows)]
+    if hide_console {
+        let log = paths::in_data("ira.log");
+        tracing::info!(path = %log.display(), "closing the console; logging here from now on");
+        console::detach_into(&log);
+    }
     let transcript = transcript::Transcript::open();
     let (jobs_tx, mut jobs_rx) = mpsc::channel::<tool::Done>(8);
     // Without acoustic echo cancellation the microphone hears the speaker, so

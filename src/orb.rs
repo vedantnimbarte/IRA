@@ -1380,4 +1380,75 @@ mod tests {
         }
         assert!(widest > 18, "the sphere is washed out: widest spread {widest}");
     }
+
+    /// Renders `assets/ira.ico` from the orb itself.
+    ///
+    /// Ignored, so it is a generator rather than a check: run it when the orb's
+    /// look changes and the icon should follow.
+    ///
+    ///     cargo test render_the_icon -- --ignored
+    ///
+    /// The installer and the executable both need a Windows icon, and the orb
+    /// is already the thing this program looks like -- drawing a second one by
+    /// hand would be inventing a logo that has to be kept in step with the one
+    /// on screen. Idle rather than a livelier state: an icon is at rest.
+    ///
+    /// ICO with PNG payloads, which Windows has read since Vista. The container
+    /// is a 6-byte header, one 16-byte directory entry per size, and the PNG
+    /// files themselves -- less code than a dependency that does it, and the
+    /// only writer of this format in the project.
+    #[test]
+    #[ignore = "writes assets/ira.ico; run it when the orb changes"]
+    fn render_the_icon() {
+        // 256 is what Explorer shows at its largest; the smaller ones stop
+        // Windows downscaling that one badly in the Start menu and the taskbar.
+        let sizes = [16u32, 32, 48, 64, 128, 256];
+        let pngs: Vec<Vec<u8>> = sizes
+            .iter()
+            .map(|&side| {
+                let mut pixmap = tiny_skia::Pixmap::new(side, side).unwrap();
+                // `paint` sizes everything off the pixmap, so the scale is the
+                // ratio to the 128 px window the orb was drawn for.
+                paint(&mut pixmap, Look::Idle, 0.0, side as f32 / 128.0, 0.0);
+                pixmap.encode_png().expect("encode png")
+            })
+            .collect();
+
+        let mut ico = Vec::new();
+        ico.extend_from_slice(&0u16.to_le_bytes()); // reserved
+        ico.extend_from_slice(&1u16.to_le_bytes()); // 1 = icon, not cursor
+        ico.extend_from_slice(&(sizes.len() as u16).to_le_bytes());
+        // Images start after the header and the whole directory.
+        let mut offset = 6 + 16 * sizes.len() as u32;
+        for (&side, png) in sizes.iter().zip(&pngs) {
+            // 256 is written as 0: the field is one byte and 256 does not fit.
+            ico.push(if side >= 256 { 0 } else { side as u8 });
+            ico.push(if side >= 256 { 0 } else { side as u8 });
+            ico.push(0); // palette colours, none
+            ico.push(0); // reserved
+            ico.extend_from_slice(&1u16.to_le_bytes()); // colour planes
+            ico.extend_from_slice(&32u16.to_le_bytes()); // bits per pixel
+            ico.extend_from_slice(&(png.len() as u32).to_le_bytes());
+            ico.extend_from_slice(&offset.to_le_bytes());
+            offset += png.len() as u32;
+        }
+        for png in &pngs {
+            ico.extend_from_slice(png);
+        }
+
+        let path = std::path::Path::new("assets/ira.ico");
+        std::fs::write(path, &ico).expect("write assets/ira.ico");
+        eprintln!("wrote {} ({} bytes)", path.display(), ico.len());
+
+        // The same orb as a plain PNG, for the platforms that cannot read an
+        // ICO. macOS builds its .icns out of this by resizing, and the largest
+        // size it wants is 1024 -- rendered at that size rather than upscaled
+        // from the 256 above, since the orb costs nothing to draw again and an
+        // upscaled sphere is a blurry one on every Retina display.
+        let mut big = tiny_skia::Pixmap::new(1024, 1024).unwrap();
+        paint(&mut big, Look::Idle, 0.0, 8.0, 0.0);
+        let png = big.encode_png().expect("encode png");
+        std::fs::write("assets/ira.png", &png).expect("write assets/ira.png");
+        eprintln!("wrote assets/ira.png ({} bytes)", png.len());
+    }
 }

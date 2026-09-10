@@ -81,7 +81,10 @@ pub fn servers() -> Vec<db::Server> {
 /// this runs at start-up, and refusing to boot over a stray quote in a config
 /// file that is no longer the source of truth would be the wrong trade.
 pub fn import_toml_once() {
-    let path = PathBuf::from(std::env::var("IRA_CONFIG").unwrap_or_else(|_| "ira.toml".into()));
+    let path = match std::env::var("IRA_CONFIG") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => crate::paths::in_data("ira.toml"),
+    };
     if !path.is_file() {
         return;
     }

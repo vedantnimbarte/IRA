@@ -2,3 +2,10 @@
 # anyone's core.autocrlf setting. Without this, a clone on another machine or in
 # CI can rewrite line endings and turn a one-line change into a whole-file diff.
 * text=auto
+
+# The rendered icons. `text=auto` guesses, and a guess of "text" on a PNG or an
+# ICO rewrites line endings inside the image and corrupts it. Rendered by the
+# ignored `render_the_icon` test in src/orb.rs.
+*.ico binary
+*.png binary
+*.icns binary

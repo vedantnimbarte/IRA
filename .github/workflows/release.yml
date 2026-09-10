@@ -1,0 +1,246 @@
+name: release
+
+# Tags only. `ci.yml` gates every pull request; this ships, and it should be
+# something someone did on purpose rather than something a merge caused.
+on:
+  push:
+    tags: ["v*"]
+  # Building the three installers without publishing them, to find out that an
+  # installer is broken before a tag is the thing that tells you.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # A failed Mac build should not hide a working Windows installer.
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows (msi)
+          - os: ubuntu-latest
+            name: linux (deb)
+          - os: macos-latest
+            name: macos (dmg)
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # cpal and rodio bind ALSA. The .deb declares it as a dependency too, so
+      # apt installs it for the user; this is for the build itself.
+      - name: Install ALSA
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      # The tag is the version, in one place. `v0.1.0` becomes `0.1.0`, which is
+      # what every packager below wants; a manual run has no tag and builds
+      # whatever Cargo.toml says, which is right for a dry run.
+      - name: Work out the version
+        id: version
+        shell: bash
+        run: |
+          set -eu
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "building $version"
+
+      # The tag and Cargo.toml must agree, or the installer says one version and
+      # `ira --version` says another. Caught here rather than by a user.
+      - name: The tag and Cargo.toml must agree
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          set -eu
+          cargo_version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$cargo_version" != "${{ steps.version.outputs.version }}" ]; then
+            echo "FAIL: tag says ${{ steps.version.outputs.version }}, Cargo.toml says $cargo_version"
+            exit 1
+          fi
+
+      - name: Build
+        run: cargo build --release
+
+      # --- Windows -------------------------------------------------------
+      #
+      # WiX 5 as a dotnet tool rather than whatever the runner image happens to
+      # ship: the image's WiX has come and gone between versions, and a release
+      # that breaks because a runner was updated is a bad afternoon.
+      - name: Build the MSI
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          dotnet tool install --global wix --version 5.0.2
+          # A tool installed by this step is not on the PATH it inherited.
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          # Two bind paths: the executable comes from the build directory and
+          # the icon from the repository, and `Source=` in the .wxs names neither.
+          wix build packaging/windows/ira.wxs \
+            -d Version=${{ steps.version.outputs.version }} \
+            -b target/release \
+            -b . \
+            -o "ira-${{ steps.version.outputs.version }}-x64.msi"
+          ls -l *.msi
+
+      # --- Linux ---------------------------------------------------------
+      #
+      # dpkg-deb over a staging tree rather than cargo-deb: it is four files and
+      # a command, it needs no Cargo.toml metadata, and it does not require the
+      # project to declare a license before it will build. (It should have one.
+      # That is a decision for a person, not for a packaging step.)
+      - name: Build the .deb
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -eu
+          version="${{ steps.version.outputs.version }}"
+          stage=$(mktemp -d)
+          mkdir -p "$stage/DEBIAN" \
+                   "$stage/usr/bin" \
+                   "$stage/usr/share/applications" \
+                   "$stage/usr/share/icons/hicolor/scalable/apps" \
+                   "$stage/usr/share/doc/ira"
+
+          install -m 755 target/release/ira "$stage/usr/bin/ira"
+          install -m 644 packaging/linux/ira.desktop "$stage/usr/share/applications/ira.desktop"
+          install -m 644 assets/ira-dark.svg "$stage/usr/share/icons/hicolor/scalable/apps/ira.svg"
+          install -m 644 README.md "$stage/usr/share/doc/ira/README.md"
+
+          # Written line by line rather than with a heredoc: a control file is
+          # indentation-sensitive -- a continuation line is one that begins with
+          # exactly one space -- and a heredoc indented to match this YAML block
+          # would need un-indenting afterwards, which is one sed away from a
+          # package dpkg cannot read.
+          #
+          # libasound2 is what cpal and rodio bind, and its package name changed
+          # in trixie. Either name satisfies the dependency, so one .deb installs
+          # on both.
+          {
+            echo "Package: ira"
+            echo "Version: $version"
+            echo "Section: sound"
+            echo "Priority: optional"
+            echo "Architecture: amd64"
+            echo "Depends: libasound2t64 | libasound2"
+            echo "Maintainer: Vedant Nimbarte <noreply@github.com>"
+            echo "Description: A voice assistant"
+            echo " Wake word, speech to text, a model, and a voice, in one process."
+            echo " The models and the voice are downloaded on the first run."
+          } > "$stage/DEBIAN/control"
+
+          dpkg-deb --build --root-owner-group "$stage" "ira_${version}_amd64.deb"
+          # Reading it back is the check: a control file dpkg cannot parse still
+          # writes a file that looks like a package.
+          dpkg-deb --info "ira_${version}_amd64.deb"
+          dpkg-deb --contents "ira_${version}_amd64.deb"
+
+      # --- macOS ---------------------------------------------------------
+      #
+      # Never run by anyone. The orb and the settings window are Windows-only,
+      # so what this produces is IRA with no interface of her own beyond the
+      # page she serves -- and no one has confirmed even that much starts. The
+      # release notes say so; see docs/decisions/0019.
+      - name: Build the .app and .dmg
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -eu
+          version="${{ steps.version.outputs.version }}"
+          app="IRA.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+
+          cp target/release/ira "$app/Contents/MacOS/ira"
+          chmod +x "$app/Contents/MacOS/ira"
+          sed "s/VERSION/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+
+          # The icon, resized out of the one PNG the orb renders. iconutil wants
+          # every one of these names and will not invent the ones it is missing.
+          iconset=ira.iconset
+          mkdir -p "$iconset"
+          for size in 16 32 128 256 512; do
+            sips -z $size $size assets/ira.png --out "$iconset/icon_${size}x${size}.png" >/dev/null
+            double=$((size * 2))
+            sips -z $double $double assets/ira.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$iconset" -o "$app/Contents/Resources/ira.icns"
+
+          hdiutil create -volname "IRA" -srcfolder "$app" -ov -format UDZO \
+            "ira-${version}-aarch64.dmg"
+          ls -l *.dmg
+
+      - name: Keep the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ runner.os }}
+          path: |
+            *.msi
+            *.deb
+            *.dmg
+          if-no-files-found: error
+
+  publish:
+    name: publish the release
+    needs: build
+    # A dry run builds the installers and stops there.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: What is being published
+        run: ls -l
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            *.msi
+            *.deb
+            *.dmg
+          body: |
+            ## Install
+
+            **Windows** — download the `.msi` and run it. It installs for you
+            only, needs no administrator rights, and puts IRA in the Start menu.
+            It is not code-signed, so SmartScreen will say "Windows protected
+            your PC": choose **More info → Run anyway**.
+
+            **Linux** — `sudo apt install ./ira_*.deb`. Needs a working ALSA
+            device. There is no orb and no settings window here: configure her
+            with `ira set`, and open the screen at http://127.0.0.1:8180.
+
+            **macOS** — ⚠️ **unverified.** This build has never been run by
+            anyone. It compiles, and that is the whole of what is known about
+            it. It is unsigned and not notarized, so Gatekeeper will refuse it
+            until you right-click the app and choose **Open**.
+
+            ### First run
+
+            IRA downloads the wake models, the voice and piper — about 85 MB —
+            the first time she starts, and says so while she does it. Then give
+            her a key:
+
+                ira set ANTHROPIC_API_KEY sk-ant-...
+                ira set GROQ_API_KEY gsk_...
+
+            Keys go to the operating system's keyring. Everything else lives in
+            `%LOCALAPPDATA%\IRA`, `~/.local/share/ira`, or
+            `~/Library/Application Support/IRA`, and uninstalling does not
+            remove it.

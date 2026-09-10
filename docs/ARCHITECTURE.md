@@ -108,11 +108,14 @@ The exhaustive transition table lives in [SPEC.md](SPEC.md).
 | `config.rs` | The server list, and the one-time `ira.toml` import | Config |
 | `cli.rs` | `ira set`, `ira mcp`, `ira skill`: the window from a terminal | Config |
 | `db.rs` | `ira.local.db`: settings, servers, tool policy, the skill index | Config |
+| `paths.rs` | Where her files live: the checkout, or the per-user data directory | Closed |
+| `fetch.rs` | `ira fetch`: the weights, the voice and piper, and the first run | Closed |
 | `doctor.rs` | Preflight checks; the fatal subset gates start-up | Closed |
 | `metrics.rs` | Per-turn timing, and the `turn` line | Closed |
 | `transcript.rs` | The JSONL record of what was said | Config |
 | `ui.rs` | The served page and its event stream | Closed |
 | `orb.rs` | The overlay: a drawn globe on a layered window, same stream | Closed |
+| `console.rs` | Closing the console a shortcut launch was given. Windows only | Closed |
 | `settings.rs` | Keys in the OS keyring, URLs and model ids in SQLite | Config |
 | `skills.rs` | `skills/*.md`: user-written instructions, loaded on demand | Config |
 

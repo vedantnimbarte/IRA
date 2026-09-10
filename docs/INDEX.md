@@ -65,6 +65,7 @@ context, the decision, its consequences, and what would change it.
 | [0016](decisions/0016-skills-are-markdown-loaded-by-a-tool-call.md) | Skills are Markdown files, loaded by a tool call | accepted |
 | [0017](decisions/0017-servers-and-skills-are-configured-in-the-window.md) | Servers and skills are configured in the window, and stored in the database | accepted |
 | [0018](decisions/0018-integrating-other-tools.md) | Integrating other tools, in both directions | accepted |
+| [0019](decisions/0019-installed-rather-than-cloned.md) | Installed rather than cloned: per-user data, a first-run download, real installers | accepted |
 
 ## Looking for something specific?
 
