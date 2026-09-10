@@ -102,7 +102,12 @@ jobs:
           export PATH="$PATH:$HOME/.dotnet/tools"
           # Two bind paths: the executable comes from the build directory and
           # the icon from the repository, and `Source=` in the .wxs names neither.
+          # -arch x64, or the package is stamped `Intel` -- a 32-bit installer
+          # carrying a 64-bit executable. Nothing here reads ProgramFiles or a
+          # 64-bit registry key, so it installs correctly either way today; it
+          # is wrong metadata waiting for the first thing that does.
           wix build packaging/windows/ira.wxs \
+            -arch x64 \
             -d Version=${{ steps.version.outputs.version }} \
             -b target/release \
             -b . \
@@ -122,6 +127,11 @@ jobs:
           set -eu
           version="${{ steps.version.outputs.version }}"
           stage=$(mktemp -d)
+          # mktemp -d makes a 0700 directory, and that directory is the package
+          # root -- so `./`, which is `/`, ships as drwx------ and dpkg sets
+          # directory modes as it unpacks. Every other packaging tool produces
+          # 0755 here, for exactly this reason.
+          chmod 755 "$stage"
           mkdir -p "$stage/DEBIAN" \
                    "$stage/usr/bin" \
                    "$stage/usr/share/applications" \
