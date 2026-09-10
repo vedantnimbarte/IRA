@@ -8,6 +8,18 @@ on:
   # Building the three installers without publishing them, to find out that an
   # installer is broken before a tag is the thing that tells you.
   workflow_dispatch:
+  # And on any pull request that touches the packaging, because a broken
+  # installer found on a tag is found too late -- and `workflow_dispatch`
+  # cannot help, since it only runs workflows that are already on the default
+  # branch. The `publish` job below is gated on a tag, so these build the
+  # three installers, keep them as artifacts, and release nothing.
+  pull_request:
+    paths:
+      - "packaging/**"
+      - ".github/workflows/release.yml"
+      - "build.rs"
+      - "assets/ira.ico"
+      - "Cargo.toml"
 
 env:
   CARGO_TERM_COLOR: always
