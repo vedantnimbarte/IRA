@@ -110,6 +110,7 @@ The exhaustive transition table lives in [SPEC.md](SPEC.md).
 | `transcript.rs` | The JSONL record of what was said | Config |
 | `ui.rs` | The served page and its event stream | Closed |
 | `orb.rs` | The overlay: a drawn globe on a layered window, same stream | Closed |
+| `settings.rs` | Keys, URLs and model ids, over the environment | Config |
 
 Which phase touched what is history now, and lives in
 [ROADMAP.md](ROADMAP.md) rather than here.

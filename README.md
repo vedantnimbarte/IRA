@@ -184,6 +184,33 @@ which is otherwise a button on a page you would have to go and find. The window
 hit-tests by alpha, so a click that misses the orb goes to whatever is behind it
 rather than to IRA.
 
+Hover it and a gear appears; pressing that opens a settings window.
+
+### Settings
+
+Keys, URLs and model ids, in a window, saved one at a time and used by the next
+thing IRA says — nothing restarts:
+
+| | |
+|---|---|
+| `ANTHROPIC_API_KEY` · `GROQ_API_KEY` · `IRA_LLM_KEY` | Windows Credential Manager |
+| `IRA_LLM_URL` · `IRA_LLM_MODEL` · `IRA_STT_URL` | `ira.local.toml`, gitignored |
+
+Saved values sit **over** the environment, which still works and still loses to
+them; clearing a field clears it rather than falling back, so there is a way
+back to the default provider from the window.
+
+Keys never go in a file, and are never read back out — the window is told
+whether one is stored, not what it is, so it cannot show you a key you have
+forgotten and neither can anything else that can reach the port. Saving is
+guarded the way `POST /talk` is. Only those six fields can be written.
+
+It is a webview, having just established that one cannot be transparent: the orb
+stays drawn because the orb needs alpha, and a form does not
+([decisions/0014](docs/decisions/0014-settings-are-editable-while-she-runs.md)).
+The same page is at <http://127.0.0.1:8180/settings> in a tab, which is how to
+look at it if the window will not open.
+
 A pearl sphere with iridescent light moving inside it: colour drifting under
 the surface, pale ribbons flowing across and folding over each other. There is
 no text and no meter, so state is carried by which colours are in it and how
@@ -291,7 +318,7 @@ Kept here rather than buried, because it is the honest shape of the project.
 
 ## Tests
 
-`cargo test` — 66 tests, no network, microphone or API key needed.
+`cargo test` — 70 tests, no network, microphone or API key needed.
 
 They aim at failures that are **silent** rather than loud, because those are the
 ones that survive a code review:
@@ -316,6 +343,11 @@ ones that survive a code review:
   back, which is the whole claim without needing a window.
 - The orb going white. A broken blur, a mask that clips everything and a grey
   palette all still paint a perfectly convincing sphere.
+- A settings value with a quote in it writing a file that will not parse. The
+  failure lands at the *next* start-up, so it looks like settings being
+  forgotten rather than like a bad value.
+- A saved setting that does not win over the environment, or a cleared one that
+  quietly falls back to it.
 
 Tests needing a real service skip with a note rather than fail, so a fresh clone
 passes: the ONNX ones when `models/` is empty, the local-STT one unless

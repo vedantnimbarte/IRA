@@ -15,6 +15,7 @@
 //! that never connects: all of it is a dropped socket and no more.
 
 use serde::Serialize;
+use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -65,6 +66,10 @@ pub struct Ui {
     /// The port being served, so `POST /talk` can tell its own page from
     /// someone else's.
     port: u16,
+    /// Whether the listener actually bound. `IRA_UI=off` and a port already in
+    /// use both leave this false, and both mean there is no settings page to
+    /// point a window at.
+    served: bool,
 }
 
 impl Ui {
@@ -80,6 +85,7 @@ impl Ui {
             backlog: Arc::new(Mutex::new(VecDeque::with_capacity(BACKLOG))),
             talk,
             port: DEFAULT_PORT,
+            served: false,
         }
     }
 
@@ -107,6 +113,7 @@ impl Ui {
                 // 0 refuses its own talk button.
                 let port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
                 tracing::info!("screen at http://127.0.0.1:{port}");
+                ui.served = true;
                 ui.port = port;
                 let ui2 = ui.clone();
                 tokio::spawn(async move {
@@ -120,6 +127,18 @@ impl Ui {
             Err(e) => tracing::error!("screen unavailable on port {port}: {e}"),
         }
         (ui, talk_rx)
+    }
+
+    /// The port the screen is on, or `None` if it never bound. What the
+    /// settings window needs: it is a webview onto a route, and without the
+    /// route there is nothing to show.
+    ///
+    /// Gated because that window is the only caller and is Windows-only;
+    /// without this it is dead code everywhere else, which CI treats as an
+    /// error and is right to.
+    #[cfg(windows)]
+    pub fn served(&self) -> Option<u16> {
+        self.served.then_some(self.port)
     }
 
     /// The event stream, for a consumer inside this process. The orb reads
@@ -225,8 +244,27 @@ Connection: close
         return;
     }
 
+    // Saving changes what IRA runs with and stores a key, so it is guarded
+    // exactly as `POST /talk` is: a browser that says it is somewhere else is
+    // refused, and a client that says nothing -- curl -- is not.
+    if line.starts_with("POST /settings") {
+        if !same_origin(&mut reader, ui.port).await {
+            tracing::warn!("cross-site settings save refused");
+            let _ = write.write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n").await;
+            return;
+        }
+        let answer = save_setting(&mut reader).await;
+        reply_json(&mut write, if answer.starts_with("{\"error") { 400 } else { 200 }, &answer).await;
+        return;
+    }
+
+    if line.starts_with("GET /settings/state") {
+        reply_json(&mut write, 200, &settings_state()).await;
+        return;
+    }
+
     if !line.starts_with("GET /events") {
-        let body = PAGE.as_bytes();
+        let body = if line.starts_with("GET /settings") { SETTINGS } else { PAGE }.as_bytes();
         let head = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
              Content-Length: {}\r\nConnection: close\r\n\r\n",
@@ -280,6 +318,258 @@ Connection: close
     ui.watchers.fetch_sub(1, Ordering::Relaxed);
 }
 
+
+/// What the settings page is allowed to know.
+///
+/// A secret's value is never in here -- only whether one is stored. The page
+/// cannot show you a key you have forgotten, and neither can anything else that
+/// can reach this port.
+fn settings_state() -> String {
+    let fields: Vec<Value> = crate::settings::FIELDS
+        .iter()
+        .map(|f| {
+            let mut o = json!({
+                "name": f.name,
+                "about": f.about,
+                "secret": f.secret,
+                "set": crate::settings::is_set(f.name),
+            });
+            if !f.secret {
+                o["value"] = json!(crate::settings::get(f.name).unwrap_or_default());
+            }
+            o
+        })
+        .collect();
+    serde_json::to_string(&fields).unwrap_or_else(|_| "[]".into())
+}
+
+/// Reads a `{name, value}` body and saves it. Returns the JSON to answer with.
+async fn save_setting<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> String {
+    let error = |what: String| json!({ "error": what }).to_string();
+
+    // `same_origin` has already consumed the headers, so what is left is the
+    // body -- and its length is not knowable from here. These bodies are two
+    // short strings, so a cap is both a limit and a frame: read up to it, and
+    // stop at the closing brace.
+    let mut body = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match tokio::io::AsyncReadExt::read(reader, &mut byte).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                body.push(byte[0]);
+                if byte[0] == b'}' || body.len() >= 8192 {
+                    break;
+                }
+            }
+        }
+    }
+
+    let Ok(v) = serde_json::from_slice::<Value>(&body) else {
+        return error("that was not a settings change".into());
+    };
+    let (Some(name), Some(value)) = (v["name"].as_str(), v["value"].as_str()) else {
+        return error("a settings change needs a name and a value".into());
+    };
+    match crate::settings::set(name, value) {
+        Ok(()) => json!({ "saved": name }).to_string(),
+        // The message can name the setting and the reason; it must never quote
+        // the value back, because for half of these the value is a key.
+        Err(e) => error(format!("{name} was not saved: {e}")),
+    }
+}
+
+async fn reply_json<W: tokio::io::AsyncWrite + Unpin>(write: &mut W, status: u16, body: &str) {
+    let reason = if status == 200 { "OK" } else { "Bad Request" };
+    let head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n\
+         Cache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = write.write_all(head.as_bytes()).await;
+    let _ = write.write_all(body.as_bytes()).await;
+}
+
+/// The settings window's page: what IRA is configured with, and a box to
+/// change each of it.
+///
+/// Served rather than built into the window, because the window is a webview
+/// and this is the thing it shows. Same origin as `POST /settings`, so the
+/// cross-site guard lets its saves through for the same reason it lets the
+/// talk button's presses through.
+const SETTINGS: &str = r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IRA — settings</title>
+<style>
+  :root {
+    --bg:#f4f6f8; --panel:#fff; --line:#d9dee5; --ink:#191c22;
+    --soft:#3e454f; --muted:#626c7a; --accent:#9e540c;
+    --ok:#1d6b50; --warn:#9e2c2c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#131519; --panel:#1a1d23; --line:#2c313a; --ink:#e7eaee;
+      --soft:#c3c9d2; --muted:#949daa; --accent:#de9b48;
+      --ok:#4eae87; --warn:#e07373;
+    }
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--ink);
+    font:14px/1.55 "Segoe UI",system-ui,sans-serif;
+  }
+  header {
+    position:sticky; top:0; display:flex; align-items:center; gap:12px;
+    padding:12px 20px; background:var(--panel); border-bottom:1px solid var(--line);
+  }
+  h1 { margin:0; font-size:13px; letter-spacing:.16em; text-transform:uppercase; }
+  #note { margin-left:auto; font-size:12px; color:var(--muted); }
+  #note.ok { color:var(--ok); } #note.bad { color:var(--warn); }
+  main { max-width:640px; margin:0 auto; padding:20px; }
+  .row { margin-bottom:18px; }
+  label {
+    display:block; font:11px ui-monospace,Consolas,monospace; letter-spacing:.08em;
+    color:var(--soft); margin-bottom:4px;
+  }
+  .about { font-size:12px; color:var(--muted); margin:0 0 6px; }
+  .line { display:flex; gap:8px; }
+  input {
+    flex:1; min-width:0; padding:7px 10px; border-radius:5px;
+    border:1px solid var(--line); background:var(--panel); color:var(--ink);
+    font:13px ui-monospace,Consolas,monospace;
+  }
+  input:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  button {
+    font:12px ui-monospace,Consolas,monospace; letter-spacing:.06em;
+    cursor:pointer; color:var(--panel); background:var(--accent);
+    border:1px solid var(--accent); border-radius:5px; padding:0 14px;
+  }
+  button.quiet { background:transparent; color:var(--muted); border-color:var(--line); }
+  button:active { filter:brightness(.85); }
+  .state { font-size:11px; color:var(--muted); margin-top:4px; min-height:1.2em; }
+  .state.set { color:var(--ok); }
+  footer {
+    color:var(--muted); font-size:12px; border-top:1px solid var(--line);
+    margin-top:26px; padding-top:14px;
+  }
+  code { font-family:ui-monospace,Consolas,monospace; color:var(--soft); }
+</style>
+</head>
+<body>
+<header>
+  <h1>IRA — settings</h1>
+  <span id="note">applies immediately</span>
+</header>
+<main id="form"></main>
+<script>
+const form = document.getElementById('form');
+const note = document.getElementById('note');
+let fields = [];
+
+function say(text, cls) {
+  note.textContent = text;
+  note.className = cls || '';
+}
+
+// A secret is never sent back, so the box starts empty whether or not one is
+// stored and the line underneath says which. Typing replaces it; Clear removes
+// it. There is deliberately no way to read one back out.
+function draw() {
+  form.innerHTML = '';
+  for (const f of fields) {
+    const row = document.createElement('div');
+    row.className = 'row';
+
+    const label = document.createElement('label');
+    label.textContent = f.name;
+    label.htmlFor = f.name;
+
+    const about = document.createElement('p');
+    about.className = 'about';
+    about.textContent = f.about;
+
+    const line = document.createElement('div');
+    line.className = 'line';
+
+    const input = document.createElement('input');
+    input.id = f.name;
+    input.type = f.secret ? 'password' : 'text';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    input.value = f.secret ? '' : (f.value || '');
+    input.placeholder = f.secret
+      ? (f.set ? 'stored — type to replace' : 'not set')
+      : 'not set';
+
+    const save = document.createElement('button');
+    save.textContent = 'Save';
+    save.onclick = () => send(f.name, input.value);
+
+    const clear = document.createElement('button');
+    clear.textContent = 'Clear';
+    clear.className = 'quiet';
+    clear.onclick = () => { input.value = ''; send(f.name, ''); };
+
+    input.onkeydown = e => { if (e.key === 'Enter') send(f.name, input.value); };
+
+    const state = document.createElement('div');
+    state.className = 'state' + (f.set ? ' set' : '');
+    state.id = 'state-' + f.name;
+    state.textContent = f.set
+      ? (f.secret ? 'stored in the Windows Credential Manager' : 'set')
+      : 'not set';
+
+    line.append(input, save, clear);
+    row.append(label, about, line, state);
+    form.append(row);
+  }
+
+  const foot = document.createElement('footer');
+  foot.innerHTML =
+    'Keys go to the Windows Credential Manager, never to a file. Everything else '
+    + 'is written to <code>ira.local.toml</code>. Saved values take effect on the '
+    + 'next thing IRA says — nothing needs restarting.';
+  form.append(foot);
+}
+
+async function load() {
+  try {
+    const r = await fetch('/settings/state');
+    fields = await r.json();
+    draw();
+  } catch (e) {
+    say('could not read settings', 'bad');
+  }
+}
+
+async function send(name, value) {
+  say('saving…');
+  try {
+    const r = await fetch('/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, value }),
+    });
+    const answer = await r.json();
+    if (!r.ok || answer.error) {
+      say(answer.error || ('save failed: ' + r.status), 'bad');
+      return;
+    }
+    say(value.trim() ? (name + ' saved') : (name + ' cleared'), 'ok');
+    await load();
+  } catch (e) {
+    say('save failed: ' + e, 'bad');
+  }
+}
+
+load();
+</script>
+</body>
+</html>
+"##;
 
 const PAGE: &str = r##"<!doctype html>
 <html lang="en">

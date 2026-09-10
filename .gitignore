@@ -7,6 +7,11 @@
 /whisper/
 # Written by IRA at runtime -- a record of your conversations, not source.
 /transcript.jsonl
+# Written by the settings window: this machine's URLs and model ids. Not keys,
+# which go to the Windows Credential Manager -- but this is per-machine either
+# way, unlike ira.toml, which is shareable.
+/ira.local.toml
+/ira.local.toml.new
 
 # wingman serve keeps its index, sessions and memory here.
 .wingman/

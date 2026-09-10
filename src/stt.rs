@@ -52,10 +52,11 @@ pub async fn transcribe(client: &reqwest::Client, samples: &[f32], sr: u32) -> R
 
     // whisper-server ignores the `model` field, so the body is identical for
     // both and only the destination differs.
-    let req = match std::env::var("IRA_STT_URL") {
+    let req = match crate::settings::get("IRA_STT_URL").ok_or(()) {
         Ok(url) => client.post(url),
         Err(_) => client.post(GROQ_URL).bearer_auth(
-            std::env::var("GROQ_API_KEY").map_err(|_| anyhow!("GROQ_API_KEY not set"))?,
+            crate::settings::get("GROQ_API_KEY")
+                .ok_or_else(|| anyhow!("GROQ_API_KEY not set"))?,
         ),
     };
 

@@ -186,6 +186,7 @@ directory.
 | `IRA_CONFIG` | `ira.toml` | MCP servers and per-tool policy |
 | `IRA_UI` | `8180` | Screen port. `off` disables it entirely |
 | `IRA_ORB` | *unset* | `off` disables the overlay. Windows only ([0013](decisions/0013-the-orb-is-an-overlay-on-the-same-stream.md)) |
+| `IRA_SETTINGS` | `ira.local.toml` | Where the settings window saves URLs and model ids. Keys are never in it ([0014](decisions/0014-settings-are-editable-while-she-runs.md)) |
 | `IRA_TRANSCRIPT` | `transcript.jsonl` | Where the conversation is recorded. `off` disables it |
 | `IRA_PTT` | *unset* | Set to disarm voice barge-in. Interrupting becomes the talk control, which is what makes speakers usable without echo cancellation |
 | `IRA_SPECULATE_MS` | `200` | Silence after which transcription starts. Above `ENDPOINT_MS` disables speculation, which is how the two are compared on one machine |

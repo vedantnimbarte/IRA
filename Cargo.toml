@@ -40,7 +40,17 @@ tiny-skia = "0.11"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Security_Credentials",
     "Win32_System_LibraryLoader",
     "Win32_UI_HiDpi",
+    "Win32_UI_Controls",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# The settings window, and only that. The orb cannot be a webview because a
+# webview window cannot be transparent (decisions/0013); a settings window has
+# no such requirement, and hand-drawing text fields is building a GUI toolkit.
+# No windowing crate with it: wry attaches to any `HasWindowHandle`, and the orb
+# thread already owns a Win32 window and message loop to hang one on.
+wry = "0.55"
+raw-window-handle = "0.6"
