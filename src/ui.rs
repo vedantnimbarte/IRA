@@ -31,6 +31,11 @@ const BACKLOG: usize = 200;
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
     State { name: &'static str },
+    /// Sound is or is not leaving the speaker. Not a state: `Holding` covers
+    /// thinking and speaking as one because barge-in must be armed across
+    /// both, and splitting it would put that guarantee at risk to light a lamp.
+    /// This rides alongside instead, and only the orb listens to it.
+    Speaking { on: bool },
     Heard { text: String },
     Reply { text: String },
     Tool { name: String, args: String },
@@ -85,7 +90,7 @@ impl Ui {
         let (talk, talk_rx) = mpsc::channel(4);
         let setting = std::env::var("IRA_UI").unwrap_or_default();
         let port: u16 = setting.parse().unwrap_or(DEFAULT_PORT);
-        let ui = Self { talk, port, ..Self::disabled() };
+        let mut ui = Self { talk, port, ..Self::disabled() };
 
         if setting == "off" {
             tracing::info!("screen disabled");
@@ -96,7 +101,13 @@ impl Ui {
         // the room; it does not belong on a network interface.
         match TcpListener::bind(("127.0.0.1", port)).await {
             Ok(listener) => {
+                // The port asked for may be 0, meaning "any". Recording what
+                // was actually bound is not bookkeeping: `same_origin` compares
+                // against it, and a page served on 51000 that believes it is on
+                // 0 refuses its own talk button.
+                let port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
                 tracing::info!("screen at http://127.0.0.1:{port}");
+                ui.port = port;
                 let ui2 = ui.clone();
                 tokio::spawn(async move {
                     while let Ok((sock, _)) = listener.accept().await {
@@ -109,6 +120,24 @@ impl Ui {
             Err(e) => tracing::error!("screen unavailable on port {port}: {e}"),
         }
         (ui, talk_rx)
+    }
+
+    /// The event stream, for a consumer inside this process. The orb reads
+    /// this instead of connecting to the socket the browser uses.
+    ///
+    /// Subscribing is deliberately *not* watching: `watchers` counts pages that
+    /// can show a transcript, and the orb shows a colour. An orb that counted
+    /// would have IRA saying she had put the detail on screen with no page open
+    /// -- the lie P1 removed.
+    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+        self.tx.subscribe()
+    }
+
+    /// Presses the talk control, as the button on the page does.
+    pub fn press_talk(&self) {
+        // try_send: a second press while the first is still queued is the same
+        // press, and this must never block the caller on the loop.
+        let _ = self.talk.try_send(());
     }
 
     /// How many pages are watching. Zero means IRA must not claim to have put
@@ -189,9 +218,7 @@ Connection: close
                 .await;
             return;
         }
-        // try_send: a second press while the first is still queued is the same
-        // press. Never block the socket on the loop.
-        let _ = ui.talk.try_send(());
+        ui.press_talk();
         let _ = write
             .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
             .await;
@@ -210,7 +237,7 @@ Connection: close
         return;
     }
 
-    let mut rx = ui.tx.subscribe();
+    let mut rx = ui.subscribe();
     let backlog: Vec<String> = ui
         .backlog
         .lock()
@@ -252,6 +279,7 @@ Connection: close
     }
     ui.watchers.fetch_sub(1, Ordering::Relaxed);
 }
+
 
 const PAGE: &str = r##"<!doctype html>
 <html lang="en">
@@ -396,9 +424,16 @@ src.onmessage = (e) => {
 mod tests {
     use super::*;
 
+    /// `IRA_UI` is process-wide and cargo runs tests in parallel: without this
+    /// one test's `off` is another's start-up. A failure here would be
+    /// intermittent and would look like a bug in the server.
+    /// Async, because it is held across the `await` on `Ui::start`.
+    static ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// With nothing watching, IRA must not be told it has a screen.
     #[tokio::test]
     async fn no_watchers_before_anyone_connects() {
+        let _env = ENV.lock().await;
         std::env::set_var("IRA_UI", "off");
         let (ui, _talk) = Ui::start().await;
         assert_eq!(ui.watchers(), 0);
@@ -419,6 +454,16 @@ mod tests {
             PAGE.matches("<script>").count(),
             PAGE.matches("</script>").count()
         );
+    }
+
+
+
+    /// The orb switches on `kind`, exactly as the page does.
+    #[test]
+    fn speaking_serialises_with_the_kind_the_orb_switches_on() {
+        let json = serde_json::to_string(&Event::Speaking { on: true }).unwrap();
+        assert!(json.contains(r#""kind":"speaking""#), "got {json}");
+        assert!(json.contains(r#""on":true"#), "got {json}");
     }
 
     /// The microphone is one cross-origin POST away from any open tab, and

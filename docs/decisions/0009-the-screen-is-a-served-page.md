@@ -57,3 +57,8 @@ rather than being visited. That is a real product argument, and it does not
 invalidate this: an overlay consumes exactly the same event stream. The
 serialised `Event` type is the contract, and a different front end is a
 different consumer of it, not a rewrite of anything behind it.
+
+**This happened:** [0013](0013-the-orb-is-an-overlay-on-the-same-stream.md) adds
+the orb, and it went exactly this way — a second route, a second consumer of
+`Event`, and nothing behind it changed. This decision stands; the page is
+unaltered.

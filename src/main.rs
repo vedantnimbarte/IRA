@@ -19,6 +19,8 @@ mod doctor;
 mod llm;
 mod mcp;
 mod metrics;
+#[cfg(windows)]
+mod orb;
 mod stt;
 mod tool;
 mod transcript;
@@ -201,15 +203,20 @@ fn should_interrupt(ptt: bool, past_grace: bool, barge_ms: u64, talk: bool) -> b
 /// One function so the screen cannot drift out of step with the loop: there is
 /// no way to change state without saying so.
 fn go(state: &mut State, next: State, ui: &ui::Ui) {
-    ui.send(ui::Event::State {
-        name: match next {
-            State::Idle => "idle",
-            State::Listening => "listening",
-            State::Holding => "holding",
-            State::Confirming => "confirming",
-        },
-    });
+    ui.send(ui::Event::State { name: state_name(&next) });
     *state = next;
+}
+
+/// The name the screen and the orb know a state by. Split out of `go` so a
+/// test can walk every variant: an unstyled state is a silent failure out at
+/// the orb, which keeps whatever colour it had and reports nothing.
+fn state_name(state: &State) -> &'static str {
+    match state {
+        State::Idle => "idle",
+        State::Listening => "listening",
+        State::Holding => "holding",
+        State::Confirming => "confirming",
+    }
 }
 
 /// Refuses a pending confirmation and ends the turn that asked.
@@ -293,6 +300,10 @@ async fn main() -> Result<()> {
     // Tools. The clock is the only built-in; everything else arrives over MCP
     // as configuration rather than code.
     let (ui, mut talk_rx) = ui::Ui::start().await;
+    // The overlay: the same events, drawn as one light, over whatever you are
+    // doing. It reads the broadcast directly rather than the served page.
+    #[cfg(windows)]
+    orb::spawn(&ui);
     let transcript = transcript::Transcript::open();
     let (jobs_tx, mut jobs_rx) = mpsc::channel::<tool::Done>(8);
     // Without acoustic echo cancellation the microphone hears the speaker, so
@@ -358,6 +369,8 @@ async fn main() -> Result<()> {
     // control reuses the state machine rather than duplicating it.
     let mut talk = false;
     let mut ducked = false;
+    // Last reported state of the speaker, so the orb hears about changes only.
+    let mut was_speaking = false;
     // Finished jobs waiting for IRA to have the floor legitimately. The tone
     // fires the instant one lands; the words wait.
     let mut reports: VecDeque<String> = VecDeque::new();
@@ -400,6 +413,18 @@ async fn main() -> Result<()> {
                     break;
                 };
                 let frame_ms = (frame.len() as u64 * 1000) / audio::SR as u64;
+
+                // Whether sound is actually coming out, checked once a frame
+                // and reported only when it changes. `Holding` deliberately
+                // does not distinguish thinking from speaking -- barge-in has
+                // to be armed across both -- so the orb cannot learn it from
+                // the state. It rides alongside, and costs one bool compare
+                // per 32 ms frame.
+                let is_speaking = tts.speaking();
+                if is_speaking != was_speaking {
+                    was_speaking = is_speaking;
+                    ui.send(ui::Event::Speaking { on: is_speaking });
+                }
 
                 pre_roll.extend(frame.iter().copied());
                 while pre_roll.len() > PRE_ROLL {
@@ -1036,6 +1061,7 @@ fn spawn_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
 
     /// The barge-in race, as a test.
     ///
