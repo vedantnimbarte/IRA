@@ -663,9 +663,23 @@ fn build_settings(port: u16) -> anyhow::Result<Settings> {
         hwnd
     };
 
+    // WebView2 keeps a browser profile -- cache, cookies, local storage, a
+    // crash handler -- and left to itself it puts it in a folder called
+    // `ira.exe.WebView2` beside the executable. For an installed IRA that is
+    // the install directory: a few megabytes of browser state written where the
+    // program lives, outside the one directory the README promises holds
+    // everything, and still there after an uninstall. Found by installing her.
+    //
+    // ponytail: leaked, because the builder wants a `&mut` that outlives the
+    // webview and this is a window someone opens now and then. If settings ever
+    // opens in a loop, make it a process-wide singleton.
+    let context: &'static mut wry::WebContext = Box::leak(Box::new(wry::WebContext::new(Some(
+        crate::paths::in_data("webview"),
+    ))));
+
     // Same origin as the page, so the settings page's saves pass the
     // cross-site guard for the same reason the talk button's presses do.
-    let webview = wry::WebViewBuilder::new()
+    let webview = wry::WebViewBuilder::new_with_web_context(context)
         .with_url(format!("http://127.0.0.1:{port}/settings"))
         // A right-click menu offering "View source" on a settings form is a way
         // to break it, not a feature.

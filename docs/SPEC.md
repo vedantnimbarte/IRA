@@ -167,8 +167,9 @@ All three distinguishable with your back to the machine.
 ### Environment variables
 
 Complete current surface. Everything path-shaped resolves relative to the **data
-directory**, which is `IRA_DATA` if it is set, the checkout if there is a
-`Cargo.toml` in the working directory, and the per-user directory otherwise:
+directory**, which is `IRA_DATA` if it is set, the checkout if the working
+directory holds a `Cargo.toml` naming *this* crate, and the per-user directory
+otherwise:
 `%LOCALAPPDATA%\IRA` on Windows (from `LOCALAPPDATA`), `~/.local/share/ira` on
 Linux (from `XDG_DATA_HOME`, else `HOME`), and `~/Library/Application Support/IRA`
 on macOS. Those three are the platform's own variables, read but never set by

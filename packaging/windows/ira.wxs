@@ -54,6 +54,12 @@
     <!-- The icon beside the entry in Add or Remove Programs. -->
     <Property Id="ARPPRODUCTICON" Value="ira.ico" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/vedantnimbarte/IRA" />
+    <!--
+      Or Add or Remove Programs shows an empty Location, and anything looking
+      for the install path has to guess at it. Set after CostFinalize, which is
+      when INSTALLFOLDER has a value to copy.
+    -->
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLFOLDER]" After="CostFinalize" />
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="ProgramsFolder" Name="Programs">

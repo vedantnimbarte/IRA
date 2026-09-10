@@ -9,15 +9,21 @@
 //! So there is one answer to "where", resolved here, in this order:
 //!
 //! ```text
-//!   IRA_DATA              set it and that is the answer, full stop
-//!   a Cargo.toml in cwd   a checkout -- use the checkout, as it always did
-//!   the per-user dir      %LOCALAPPDATA%\IRA, ~/.local/share/ira, ~/Library/...
+//!   IRA_DATA               set it and that is the answer, full stop
+//!   *this* crate's checkout use the checkout, as it always did
+//!   the per-user dir       %LOCALAPPDATA%\IRA, ~/.local/share/ira, ~/Library/...
 //! ```
 //!
 //! The middle rule is what keeps `cargo run` in this repository behaving
 //! exactly as it did before any of this existed: the models you fetched into
 //! `./models` are still the models it loads, and an installed IRA on the same
 //! machine keeps its own state somewhere else entirely.
+//!
+//! It reads the manifest's name rather than only looking for a `Cargo.toml`,
+//! because every Rust project has one of those. The looser test gave an
+//! installed IRA a separate data directory in every repository the user
+//! happened to be standing in, and would have downloaded 85 MB of models into
+//! somebody else's project the first time she started there.
 //!
 //! `IRA_DATA` is first rather than a convenience, and the tests are the reason.
 //! Several of them chdir into a temp directory, which has no `Cargo.toml` and
@@ -43,7 +49,7 @@ pub fn data() -> PathBuf {
     }
     // A checkout. `cargo run` keeps using ./models, ./ira.local.db and the rest,
     // so a repository is still a self-contained place to work.
-    if Path::new("Cargo.toml").is_file() {
+    if in_iras_own_checkout() {
         return PathBuf::from(".");
     }
     per_user()
@@ -52,6 +58,30 @@ pub fn data() -> PathBuf {
 /// `data()` joined with a relative path, which is what every call site wants.
 pub fn in_data(rel: impl AsRef<Path>) -> PathBuf {
     data().join(rel)
+}
+
+/// Whether the working directory is a checkout of *this* program.
+///
+/// The name is checked, not just the presence of a `Cargo.toml`. Any Rust
+/// project has one of those, so the looser test handed an installed IRA a
+/// different data directory in every repository the user happened to be sitting
+/// in -- and, on a first start there, 85 MB of models downloaded into somebody
+/// else's project. Found by installing her and running `ira` from a checkout of
+/// something else.
+///
+/// A malformed or unreadable manifest is not a checkout. Being wrong in that
+/// direction sends her to the per-user directory, which always works; being
+/// wrong in the other scatters her state across the disk.
+fn in_iras_own_checkout() -> bool {
+    let Ok(text) = std::fs::read_to_string("Cargo.toml") else {
+        return false;
+    };
+    text.parse::<toml::Value>()
+        .ok()
+        .and_then(|manifest| {
+            Some(manifest.get("package")?.get("name")?.as_str()?.to_string())
+        })
+        .is_some_and(|name| name == env!("CARGO_PKG_NAME"))
 }
 
 /// The per-user directory for this platform, by that platform's own convention.
@@ -112,9 +142,14 @@ mod tests {
 
     /// `data()` reads the environment and the working directory, both of which
     /// are process-wide. Cargo runs tests in parallel, so they take turns.
+    ///
+    /// The same lock the database and settings tests take, not one of its own.
+    /// `IRA_DATA` is a single global, and two mutexes guarding it serialise two
+    /// disjoint sets of tests against each other while letting the two sets run
+    /// at once -- which is no lock at all. It surfaced as a database test
+    /// failing once in a run and passing on the retry.
     fn serially<T>(f: impl FnOnce() -> T) -> T {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::db::cwd_lock();
         f()
     }
 
@@ -139,6 +174,56 @@ mod tests {
         serially(|| {
             std::env::remove_var("IRA_DATA");
             assert_eq!(data(), PathBuf::from("."), "cargo test runs in the checkout");
+            assert!(in_iras_own_checkout());
+        });
+    }
+
+    /// Somebody else's Rust project is not a checkout of this one.
+    ///
+    /// The regression this exists for: an installed IRA, run from any directory
+    /// with a `Cargo.toml`, treated it as her own and would have downloaded
+    /// 85 MB of models into it on a first start.
+    #[test]
+    fn another_projects_manifest_is_not_a_checkout() {
+        serially(|| {
+            let dir = std::env::temp_dir().join("ira-not-my-checkout");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("Cargo.toml"),
+                b"[package]
+name = \"totally-unrelated\"
+version = \"0.1.0\"
+",
+            )
+            .unwrap();
+
+            let cwd = std::env::current_dir().unwrap();
+            std::env::set_current_dir(&dir).unwrap();
+            let verdict = in_iras_own_checkout();
+            std::env::set_current_dir(cwd).unwrap();
+
+            assert!(!verdict, "another project's manifest must not capture her");
+            let _ = std::fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// A manifest that will not parse is not a checkout either. Falling through
+    /// to the per-user directory always works; guessing "checkout" does not.
+    #[test]
+    fn a_broken_manifest_is_not_a_checkout() {
+        serially(|| {
+            let dir = std::env::temp_dir().join("ira-broken-manifest");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("Cargo.toml"), b"[package
+name = ira").unwrap();
+
+            let cwd = std::env::current_dir().unwrap();
+            std::env::set_current_dir(&dir).unwrap();
+            let verdict = in_iras_own_checkout();
+            std::env::set_current_dir(cwd).unwrap();
+
+            assert!(!verdict);
+            let _ = std::fs::remove_dir_all(&dir);
         });
     }
 
