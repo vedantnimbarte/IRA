@@ -19,6 +19,7 @@ mod doctor;
 mod llm;
 mod mcp;
 mod metrics;
+mod settings;
 #[cfg(windows)]
 mod orb;
 mod stt;
@@ -299,6 +300,10 @@ async fn main() -> Result<()> {
 
     // Tools. The clock is the only built-in; everything else arrives over MCP
     // as configuration rather than code.
+    // Saved settings sit over the environment, so a key entered in the settings
+    // window is used by the next sentence rather than the next start-up.
+    settings::load();
+
     let (ui, mut talk_rx) = ui::Ui::start().await;
     // The overlay: the same events, drawn as one light, over whatever you are
     // doing. It reads the broadcast directly rather than the served page.

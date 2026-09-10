@@ -4,6 +4,11 @@
 //! the first sentence while the model is still writing the second. That overlap
 //! is most of the perceived latency win in a voice loop.
 //!
+//! Every value below is read through [`crate::settings`], which is the
+//! environment plus whatever the settings window has saved over it -- and read
+//! per request, so a key entered while she is running is used by the next
+//! sentence.
+//!
 //! Anthropic direct by default. Set `IRA_LLM_URL` to talk to anything speaking
 //! the OpenAI chat-completions wire format instead -- OpenRouter, LM Studio,
 //! Ollama, vLLM, llama.cpp:
@@ -260,7 +265,7 @@ pub async fn stream(
     host: &Host,
     screen: bool,
 ) -> Result<String> {
-    let url = std::env::var("IRA_LLM_URL").ok();
+    let url = crate::settings::get("IRA_LLM_URL");
     let openai = url.is_some();
     let system = system(screen);
 
@@ -365,7 +370,7 @@ async fn one_round(
     mark_ttft: bool,
 ) -> Result<Round> {
     let mut body = json!({
-        "model": std::env::var("IRA_LLM_MODEL").unwrap_or_else(|_| MODEL.into()),
+        "model": crate::settings::get("IRA_LLM_MODEL").unwrap_or_else(|| MODEL.into()),
         "max_tokens": 300,
         "stream": true,
         "messages": messages,
@@ -380,17 +385,17 @@ async fn one_round(
     let req = match url {
         // A local server usually wants no key at all, so an absent one is not
         // an error here the way a missing ANTHROPIC_API_KEY is.
-        Some(url) => match std::env::var("IRA_LLM_KEY") {
-            Ok(key) => client.post(url).bearer_auth(key),
-            Err(_) => client.post(url),
+        Some(url) => match crate::settings::get("IRA_LLM_KEY") {
+            Some(key) => client.post(url).bearer_auth(key),
+            None => client.post(url),
         },
         None => client
             .post("https://api.anthropic.com/v1/messages")
             .header("anthropic-version", "2023-06-01")
             .header(
                 "x-api-key",
-                std::env::var("ANTHROPIC_API_KEY")
-                    .map_err(|_| anyhow!("ANTHROPIC_API_KEY not set"))?,
+                crate::settings::get("ANTHROPIC_API_KEY")
+                    .ok_or_else(|| anyhow!("ANTHROPIC_API_KEY not set"))?,
             ),
     };
 
