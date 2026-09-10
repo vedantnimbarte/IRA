@@ -39,6 +39,11 @@
 //! which means restructuring `main.rs` -- the one file where a mistake is a
 //! conversation that does not happen.
 //!
+//! The whole module is Windows-only -- `main.rs` does not declare it elsewhere,
+//! and tiny-skia is a Windows-only dependency -- which is why nothing inside it
+//! is individually gated. On any other platform none of this is compiled, and
+//! `spawn` is simply never called.
+//!
 //! Nothing here may affect the loop, exactly as in `ui.rs`. Every failure is
 //! logged and swallowed: no display, a window that will not open, a bitmap that
 //! will not allocate. IRA still answers questions.
@@ -190,7 +195,6 @@ impl Shared {
 /// Opens the orb over everything, on its own thread.
 ///
 /// `IRA_ORB=off` disables it.
-#[cfg(windows)]
 pub fn spawn(ui: &crate::ui::Ui) {
     if std::env::var("IRA_ORB").unwrap_or_default() == "off" {
         tracing::info!("orb disabled");
@@ -235,20 +239,13 @@ pub fn spawn(ui: &crate::ui::Ui) {
     });
 }
 
-#[cfg(not(windows))]
-pub fn spawn(_ui: &crate::ui::Ui) {
-    tracing::debug!("the orb is windows-only");
-}
-
 // Everything the window procedure needs. There is one orb per process and it
 // lives on the thread that owns the window, so a thread local is the whole of
 // it: no pointer to smuggle through `GWLP_USERDATA` and get wrong.
-#[cfg(windows)]
 thread_local! {
     static ORB: std::cell::RefCell<Option<Orb>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(windows)]
 struct Orb {
     canvas: Canvas,
     shared: Arc<Shared>,
@@ -258,14 +255,11 @@ struct Orb {
 }
 
 /// The window class name, UTF-16 because that is what `RegisterClassW` reads.
-#[cfg(windows)]
 const CLASS: &[u16] = &[b'I' as u16, b'R' as u16, b'A' as u16, b'O' as u16, b'r' as u16, b'b' as u16, 0];
 
 /// The frame timer's id. Any non-zero value; there is only ever one.
-#[cfg(windows)]
 const TIMER: usize = 1;
 
-#[cfg(windows)]
 fn run(shared: Arc<Shared>, ui: crate::ui::Ui) -> anyhow::Result<()> {
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -366,7 +360,6 @@ fn run(shared: Arc<Shared>, ui: crate::ui::Ui) -> anyhow::Result<()> {
 }
 
 /// Draws one frame, if there is an orb on this thread to draw.
-#[cfg(windows)]
 fn frame() {
     ORB.with(|cell| {
         if let Some(orb) = cell.borrow_mut().as_mut() {
@@ -377,7 +370,6 @@ fn frame() {
     });
 }
 
-#[cfg(windows)]
 unsafe extern "system" fn wndproc(
     hwnd: windows_sys::Win32::Foundation::HWND,
     msg: u32,
@@ -419,7 +411,6 @@ unsafe extern "system" fn wndproc(
 /// The work area, not the monitor: the full panel puts the bottom of the orb
 /// behind the taskbar. Measured, not guessed -- an earlier version used the
 /// monitor size and landed 33 px under it.
-#[cfg(windows)]
 fn settle(hwnd: windows_sys::Win32::Foundation::HWND, side: u32, scale: f32) {
     use windows_sys::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
@@ -454,7 +445,6 @@ fn settle(hwnd: windows_sys::Win32::Foundation::HWND, side: u32, scale: f32) {
 ///
 /// Made once and reused: the orb repaints thirty times a second, and allocating
 /// a bitmap for each of those would be the most expensive thing in the process.
-#[cfg(windows)]
 struct Canvas {
     hwnd: windows_sys::Win32::Foundation::HWND,
     dc: windows_sys::Win32::Graphics::Gdi::HDC,
@@ -468,7 +458,6 @@ struct Canvas {
     complained: bool,
 }
 
-#[cfg(windows)]
 impl Canvas {
     fn new(
         hwnd: windows_sys::Win32::Foundation::HWND,
@@ -540,7 +529,9 @@ impl Canvas {
         // SAFETY: `bits` points at width*height*4 bytes owned by the DIB, which
         // is exactly the size of the pixmap of the same dimensions.
         let dst = unsafe { std::slice::from_raw_parts_mut(self.bits, src.len()) };
-        for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+        let (dst, _) = dst.as_chunks_mut::<4>();
+        let (src, _) = src.as_chunks::<4>();
+        for (d, s) in dst.iter_mut().zip(src) {
             d[0] = s[2];
             d[1] = s[1];
             d[2] = s[0];
@@ -585,7 +576,6 @@ impl Canvas {
     }
 }
 
-#[cfg(windows)]
 impl Drop for Canvas {
     fn drop(&mut self) {
         use windows_sys::Win32::Graphics::Gdi::{DeleteDC, DeleteObject};
@@ -610,7 +600,6 @@ impl Drop for Canvas {
 /// There is no wireframe and there are no bars. State is carried by which
 /// colours are in the palette and how fast everything moves, which is the whole
 /// vocabulary this kind of orb has.
-#[cfg(windows)]
 fn paint(pixmap: &mut tiny_skia::Pixmap, look: Look, t: f32, scale: f32) {
     use tiny_skia::{
         Color, FillRule, FilterQuality, GradientStop, Mask, Paint, PathBuilder, PixmapPaint, Point,
@@ -797,7 +786,6 @@ fn paint(pixmap: &mut tiny_skia::Pixmap, look: Look, t: f32, scale: f32) {
 ///
 /// Sampled rather than drawn as curves. Twenty-four points is smooth enough at
 /// this size, and the blur that follows would hide worse than that anyway.
-#[cfg(windows)]
 fn ribbon(
     cx: f32,
     cy: f32,
@@ -841,7 +829,6 @@ fn ribbon(
 /// Prefix sums, so the cost does not grow with the radius: the whole point of
 /// this orb is that it is soft, and a radius big enough to look right would be
 /// expensive done the obvious way.
-#[cfg(windows)]
 fn blur(pixmap: &mut tiny_skia::Pixmap, radius: usize) {
     let (w, h) = (pixmap.width() as usize, pixmap.height() as usize);
     if radius == 0 || w == 0 || h == 0 {
@@ -899,7 +886,7 @@ fn blur(pixmap: &mut tiny_skia::Pixmap, radius: usize) {
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

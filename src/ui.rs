@@ -218,9 +218,7 @@ Connection: close
                 .await;
             return;
         }
-        // try_send: a second press while the first is still queued is the same
-        // press. Never block the socket on the loop.
-        let _ = ui.talk.try_send(());
+        ui.press_talk();
         let _ = write
             .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
             .await;
@@ -239,7 +237,7 @@ Connection: close
         return;
     }
 
-    let mut rx = ui.tx.subscribe();
+    let mut rx = ui.subscribe();
     let backlog: Vec<String> = ui
         .backlog
         .lock()

@@ -19,6 +19,7 @@ mod doctor;
 mod llm;
 mod mcp;
 mod metrics;
+#[cfg(windows)]
 mod orb;
 mod stt;
 mod tool;
@@ -301,6 +302,7 @@ async fn main() -> Result<()> {
     let (ui, mut talk_rx) = ui::Ui::start().await;
     // The overlay: the same events, drawn as one light, over whatever you are
     // doing. It reads the broadcast directly rather than the served page.
+    #[cfg(windows)]
     orb::spawn(&ui);
     let transcript = transcript::Transcript::open();
     let (jobs_tx, mut jobs_rx) = mpsc::channel::<tool::Done>(8);
