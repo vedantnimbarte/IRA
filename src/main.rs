@@ -15,11 +15,13 @@
 
 mod audio;
 mod config;
+mod db;
 mod doctor;
 mod llm;
 mod mcp;
 mod metrics;
 mod settings;
+mod skills;
 #[cfg(windows)]
 mod orb;
 mod stt;
@@ -272,10 +274,30 @@ async fn main() -> Result<()> {
     }));
     let voice = models.join(std::env::var("IRA_VOICE").unwrap_or_else(|_| "en_US-amy-medium.onnx".into()));
 
+    // Before anything reads a setting, and before the checks below, which are
+    // checks on settings. Keys come from the OS keyring and everything else
+    // from ira.local.db; the environment is not consulted.
+    settings::load();
+    // Servers used to live in ira.toml. This brings an existing one into the
+    // database on the first start after the window became the way to edit them,
+    // and never reads it again. Before the subcommands below, so `ira doctor`
+    // reports on the servers IRA will actually connect.
+    config::import_toml_once();
+    // Instructions the user wrote, indexed and read once. The enabled bodies
+    // stay in memory, so the tool that serves them touches no file.
+    skills::reload();
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
     let checks = doctor::paths(&models, &wakeword, &voice, &piper);
-    if std::env::args().nth(1).as_deref() == Some("doctor") {
-        let report = doctor::all(&checks).await;
-        std::process::exit(doctor::report(&report));
+    match args.first().map(String::as_str) {
+        Some("doctor") => {
+            let report = doctor::all(&checks).await;
+            std::process::exit(doctor::report(&report));
+        }
+        // The way in on a machine with no keys yet: the fatal check below fires
+        // long before there is a settings window to type one into.
+        Some("set") => std::process::exit(settings::set_from_cli(&args[1..])),
+        _ => {}
     }
     // Anything knowable now must fail now. A missing key that surfaces as
     // silence three seconds into the first sentence looks like a broken product
@@ -284,7 +306,7 @@ async fn main() -> Result<()> {
         anyhow::bail!("{problem}\n\nrun `ira doctor` for the full report");
     }
 
-    let cfg = config::load()?;
+    config::import_toml_once();
 
     let mut wake = wake::WakeWord::new(&models, &wakeword, 0.5)
         .with_context(|| format!("load wake models from {}", models.display()))?;
@@ -297,12 +319,6 @@ async fn main() -> Result<()> {
     // Sentences flow straight from the LLM stream to the main loop, which owns
     // the TTS handle. Speaking starts before the model finishes writing.
     let (speech_tx, mut speech_rx) = mpsc::channel::<(String, CancellationToken)>(32);
-
-    // Tools. The clock is the only built-in; everything else arrives over MCP
-    // as configuration rather than code.
-    // Saved settings sit over the environment, so a key entered in the settings
-    // window is used by the next sentence rather than the next start-up.
-    settings::load();
 
     let (ui, mut talk_rx) = ui::Ui::start().await;
     // The overlay: the same events, drawn as one light, over whatever you are
@@ -320,11 +336,17 @@ async fn main() -> Result<()> {
         tracing::info!("press-to-talk: barge-in is the talk control, not your voice");
     }
     let (confirm_tx, mut confirm_rx) = mpsc::channel::<tool::Confirm>(4);
+    let confirm_tx_for_ui = confirm_tx.clone();
+    // Tools. The clock is the only built-in; everything else arrives over MCP
+    // as configuration rather than code.
     let host = {
-        let mut h = tool::Host::new(confirm_tx, ui.clone(), jobs_tx);
+        let h = tool::Host::new(confirm_tx, ui.clone(), jobs_tx);
         h.add(Arc::new(tool::Clock));
-        for t in mcp::connect_all(&cfg.mcp.server).await {
-            h.add(t);
+        // Only when the user has written one: a `skill` tool offering an empty
+        // list is a tool the model can see and cannot use.
+        skills::sync_registry(&h);
+        for (server, tools) in mcp::connect_all(&config::servers()).await {
+            h.set_server(&server, tools);
         }
         // Wingman is an MCP client, not a server, so it cannot arrive through
         // the loop above. It is only registered when it is actually running --
@@ -336,8 +358,18 @@ async fn main() -> Result<()> {
     };
     tracing::info!(tools = host.specs().len(), "tool registry");
 
+    // The settings page can now change the running IRA rather than only what is
+    // stored: connect a server, drop one, reload the skills. `Weak`, because
+    // the registry holds a `Ui` of its own and a strong handle back would be a
+    // cycle. Its confirmation channel is the same one a mutating tool uses --
+    // spawning a command someone typed into a web page asks out loud first.
+    ui.set_admin(ui::Admin {
+        host: Arc::downgrade(&host),
+        confirm: confirm_tx_for_ui,
+    });
+
     let stt_backend = metrics::stt_backend();
-    let llm_model = std::env::var("IRA_LLM_MODEL").unwrap_or_else(|_| llm::MODEL.to_string());
+    let llm_model = settings::get("IRA_LLM_MODEL").unwrap_or_else(|| llm::MODEL.to_string());
 
     // openWakeWord is trained on real speech and does not fire on synthesised
     // audio, so a Piper-generated corpus never gets past Idle. NFR-1 measures

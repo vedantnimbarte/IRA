@@ -1,15 +1,15 @@
 //! MCP servers, adapted to the one `Tool` trait.
 //!
 //! This is the whole reason the trait exists: after this file, a new capability
-//! is a `[[mcp.server]]` block rather than a code change. The registry cannot
-//! tell an MCP tool from a built-in, and neither can the model.
+//! is a row in `mcp_server` rather than a code change. The registry cannot tell
+//! an MCP tool from a built-in, and neither can the model.
 //!
 //! Lifted in shape from `wingman-mcp`, which already solved the rmcp plumbing.
 //! The difference is what IRA does with a server's claims about itself: nothing.
 //! Descriptions are truncated, and whether a tool changes anything comes from
-//! `ira.toml` alone.
+//! our own `mcp_tool` rows alone.
 
-use crate::config::Server;
+use crate::db::Server;
 use crate::tool::{Latency, Tool, ToolCtx, ToolOutcome, ToolSpec, DESC_MAX};
 use anyhow::{anyhow, Result};
 use rmcp::model::CallToolRequestParams;
@@ -31,7 +31,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 type Service = Arc<RunningService<RoleClient, ()>>;
 
 /// Connects to one server and returns its tools, already adapted.
-async fn connect(cfg: &Server) -> Result<Vec<Arc<dyn Tool>>> {
+pub async fn connect(cfg: &Server) -> Result<Vec<Arc<dyn Tool>>> {
     let service: Service = match cfg.transport.as_str() {
         "stdio" => {
             let command = cfg
@@ -109,22 +109,34 @@ async fn connect(cfg: &Server) -> Result<Vec<Arc<dyn Tool>>> {
     Ok(tools)
 }
 
-/// Connects to every configured server, keeping whatever answers.
+/// Connects to one server, giving up after [`CONNECT_TIMEOUT`].
+///
+/// The timeout is here rather than inside `connect` so every caller gets it:
+/// a server that hangs must not hang IRA, and the settings window waits on
+/// this while a person watches a spinner.
+pub async fn connect_within_timeout(cfg: &Server) -> Result<Vec<Arc<dyn Tool>>> {
+    match tokio::time::timeout(CONNECT_TIMEOUT, connect(cfg)).await {
+        Ok(r) => r,
+        Err(_) => Err(anyhow!(
+            "{} did not answer within {}s",
+            cfg.name,
+            CONNECT_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+/// Connects to every enabled server, keeping whatever answers, grouped by the
+/// server it came from so one can later be replaced without the rest.
 ///
 /// A server that is missing, broken or slow is logged and skipped. Refusing to
 /// start because an optional capability is unavailable would make IRA less
 /// reliable than it is without tools at all.
-pub async fn connect_all(servers: &[Server]) -> Vec<Arc<dyn Tool>> {
+pub async fn connect_all(servers: &[Server]) -> Vec<(String, Vec<Arc<dyn Tool>>)> {
     let mut out = Vec::new();
-    for cfg in servers {
-        match tokio::time::timeout(CONNECT_TIMEOUT, connect(cfg)).await {
-            Ok(Ok(tools)) => out.extend(tools),
-            Ok(Err(e)) => tracing::error!(server = %cfg.name, "mcp connect failed: {e}"),
-            Err(_) => tracing::error!(
-                server = %cfg.name,
-                secs = CONNECT_TIMEOUT.as_secs(),
-                "mcp connect timed out"
-            ),
+    for cfg in servers.iter().filter(|s| s.enabled) {
+        match connect_within_timeout(cfg).await {
+            Ok(tools) => out.push((cfg.name.clone(), tools)),
+            Err(e) => tracing::error!(server = %cfg.name, "mcp connect failed: {e:#}"),
         }
     }
     out

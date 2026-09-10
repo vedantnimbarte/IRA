@@ -2,31 +2,32 @@
 //!
 //! [decisions/0014](../docs/decisions/0014-settings-are-editable-while-she-runs.md).
 //!
-//! Everything here used to be an environment variable and still can be. The
-//! addition is that a running IRA can be told otherwise, and remember it:
+//! Two stores, and the environment is not one of them:
 //!
 //! ```text
-//!   an override set in the settings window   ← wins
-//!   the environment                          ← what you started her with
-//!   nothing                                  ← the code's own default
+//!   API keys      → the OS keyring   (Credential Manager, Keychain, Secret Service)
+//!   URLs and ids  → ira.local.db     (SQLite, beside IRA)
+//!   nothing set   → the code's own default
 //! ```
 //!
-//! **The environment is never written to.** `std::env::set_var` races with the
-//! `getenv` happening on the audio, model and orb threads -- it is `unsafe` in
-//! Rust 2024 for exactly that reason -- and this process has too many threads
-//! to take that on for a convenience. Instead the values live in a map behind
-//! an `RwLock`, and every caller that used to read the environment reads
-//! [`get`] instead. Reads are per request in `llm.rs` and `stt.rs`, so a key
+//! **The environment is not read.** It used to be the bottom of that stack, and
+//! a key on a command line ends up in shell history, in `ps`, and in whatever
+//! CI log echoed the step that set it. A keyring is encrypted at rest per user
+//! and cannot be exported by anything that can reach IRA's port. Values live in
+//! a map behind an `RwLock`, read per request in `llm.rs` and `stt.rs`, so a key
 //! saved now is used by the next sentence with nothing restarted.
 //!
-//! **Secrets are not in the file.** API keys go to the Windows Credential
-//! Manager, which is encrypted at rest per user; the file holds only URLs and
-//! model ids. A key is never read back out to the settings page either -- the
-//! page is told whether one is set, never what it is.
+//! **The environment is never written to either.** `std::env::set_var` races
+//! with the `getenv` happening on the audio, model and orb threads -- it is
+//! `unsafe` in Rust 2024 for exactly that reason.
+//!
+//! **Secrets are not in the database.** A key is never read back out to the
+//! settings page either -- the page is told whether one is set, never what it
+//! is. `ira set <NAME> <VALUE>` is the way in on a machine with no window yet.
 
+use crate::db;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
 
 /// Everything the settings window can change.
@@ -122,7 +123,7 @@ pub struct Field {
     /// What IRA does when this is not set. An empty box should say what happens
     /// instead of it, rather than only that it is empty.
     pub empty: &'static str,
-    /// Whether this goes to the credential store rather than the file, and is
+    /// Whether this goes to the OS keyring rather than the database, and is
     /// never sent back to the page.
     pub secret: bool,
 }
@@ -137,35 +138,38 @@ impl Field {
             self.empty.into()
         }
     }
+
+    /// Where this one is kept, for the window and for `ira set` with no value.
+    pub fn store(&self) -> &'static str {
+        if self.secret {
+            "the OS keyring"
+        } else {
+            "ira.local.db"
+        }
+    }
 }
 
 fn field(name: &str) -> Option<&'static Field> {
     FIELDS.iter().find(|f| f.name == name)
 }
 
-fn overrides() -> &'static RwLock<BTreeMap<String, String>> {
-    static OVERRIDES: OnceLock<RwLock<BTreeMap<String, String>>> = OnceLock::new();
-    OVERRIDES.get_or_init(|| RwLock::new(BTreeMap::new()))
+fn values() -> &'static RwLock<BTreeMap<String, String>> {
+    static VALUES: OnceLock<RwLock<BTreeMap<String, String>>> = OnceLock::new();
+    VALUES.get_or_init(|| RwLock::new(BTreeMap::new()))
 }
 
-/// Where the non-secret settings are kept. Beside `ira.toml` rather than in it:
-/// `ira.toml` is shareable -- its MCP blocks are the kind of thing you commit --
-/// and this file is about one machine.
-fn file() -> PathBuf {
-    PathBuf::from(std::env::var("IRA_SETTINGS").unwrap_or_else(|_| "ira.local.toml".into()))
-}
-
-/// The value of a setting: an override if one has been saved, otherwise the
-/// environment, otherwise nothing.
+/// The value of a setting, or nothing.
 ///
-/// A blank override means "unset this", which is how a URL is cleared to get
-/// back to the default provider. Without that, emptying a box in the settings
-/// window would silently fall through to whatever the environment still said.
+/// A blank value means "unset this", which is how a URL is cleared to get back
+/// to the default provider without the clear being indistinguishable from
+/// never having set it.
 pub fn get(name: &str) -> Option<String> {
-    if let Some(value) = overrides().read().ok()?.get(name) {
-        return (!value.is_empty()).then(|| value.clone());
-    }
-    std::env::var(name).ok().filter(|v| !v.is_empty())
+    values()
+        .read()
+        .ok()?
+        .get(name)
+        .filter(|v| !v.is_empty())
+        .cloned()
 }
 
 /// Whether a setting has a value, without being told what it is. What the
@@ -174,67 +178,48 @@ pub fn is_set(name: &str) -> bool {
     get(name).is_some()
 }
 
-/// Where a value came from.
-///
-/// Worth telling apart: "saved" and "set in the shell you started her from"
-/// look identical in the window and are answers to different questions --
-/// notably "why is she using that model when I never chose it".
-#[derive(PartialEq, Eq)]
-pub enum Source {
-    Saved,
-    Environment,
+/// Sets a value in memory only, for the tests that need one without writing to
+/// the machine's real keyring or database.
+#[cfg(test)]
+pub fn set_in_memory(name: &str, value: &str) {
+    values().write().unwrap().insert(name.into(), value.into());
 }
 
-pub fn source(name: &str) -> Option<Source> {
-    if let Ok(o) = overrides().read() {
-        if let Some(value) = o.get(name) {
-            // A blank override is a deliberate clear, and masks the
-            // environment rather than falling through to it.
-            return (!value.is_empty()).then_some(Source::Saved);
-        }
-    }
-    std::env::var(name)
-        .ok()
-        .filter(|v| !v.is_empty())
-        .map(|_| Source::Environment)
-}
-
-/// Loads saved settings over the environment. Called once at start-up.
+/// Loads the database and the keyring into memory. Called once at start-up,
+/// before the fatal start-up checks, because those are checks on these values.
 ///
-/// A missing file is the normal case and not a failure. A malformed one is
-/// reported and ignored: bad settings must not stop IRA answering questions,
-/// and refusing to start because of a stray quote in a config file would be a
-/// worse outcome than running on the environment alone.
+/// A missing database is the normal case and not a failure. An unreadable one
+/// is reported and ignored: bad settings must not stop IRA answering questions,
+/// and refusing to start because of a corrupt row would be a worse outcome than
+/// running on the defaults.
 pub fn load() {
     let mut loaded = 0;
-    match std::fs::read_to_string(file()) {
-        Ok(text) => match toml::from_str::<BTreeMap<String, String>>(&text) {
-            Ok(saved) => {
-                if let Ok(mut o) = overrides().write() {
-                    for (k, v) in saved {
-                        if field(&k).is_some_and(|f| !f.secret) {
-                            o.insert(k, v);
-                            loaded += 1;
-                        }
+    match db::settings_all() {
+        Ok(saved) => {
+            if let Ok(mut v) = values().write() {
+                for (name, value) in saved {
+                    // A row for something that is no longer a setting is
+                    // ignored rather than honoured.
+                    if field(&name).is_some_and(|f| !f.secret) {
+                        v.insert(name, value);
+                        loaded += 1;
                     }
                 }
             }
-            Err(e) => tracing::error!("{} is not readable, ignoring it: {e}", file().display()),
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => tracing::error!("could not read {}: {e}", file().display()),
+        }
+        Err(e) => tracing::error!("could not read {}, ignoring it: {e:#}", db::PATH),
     }
 
     for f in FIELDS.iter().filter(|f| f.secret) {
         match secret::read(f.name) {
             Ok(Some(value)) => {
-                if let Ok(mut o) = overrides().write() {
-                    o.insert(f.name.into(), value);
+                if let Ok(mut v) = values().write() {
+                    v.insert(f.name.into(), value);
                     loaded += 1;
                 }
             }
             Ok(None) => {}
-            Err(e) => tracing::error!("could not read {} from the credential store: {e}", f.name),
+            Err(e) => tracing::error!("could not read {} from the keyring: {e:#}", f.name),
         }
     }
 
@@ -245,204 +230,116 @@ pub fn load() {
 
 /// Saves one setting and applies it immediately.
 ///
-/// An empty value clears it: the credential is deleted, or the line leaves the
-/// file. The override stays, as an empty string, so `get` knows the difference
-/// between "cleared" and "never set" and does not fall back to the environment.
+/// An empty value clears it: the credential is deleted, or the row leaves the
+/// database. The in-memory value stays, as an empty string, so a clear is
+/// distinguishable from never having been set.
 pub fn set(name: &str, value: &str) -> Result<()> {
     let field = field(name).with_context(|| format!("{name} is not a setting"))?;
     let value = value.trim();
 
-    if field.secret {
-        if value.is_empty() {
-            secret::delete(name)?;
-        } else {
-            secret::write(name, value)?;
-        }
+    // The store first: failing to persist must not leave IRA running on a value
+    // that will be gone at the next start-up.
+    match (field.secret, value.is_empty()) {
+        (true, false) => secret::write(name, value)?,
+        (true, true) => secret::delete(name)?,
+        (false, false) => db::settings_set(name, value)?,
+        (false, true) => db::settings_delete(name)?,
     }
 
-    overrides()
+    values()
         .write()
         .map_err(|_| anyhow::anyhow!("settings lock poisoned"))?
         .insert(name.into(), value.into());
 
-    if !field.secret {
-        write_file()?;
-    }
     // Never the value, and never at a level that ends up in a shared log.
     tracing::info!(name, cleared = value.is_empty(), "setting saved");
     Ok(())
 }
 
-/// Rewrites the whole file from the current overrides.
+/// `ira set <NAME> [VALUE]` -- how a key gets in on a machine that has never
+/// started IRA, since the fatal start-up check for a missing key fires long
+/// before there is a settings window to type one into. Returns an exit code.
+pub fn set_from_cli(args: &[String]) -> i32 {
+    let (name, value) = match args {
+        [name, value] => (name.as_str(), value.as_str()),
+        [name] => (name.as_str(), ""),
+        _ => {
+            eprintln!("usage: ira set <NAME> [VALUE]     -- no value clears it\n");
+            for f in FIELDS {
+                eprintln!("  {:<18} {}", f.name, f.store());
+            }
+            return 2;
+        }
+    };
+    match set(name, value) {
+        // Never the value: this is a terminal, and terminals are recorded.
+        Ok(()) => {
+            let where_ = field(name).map(|f| f.store()).unwrap_or_default();
+            if value.is_empty() {
+                println!("{name} cleared");
+            } else {
+                println!("{name} saved to {where_}");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("{name}: {e:#}");
+            1
+        }
+    }
+}
+
+/// The OS keyring: Windows Credential Manager, macOS Keychain, or the
+/// freedesktop Secret Service. Encrypted at rest, per user, and not a file that
+/// can be committed by accident.
 ///
-/// Whole-file rather than patching a line: this file is six keys and a
-/// hand-edited one is not a thing to try to preserve the formatting of.
-fn write_file() -> Result<()> {
-    let o = overrides()
-        .read()
-        .map_err(|_| anyhow::anyhow!("settings lock poisoned"))?;
-    let mut doc = String::from(
-        "# Written by IRA's settings window. Safe to edit or delete.\n\
-         # Keys are not here -- they are in the Windows Credential Manager.\n",
-    );
-    for f in FIELDS.iter().filter(|f| !f.secret) {
-        if let Some(value) = o.get(f.name).filter(|v| !v.is_empty()) {
-            doc.push_str(&format!("{} = {}\n", f.name, toml_string(value)));
-        }
-    }
-    drop(o);
-
-    let path = file();
-    // Written next to the target and renamed, so an interrupted save leaves the
-    // old settings rather than half of the new ones.
-    let temp = path.with_extension("toml.new");
-    std::fs::write(&temp, doc).with_context(|| format!("write {}", temp.display()))?;
-    std::fs::rename(&temp, &path).with_context(|| format!("replace {}", path.display()))?;
-    Ok(())
-}
-
-/// A TOML basic string. These are URLs and model ids, but a stray quote or
-/// backslash in one would otherwise write a file that will not parse.
-fn toml_string(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for c in value.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// The Windows Credential Manager: encrypted at rest, per user, and not a file
-/// that can be committed by accident.
-#[cfg(windows)]
+/// The `keyring` crate rather than three hand-written FFI bindings: this used
+/// to be 80 lines of `unsafe` Win32 that only worked on Windows, and the other
+/// two platforms had no store at all and leaned on the environment -- which is
+/// the thing being removed.
 mod secret {
     use anyhow::{anyhow, Result};
-    use windows_sys::Win32::Security::Credentials::{
-        CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
-        CRED_TYPE_GENERIC,
-    };
+    use keyring::v1::{Entry, Error};
 
-    /// Namespaced, so IRA's entries are identifiable in the Windows UI and
-    /// cannot collide with anything else storing a key by the same name.
-    fn target(name: &str) -> Vec<u16> {
-        wide(&format!("IRA/{name}"))
-    }
-
-    fn wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(std::iter::once(0)).collect()
+    /// Namespaced, so IRA's entries are identifiable in each platform's own UI
+    /// and cannot collide with anything else storing a key by the same name.
+    fn entry(name: &str) -> Result<Entry> {
+        Entry::new("IRA", name).map_err(|e| match e {
+            // Worth its own sentence: a headless Linux box often has no Secret
+            // Service running at all, and "no default store" does not say that.
+            Error::NoDefaultStore => anyhow!(
+                "no OS keyring on this machine \
+                 (Linux needs a running Secret Service, e.g. gnome-keyring)"
+            ),
+            e => anyhow!(e),
+        })
     }
 
     pub fn read(name: &str) -> Result<Option<String>> {
-        let target = target(name);
-        let mut cred: *mut CREDENTIALW = std::ptr::null_mut();
-        // SAFETY: a null-terminated target name that outlives the call. On
-        // success `cred` is a block owned by the caller until `CredFree`, and
-        // the blob is read within its own stated length.
-        unsafe {
-            if CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut cred) == 0 {
-                // Not found is the ordinary case for a key never saved.
-                return match windows_sys::Win32::Foundation::GetLastError() {
-                    1168 => Ok(None),
-                    e => Err(anyhow!("CredRead failed, error {e}")),
-                };
-            }
-            let bytes = std::slice::from_raw_parts(
-                (*cred).CredentialBlob as *const u8,
-                (*cred).CredentialBlobSize as usize,
-            );
-            let value = String::from_utf8(bytes.to_vec());
-            CredFree(cred as *const _);
-            Ok(Some(value?))
+        match entry(name)?.get_password() {
+            Ok(value) => Ok(Some(value)),
+            // Not found is the ordinary case for a key never saved.
+            Err(Error::NoEntry) => Ok(None),
+            Err(e) => Err(anyhow!(e)),
         }
     }
 
     pub fn write(name: &str, value: &str) -> Result<()> {
-        let mut target = target(name);
-        let mut user = wide("IRA");
-        let mut blob = value.as_bytes().to_vec();
-        let mut cred: CREDENTIALW = unsafe { std::mem::zeroed() };
-        cred.Type = CRED_TYPE_GENERIC;
-        cred.TargetName = target.as_mut_ptr();
-        cred.UserName = user.as_mut_ptr();
-        cred.CredentialBlobSize = blob.len() as u32;
-        cred.CredentialBlob = blob.as_mut_ptr();
-        // This machine only. A roaming credential would put the key on every
-        // machine the account touches, which is not what saving it here means.
-        cred.Persist = CRED_PERSIST_LOCAL_MACHINE;
-
-        // SAFETY: every pointer in `cred` is to a local that outlives the call,
-        // and the blob length is the length of that local.
-        let ok = unsafe { CredWriteW(&cred, 0) };
-        if ok == 0 {
-            let e = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-            return Err(anyhow!("CredWrite failed, error {e}"));
-        }
-        Ok(())
+        entry(name)?.set_password(value).map_err(|e| anyhow!(e))
     }
 
     pub fn delete(name: &str) -> Result<()> {
-        let target = target(name);
-        // SAFETY: a null-terminated target name that outlives the call.
-        let ok = unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) };
-        if ok == 0 {
+        match entry(name)?.delete_credential() {
             // Deleting one that was never there is the outcome asked for.
-            return match unsafe { windows_sys::Win32::Foundation::GetLastError() } {
-                1168 => Ok(()),
-                e => Err(anyhow!("CredDelete failed, error {e}")),
-            };
+            Ok(()) | Err(Error::NoEntry) => Ok(()),
+            Err(e) => Err(anyhow!(e)),
         }
-        Ok(())
-    }
-}
-
-/// Everywhere else has no credential store IRA knows how to use, so secrets
-/// stay in the environment and the settings window says so.
-#[cfg(not(windows))]
-mod secret {
-    use anyhow::{anyhow, Result};
-
-    pub fn read(_name: &str) -> Result<Option<String>> {
-        Ok(None)
-    }
-    pub fn write(_name: &str, _value: &str) -> Result<()> {
-        Err(anyhow!("saving keys needs the Windows Credential Manager"))
-    }
-    pub fn delete(_name: &str) -> Result<()> {
-        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A URL with a quote in it would write a file that will not parse, and the
-    /// failure lands at the *next* start-up rather than at the save -- so it
-    /// looks like settings being forgotten rather than like a bad value.
-    #[test]
-    fn a_value_with_quotes_survives_the_round_trip() {
-        for value in [
-            r#"http://x/a"b"#,
-            r"C:\models\a",
-            "plain",
-            "tab\there",
-            "new\nline",
-        ] {
-            let doc = format!("IRA_LLM_URL = {}\n", toml_string(value));
-            let back: BTreeMap<String, String> =
-                toml::from_str(&doc).unwrap_or_else(|e| panic!("{doc:?} did not parse: {e}"));
-            assert_eq!(back["IRA_LLM_URL"], value);
-        }
-    }
 
     /// Only what the window offers can be written, so a POST naming something
     /// else cannot reach through and set an arbitrary variable.
@@ -453,21 +350,22 @@ mod tests {
         assert!(field("ANTHROPIC_API_KEY").is_some());
     }
 
-    /// The whole point of the override layer: a saved value beats the
-    /// environment, and a cleared one does not fall back to it.
+    /// The whole point of the change: a variable in the shell is no longer a
+    /// way to configure IRA, and a cleared setting stays cleared rather than
+    /// falling through to one.
     #[test]
-    fn a_saved_value_wins_and_a_cleared_one_stays_cleared() {
+    fn the_environment_is_not_a_source_and_a_cleared_value_stays_cleared() {
         let name = "IRA_LLM_MODEL";
         std::env::set_var(name, "from-the-environment");
-        assert_eq!(get(name).as_deref(), Some("from-the-environment"));
+        assert_eq!(get(name), None, "the environment must not be read");
 
-        overrides().write().unwrap().insert(name.into(), "from-the-window".into());
+        values().write().unwrap().insert(name.into(), "from-the-window".into());
         assert_eq!(get(name).as_deref(), Some("from-the-window"));
 
-        overrides().write().unwrap().insert(name.into(), String::new());
-        assert_eq!(get(name), None, "cleared must not fall back to the environment");
+        values().write().unwrap().insert(name.into(), String::new());
+        assert_eq!(get(name), None, "cleared must stay cleared");
 
-        overrides().write().unwrap().remove(name);
+        values().write().unwrap().remove(name);
         std::env::remove_var(name);
     }
 
@@ -476,5 +374,27 @@ mod tests {
     fn a_secret_can_be_asked_about_but_not_read_back() {
         assert!(FIELDS.iter().filter(|f| f.secret).count() >= 3);
         assert!(!is_set("ANTHROPIC_API_KEY") || get("ANTHROPIC_API_KEY").is_some());
+    }
+
+    /// A round trip through the real database, in a temp directory so it never
+    /// touches the one beside IRA. The second write is the point: saving twice
+    /// must replace the row rather than fail on the primary key, and the value
+    /// is one that would have needed escaping in the TOML file this replaced.
+    #[test]
+    fn a_setting_survives_the_database_round_trip() {
+        let dir = std::env::temp_dir().join("ira-settings-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        let _ = std::fs::remove_file(db::PATH);
+
+        db::settings_set("IRA_LLM_URL", "http://one").unwrap();
+        db::settings_set("IRA_LLM_URL", r#"http://x/a"b"#).unwrap();
+        assert_eq!(db::settings_all().unwrap()["IRA_LLM_URL"], r#"http://x/a"b"#);
+
+        db::settings_delete("IRA_LLM_URL").unwrap();
+        assert!(db::settings_all().unwrap().is_empty());
+
+        std::env::set_current_dir(cwd).unwrap();
     }
 }

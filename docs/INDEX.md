@@ -59,6 +59,11 @@ context, the decision, its consequences, and what would change it.
 | [0010](decisions/0010-press-to-talk-before-echo-cancellation.md) | Press-to-talk ships before echo cancellation | accepted |
 | [0011](decisions/0011-a-tone-now-and-words-when-idle.md) | A tone now, and words when IRA next has the floor | accepted |
 | [0012](decisions/0012-wingman-is-a-built-in-not-an-mcp-shim.md) | Wingman is a built-in, not an MCP shim | accepted |
+| [0013](decisions/0013-the-orb-is-an-overlay-on-the-same-stream.md) | The orb is an overlay on the same stream | accepted |
+| [0014](decisions/0014-settings-are-editable-while-she-runs.md) | Settings are editable while she runs | accepted, amended by 0015 |
+| [0015](decisions/0015-settings-come-from-the-keyring-not-the-environment.md) | Settings come from the OS keyring and a database, never the environment | accepted |
+| [0016](decisions/0016-skills-are-markdown-loaded-by-a-tool-call.md) | Skills are Markdown files, loaded by a tool call | accepted |
+| [0017](decisions/0017-servers-and-skills-are-configured-in-the-window.md) | Servers and skills are configured in the window, and stored in the database | accepted |
 
 ## Looking for something specific?
 

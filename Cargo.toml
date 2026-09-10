@@ -21,6 +21,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml = "0.8"
 rmcp = { version = "3", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
+keyring = { version = "4.2.0", features = ["apple-native-keyring-store"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 # The orb, an always-on-top overlay. Windows-only on purpose: the event loop
 # runs on a spawned thread, which is a Windows affordance, and a target-specific

@@ -1,7 +1,14 @@
 # 0014 — Settings are editable while she runs, and keys are not in a file
 
-**Status:** accepted
+**Status:** accepted, amended by
+[0015](0015-settings-come-from-the-keyring-not-the-environment.md)
 **Date:** 2026-09-10
+
+> 0015 removed the environment fallback described below. Everything about the
+> window, the guard on saving and the fixed field list still holds; "saved
+> values sit over the environment" and "keys go to the Windows Credential
+> Manager" no longer do — there is one source per field, and the keyring is the
+> platform's own.
 
 ## Context
 
