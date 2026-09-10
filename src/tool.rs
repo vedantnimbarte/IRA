@@ -17,7 +17,7 @@ use crate::ui::{Event, Ui};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, oneshot};
@@ -121,8 +121,16 @@ pub struct Confirm {
 }
 
 /// The registry, plus the confirmation path back to the loop.
+///
+/// The map is behind an `RwLock` because the settings window can connect and
+/// disconnect servers while IRA is running. Reads are the hot path -- every
+/// round of every turn asks for `specs()` -- and writes happen when a person
+/// presses Save, so the lock is almost never contended.
 pub struct Host {
-    tools: HashMap<String, Arc<dyn Tool>>,
+    tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
+    /// Which tools came from which MCP server, so one can be removed without
+    /// knowing what it happened to expose. Built-ins are not in here.
+    by_server: RwLock<HashMap<String, Vec<String>>>,
     confirm: mpsc::Sender<Confirm>,
     /// The screen sees every call and every result. The loop only hears the
     /// model's summary of them, which is the point of having a screen.
@@ -138,7 +146,8 @@ pub struct Host {
 impl Host {
     pub fn new(confirm: mpsc::Sender<Confirm>, ui: Ui, done: mpsc::Sender<Done>) -> Self {
         Self {
-            tools: HashMap::new(),
+            tools: RwLock::new(HashMap::new()),
+            by_server: RwLock::new(HashMap::new()),
             confirm,
             ui,
             done,
@@ -152,28 +161,106 @@ impl Host {
         self.running.load(Ordering::Relaxed)
     }
 
-    pub fn add(&mut self, tool: Arc<dyn Tool>) {
-        self.tools.insert(tool.spec().name.clone(), tool);
+    /// Adds one tool. `&self` rather than `&mut self`: the registry is shared
+    /// as an `Arc` the moment the loop starts, and the window adds to it after
+    /// that.
+    pub fn add(&self, tool: Arc<dyn Tool>) {
+        if let Ok(mut t) = self.tools.write() {
+            t.insert(tool.spec().name.clone(), tool);
+        }
+    }
+
+    /// Replaces everything one MCP server exposes, in one step.
+    ///
+    /// Whole-server rather than tool by tool: reconnecting a server can expose
+    /// a different set than last time, and removing what is gone has to happen
+    /// in the same breath as adding what is new, or the model briefly sees a
+    /// tool that no longer has a connection behind it.
+    pub fn set_server(&self, server: &str, tools: Vec<Arc<dyn Tool>>) {
+        let names: Vec<String> = tools.iter().map(|t| t.spec().name).collect();
+        let (Ok(mut map), Ok(mut owned)) = (self.tools.write(), self.by_server.write()) else {
+            return;
+        };
+        for gone in owned.remove(server).unwrap_or_default() {
+            map.remove(&gone);
+        }
+        for tool in tools {
+            map.insert(tool.spec().name.clone(), tool);
+        }
+        owned.insert(server.to_string(), names);
+    }
+
+    /// Drops one tool by name. What the skill tool needs when the last skill is
+    /// turned off: it must stop being offered, not start answering emptily.
+    pub fn remove(&self, name: &str) {
+        if let Ok(mut t) = self.tools.write() {
+            t.remove(name);
+        }
+    }
+
+    /// Drops a server's tools. An in-flight call keeps running: `call` clones
+    /// the `Arc` before it awaits, so the tool -- and the connection it holds
+    /// -- outlives its removal from the map.
+    pub fn remove_server(&self, server: &str) {
+        let (Ok(mut map), Ok(mut owned)) = (self.tools.write(), self.by_server.write()) else {
+            return;
+        };
+        for gone in owned.remove(server).unwrap_or_default() {
+            map.remove(&gone);
+        }
+    }
+
+    /// Every registered MCP tool, paired with the server it came from. What the
+    /// settings page needs to show what is *connected*, as opposed to what is
+    /// merely configured.
+    pub fn by_server(&self) -> Vec<(String, String)> {
+        let Ok(owned) = self.by_server.read() else {
+            return Vec::new();
+        };
+        let mut out: Vec<(String, String)> = owned
+            .iter()
+            .flat_map(|(server, tools)| tools.iter().map(|t| (server.clone(), t.clone())))
+            .collect();
+        out.sort();
+        out
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tools.is_empty()
+        self.tools.read().map(|t| t.is_empty()).unwrap_or(true)
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
-        self.tools.values().map(|t| t.spec()).collect()
+        let Ok(tools) = self.tools.read() else {
+            return Vec::new();
+        };
+        tools.values().map(|t| t.spec()).collect()
+    }
+
+    /// One tool by name. What the window needs to try a tool by hand: it has
+    /// to hold the tool itself, because the registry cannot run one without
+    /// going through the confirmation gate -- which is right for the model and
+    /// wrong for a button a person just pressed.
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.read().ok()?.get(name).cloned()
     }
 
     pub fn latency(&self, name: &str) -> Option<Latency> {
-        self.tools.get(name).map(|t| t.spec().latency)
+        self.tools.read().ok()?.get(name).map(|t| t.spec().latency)
     }
 
     /// Runs a tool, asking first if it mutates anything, and abandoning it if it
     /// outstays its budget.
     pub async fn call(&self, name: &str, args: Value, ctx: &ToolCtx) -> Result<ToolOutcome> {
+        // Cloned out from under the lock before anything is awaited: the guard
+        // is not held across a confirmation that waits on a person, and a
+        // server removed mid-call leaves this `Arc` -- and its connection --
+        // alive until the call finishes.
         let tool = self
             .tools
+            .read()
+            .map_err(|_| anyhow!("tool registry poisoned"))?
             .get(name)
+            .cloned()
             .ok_or_else(|| anyhow!("no such tool: {name}"))?;
         let spec = tool.spec();
 
@@ -207,7 +294,6 @@ impl Host {
         // is not a reason to abandon work already under way.
         if spec.latency == Latency::Background {
             let id = self.next_job.fetch_add(1, Ordering::Relaxed);
-            let tool = tool.clone();
             let done = self.done.clone();
             let name = name.to_string();
             let transcript = ctx.transcript.clone();
@@ -392,7 +478,7 @@ mod tests {
     #[tokio::test]
     async fn the_clock_answers_without_confirmation() {
         let (tx, mut rx) = mpsc::channel(1);
-        let mut host = Host::new(tx, Ui::disabled(), jobs().0);
+        let host = Host::new(tx, Ui::disabled(), jobs().0);
         host.add(Arc::new(Clock));
 
         let out = host.call("clock", json!({}), &ctx()).await.unwrap();
@@ -433,7 +519,7 @@ mod tests {
     #[tokio::test]
     async fn a_tool_over_its_budget_is_abandoned() {
         let (tx, _rx) = mpsc::channel(1);
-        let mut host = Host::new(tx, Ui::disabled(), jobs().0);
+        let host = Host::new(tx, Ui::disabled(), jobs().0);
         host.add(Arc::new(Overrun));
         let err = host
             .call("overrun", json!({}), &ctx())
@@ -472,7 +558,7 @@ mod tests {
     async fn a_background_tool_answers_before_it_finishes() {
         let (tx, _rx) = mpsc::channel(1);
         let (done_tx, mut done_rx) = jobs();
-        let mut host = Host::new(tx, Ui::disabled(), done_tx);
+        let host = Host::new(tx, Ui::disabled(), done_tx);
         host.add(Arc::new(LongJob));
 
         // The turn that asked is over and interrupted before the work lands.
@@ -531,7 +617,7 @@ mod tests {
     async fn a_refused_tool_does_not_run() {
         let ran = Arc::new(AtomicBool::new(false));
         let (tx, mut rx) = mpsc::channel::<Confirm>(1);
-        let mut host = Host::new(tx, Ui::disabled(), jobs().0);
+        let host = Host::new(tx, Ui::disabled(), jobs().0);
         host.add(Arc::new(Writer(ran.clone())));
 
         // Stand in for the loop: hear the question, answer no.
@@ -555,7 +641,7 @@ mod tests {
     async fn a_confirmed_tool_runs() {
         let ran = Arc::new(AtomicBool::new(false));
         let (tx, mut rx) = mpsc::channel::<Confirm>(1);
-        let mut host = Host::new(tx, Ui::disabled(), jobs().0);
+        let host = Host::new(tx, Ui::disabled(), jobs().0);
         host.add(Arc::new(Writer(ran.clone())));
 
         tokio::spawn(async move {
@@ -572,7 +658,7 @@ mod tests {
     async fn a_dropped_confirmation_is_not_consent() {
         let ran = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel::<Confirm>(1);
-        let mut host = Host::new(tx, Ui::disabled(), jobs().0);
+        let host = Host::new(tx, Ui::disabled(), jobs().0);
         host.add(Arc::new(Writer(ran.clone())));
 
         // The loop goes away mid-question.

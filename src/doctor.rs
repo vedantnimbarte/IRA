@@ -99,18 +99,18 @@ pub fn files_and_keys(p: &Paths) -> Vec<Check> {
         ));
     }
 
-    let stt_url = std::env::var("IRA_STT_URL").ok();
-    let llm_url = std::env::var("IRA_LLM_URL").ok();
+    let stt_url = crate::settings::get("IRA_STT_URL");
+    let llm_url = crate::settings::get("IRA_LLM_URL");
 
     for key in required_keys(stt_url.as_deref(), llm_url.as_deref()) {
-        if std::env::var(key).is_ok() {
+        if crate::settings::is_set(key) {
             out.push(Check::ok(format!("{key} set")));
         } else {
             out.push(Check::fatal(
                 format!("{key} not set"),
                 match key {
-                    "GROQ_API_KEY" => "set it, or set IRA_STT_URL for local STT",
-                    _ => "set it, or set IRA_LLM_URL for another provider",
+                    "GROQ_API_KEY" => "run `ira set GROQ_API_KEY <key>`, or `ira set IRA_STT_URL <url>` for local STT",
+                    _ => "run `ira set ANTHROPIC_API_KEY <key>`, or `ira set IRA_LLM_URL <url>` for another provider",
                 },
             ));
         }
@@ -122,7 +122,7 @@ pub fn files_and_keys(p: &Paths) -> Vec<Check> {
 
     // Every gateway names models differently, so the Anthropic default is
     // almost certainly wrong on someone else's endpoint.
-    if llm_url.is_some() && std::env::var("IRA_LLM_MODEL").is_err() {
+    if llm_url.is_some() && !crate::settings::is_set("IRA_LLM_MODEL") {
         out.push(Check::warn(
             "IRA_LLM_MODEL not set while IRA_LLM_URL is",
             "gateways use their own model ids, e.g. anthropic/claude-sonnet-4.5",
@@ -144,7 +144,7 @@ pub async fn all(p: &Paths) -> Vec<Check> {
         )),
     }
 
-    if let Ok(url) = std::env::var("IRA_STT_URL") {
+    if let Some(url) = crate::settings::get("IRA_STT_URL") {
         let client = reqwest::Client::new();
         let probe = client
             .get(&url)
@@ -157,7 +157,7 @@ pub async fn all(p: &Paths) -> Vec<Check> {
             Ok(_) => out.push(Check::ok(format!("STT reachable at {url}"))),
             Err(e) => out.push(Check::fatal(
                 format!("STT unreachable at {url}: {e}"),
-                "start whisper-server, or unset IRA_STT_URL to use Groq",
+                "start whisper-server, or `ira set IRA_STT_URL` to use Groq",
             )),
         }
     }

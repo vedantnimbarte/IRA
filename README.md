@@ -22,10 +22,14 @@ yields the floor correctly beats a smarter one that talks over you.
 
 ```powershell
 .\scripts\fetch-models.ps1
-$env:ANTHROPIC_API_KEY = "sk-ant-..."
-$env:GROQ_API_KEY = "gsk_..."
+cargo run --release -- set ANTHROPIC_API_KEY sk-ant-...
+cargo run --release -- set GROQ_API_KEY gsk_...
 cargo run --release
 ```
+
+Keys go to the operating system's keyring, once, and are read from there on
+every start — not from the environment, which puts them in your shell history
+and in `ps`. The settings window does the same job with a form.
 
 On Linux or macOS, `./scripts/fetch-models.sh` does the same job — though see
 [what has not been verified](#what-has-not-been-verified) before trusting it.
@@ -94,39 +98,92 @@ around: [decisions/0001](docs/decisions/0001-audio-path-stays-in-one-process.md)
 | `ui.rs` | The screen and its event stream |
 | `orb.rs` | The overlay: a drawn globe on a layered window, same stream |
 | `main.rs` | The state machine |
-| `metrics.rs` · `doctor.rs` · `config.rs` · `transcript.rs` | Timing, preflight, `ira.toml`, the record |
+| `skills.rs` | `skills/*.md`: user-written instructions, loaded on demand |
+| `cli.rs` · `oauth.rs` | The window from a terminal; signing in to a hosted server |
+| `settings.rs` | Keys in the OS keyring, URLs and model ids in SQLite |
+| `db.rs` | `ira.local.db`: settings, servers, tool policy, the skill index |
+| `metrics.rs` · `doctor.rs` · `config.rs` · `transcript.rs` | Timing, preflight, the server list, the record |
 
 ## Tools
 
-A tool is a Rust `impl Tool` or a line of `ira.toml`. The registry cannot tell
-them apart and neither can the model.
+A tool is a Rust `impl Tool` or an MCP server you add in the settings window.
+The registry cannot tell them apart and neither can the model.
 
-```toml
-[[mcp.server]]
-name      = "calendar"
-transport = "stdio"          # or "http"
-command   = "mcp-calendar"
-only      = ["list_events", "create_event"]
+Open the gear on the orb, or <http://127.0.0.1:8180/settings>, and add a server:
+a program on this machine, or a URL. It connects when you save — no restart —
+and its tools appear under it, each with a switch for whether IRA may use it and
+a line saying what she will do before she does.
 
-# What IRA believes, regardless of what the server says about itself.
-# Anything unlisted is assumed to write, and asks first.
-[mcp.server.tools]
-list_events  = { mutates = false, latency = "fast" }
-create_event = { mutates = true,  latency = "slow", confirm = "Add that to your calendar?" }
-```
+> **Adding a program is a spoken yes.** A `stdio` server is a command IRA runs
+> at every start, so she reads it back to you and waits for an out-loud yes
+> before storing it. Anything that is not a yes leaves nothing saved. The route
+> behind that form is also stricter than `POST /talk`: a request that does not
+> say where it came from is refused, so there is no `curl` equivalent.
 
 Anything that changes state asks out loud first, and **only an explicit yes runs
 it** — silence, ambiguity, and interrupting the question are all refusals. A
 server's own description of a tool is never trusted for this, because a tool that
 calls itself harmless and is not would otherwise walk straight through the gate.
+Mark a tool read-only in the window and it stops asking; a tool nobody has
+marked keeps asking, because *absent* and *safe* are not the same answer.
 
-`latency = "background"` detaches the work: IRA answers immediately, a soft pip
+**Give a server what it needs.** Most want a credential of their own — a GitHub
+token, a database URL. Add it under the server in the window, or:
+
+```bash
+ira mcp env github GITHUB_TOKEN ghp_...
+```
+
+Values go to the keyring, never to a file, and a variable with no value is not
+passed at all rather than passed empty. A hosted server that wants OAuth instead
+gets a **Sign in** button; the token lands in the keyring and refreshes itself.
+
+**Try a tool before you talk to her.** Every connected tool has a *Try it* box
+in the window — typed arguments, raw result. Finding out a server is
+misconfigured mid-sentence is the worst time to find out.
+
+Servers, their per-tool policy and which skills are on live in `ira.local.db`.
+If you have an old `ira.toml`, it is imported once on the first start and then
+never read again ([decisions/0017](docs/decisions/0017-servers-and-skills-are-configured-in-the-window.md)).
+
+### From a terminal
+
+Everything the window does, for provisioning a machine or reaching one over SSH:
+
+```bash
+ira mcp add github stdio npx -y @modelcontextprotocol/server-github
+```
+
+`ira mcp ls · add · env · rm` and `ira skill ls · add · on · off · rm`. These
+write the database and connect nothing — a server added here comes up at the
+next start. They do not ask before saving a command either, because a terminal
+on this machine already is the authorisation.
+
+## Talking to IRA from something else
+
+She is not only a thing that calls tools; she is a thing your tools can call.
+
+```bash
+curl -X POST http://127.0.0.1:8180/say -H 'Content-Type: application/json' -d '{"text": "The build finished."}'
+```
+
+A pip sounds immediately and the words wait until she next has the floor — the
+same path a finished background job takes, so a deploy that lands mid-sentence
+never interrupts you. `GET /state` is a poll for what she is doing; `GET /events`
+is the live stream and is what the screen and the orb both read.
+
+Both are guarded like the talk button: a browser claiming to be elsewhere is
+refused, a client that says nothing — curl, a CI job — is not. Neither can run
+anything. The route that *can*, `POST /settings/admin`, is stricter. Full table:
+[SPEC.md](docs/SPEC.md#the-http-surface).
+
+Setting a tool to run in the background detaches the work: IRA answers immediately, a soft pip
 sounds when it finishes, and the words wait until she next has the floor.
 
 ### Wingman
 
 [Wingman](https://github.com/vedantnimbarte/wingman) is a terminal coding
-agent, and the one capability that is not a line of `ira.toml`: it is an MCP
+agent, and the one capability that is not an MCP server you can add: it is an MCP
 *client*, not a server, so IRA speaks its HTTP API directly
 ([decisions/0012](docs/decisions/0012-wingman-is-a-built-in-not-an-mcp-shim.md)).
 
@@ -142,6 +199,47 @@ it, the tool is never registered and the model is never told about it.
 
 Asking for code by voice is a write, so it asks first, and it is a background
 job, so a turn that takes ten minutes does not hold the conversation open.
+
+## Teaching her something
+
+A skill is one Markdown file in `skills/` beside IRA. The filename is its name,
+the front matter says when to use it, and the rest is instructions:
+
+```markdown
+---
+description: How I write a standup update. Use when asked for one.
+---
+
+Three lines: yesterday, today, blockers. Name people, not tickets.
+Say what is blocked before what is done — that is the only part anyone acts on.
+```
+
+Drop the file in and IRA follows it when it applies — or write it in the
+settings window, which creates the file for you and picks it up immediately.
+Either way there is a switch per skill, and the `skill` tool only exists while
+at least one is on.
+
+The window edits files rather than owning them: a skill stays a `.md` you can
+open in an editor, diff and commit. The database only records which ones exist
+and which are on.
+
+Only the descriptions are in the prompt every turn; a body is fetched by a tool
+call and costs only the turn that needed it. Ten skills of a page each in the
+system prompt would cost more per turn than most turns contain — the same
+reason a server has a switch per tool. Bodies are read once at start-up and held
+in memory, so the tool that serves them takes a name from a fixed list and never
+touches a path.
+
+A skill that needs to carry something — a template, a checklist — can be a
+folder instead: `skills/standup/SKILL.md` with the files beside it. They are
+listed to her and fetched one at a time, so a long template is not in every
+prompt that merely mentions the skill.
+
+Skills are **prompt-level**: text that shapes an answer. Something that *runs* is
+an MCP server, above — and stays one, for the reasons in
+[decisions/0016](docs/decisions/0016-skills-are-markdown-loaded-by-a-tool-call.md).
+Full rules — the caps, what happens with no description, what an empty file does
+— are in [SPEC.md](docs/SPEC.md#skills).
 
 ## The screen
 
@@ -193,14 +291,19 @@ thing IRA says — nothing restarts:
 
 | | |
 |---|---|
-| `ANTHROPIC_API_KEY` · `GROQ_API_KEY` · `IRA_LLM_KEY` | Windows Credential Manager |
-| `IRA_LLM_URL` · `IRA_LLM_MODEL` · `IRA_STT_URL` | `ira.local.toml`, gitignored |
+| `ANTHROPIC_API_KEY` · `GROQ_API_KEY` · `IRA_LLM_KEY` | the OS keyring |
+| `IRA_LLM_URL` · `IRA_LLM_MODEL` · `IRA_STT_URL` | `ira.local.db`, gitignored |
 
-Saved values sit **over** the environment, which still works and still loses to
-them; clearing a field clears it rather than falling back, so there is a way
-back to the default provider from the window. Each field says which of the two
-it is reading, because "saved" and "set in the shell you started her from" look
-identical otherwise, and an empty one says what IRA does instead of it.
+Those two stores are the only places IRA looks. **The environment is not read** —
+it used to be the fallback under both, and a key on a command line ends up in
+shell history, in `ps`, and in whatever CI log echoed the step that set it. The
+keyring is the platform's own: Credential Manager on Windows, Keychain on macOS,
+Secret Service elsewhere. Clearing a field clears it, which is the way back to
+the default provider, and an empty one says what IRA does instead of it.
+
+`ira set <NAME> <VALUE>` writes the same two stores from a terminal, which is how
+the first key gets in: the start-up check for a missing key fires long before
+there is a window to type one into.
 
 Keys never go in a file, and are never read back out — the window is told
 whether one is stored, not what it is, so it cannot show you a key you have
@@ -238,9 +341,9 @@ chat-completions format, which OpenRouter, LM Studio, Ollama, vLLM and llama.cpp
 all speak:
 
 ```powershell
-$env:IRA_LLM_URL   = "https://openrouter.ai/api/v1/chat/completions"
-$env:IRA_LLM_KEY   = "sk-or-..."
-$env:IRA_LLM_MODEL = "anthropic/claude-sonnet-4.5"   # the gateway's id, not Anthropic's
+ira set IRA_LLM_URL   https://openrouter.ai/api/v1/chat/completions
+ira set IRA_LLM_KEY   sk-or-...
+ira set IRA_LLM_MODEL anthropic/claude-sonnet-4.5   # the gateway's id, not Anthropic's
 ```
 
 Whatever the model, keep it fast. Time-to-first-sentence is what you hear — a
@@ -280,8 +383,10 @@ Everything worth tuning is a `const` at the top of `main.rs`.
 | wake threshold | 0.5 | Too low: fires on the TV. Too high: you repeat yourself. |
 
 Every environment variable is listed in
-[SPEC.md](docs/SPEC.md#environment-variables). The ones you are most likely to
-want: `IRA_STT_URL`, `IRA_LLM_URL`, `IRA_PTT`, `IRA_UI`, `IRA_CONFIG`,
+[SPEC.md](docs/SPEC.md#environment-variables), and the six provider settings —
+which are not environment variables — in
+[the section after it](docs/SPEC.md#provider-settings). The ones you are most
+likely to want: `IRA_STT_URL`, `IRA_LLM_URL`, `IRA_PTT`, `IRA_UI`, `IRA_CONFIG`,
 `IRA_TRANSCRIPT`, `IRA_WINGMAN_URL`.
 
 ## Docs
@@ -320,7 +425,7 @@ Kept here rather than buried, because it is the honest shape of the project.
 
 ## Tests
 
-`cargo test` — 70 tests, no network, microphone or API key needed.
+`cargo test` — 86 tests, no network, microphone or API key needed.
 
 They aim at failures that are **silent** rather than loud, because those are the
 ones that survive a code review:
@@ -345,11 +450,8 @@ ones that survive a code review:
   back, which is the whole claim without needing a window.
 - The orb going white. A broken blur, a mask that clips everything and a grey
   palette all still paint a perfectly convincing sphere.
-- A settings value with a quote in it writing a file that will not parse. The
-  failure lands at the *next* start-up, so it looks like settings being
-  forgotten rather than like a bad value.
-- A saved setting that does not win over the environment, or a cleared one that
-  quietly falls back to it.
+- A setting still being read from the environment after the environment stopped
+  being a place IRA reads from, or a cleared one that does not stay cleared.
 
 Tests needing a real service skip with a note rather than fail, so a fresh clone
 passes: the ONNX ones when `models/` is empty, the local-STT one unless
@@ -385,4 +487,4 @@ Each is marked with a `ponytail:` comment where it lives.
 | Cheap linear resampler | Slight aliasing | Only if word-error-rate measurably suffers |
 | Piper respawn on barge-in | ~250 ms before she can speak again | If interruption recovery feels slow — keep a warm spare |
 | Background jobs in memory | Lost on restart, and reported as lost | Jobs routinely outlive the process |
-| Tool results read as returned | Reads like a machine | Hand them to the model to phrase; it costs a turn nobody waits on |
+| No schema versioning | A column cannot change type or meaning | The first change that is not a new table |

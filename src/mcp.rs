@@ -1,15 +1,15 @@
 //! MCP servers, adapted to the one `Tool` trait.
 //!
 //! This is the whole reason the trait exists: after this file, a new capability
-//! is a `[[mcp.server]]` block rather than a code change. The registry cannot
-//! tell an MCP tool from a built-in, and neither can the model.
+//! is a row in `mcp_server` rather than a code change. The registry cannot tell
+//! an MCP tool from a built-in, and neither can the model.
 //!
 //! Lifted in shape from `wingman-mcp`, which already solved the rmcp plumbing.
 //! The difference is what IRA does with a server's claims about itself: nothing.
 //! Descriptions are truncated, and whether a tool changes anything comes from
-//! `ira.toml` alone.
+//! our own `mcp_tool` rows alone.
 
-use crate::config::Server;
+use crate::db::Server;
 use crate::tool::{Latency, Tool, ToolCtx, ToolOutcome, ToolSpec, DESC_MAX};
 use anyhow::{anyhow, Result};
 use rmcp::model::CallToolRequestParams;
@@ -31,7 +31,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 type Service = Arc<RunningService<RoleClient, ()>>;
 
 /// Connects to one server and returns its tools, already adapted.
-async fn connect(cfg: &Server) -> Result<Vec<Arc<dyn Tool>>> {
+pub async fn connect(cfg: &Server) -> Result<Vec<Arc<dyn Tool>>> {
     let service: Service = match cfg.transport.as_str() {
         "stdio" => {
             let command = cfg
@@ -42,6 +42,38 @@ async fn connect(cfg: &Server) -> Result<Vec<Arc<dyn Tool>>> {
             cmd.args(&cfg.args);
             // Otherwise a server's own logging lands in the middle of IRA's.
             cmd.stderr(std::process::Stdio::null());
+            // What this server was given, out of the keyring. Most useful MCP
+            // servers need a credential of their own -- a GitHub token, a
+            // database URL -- and before this the only way to supply one was to
+            // set it in the shell that launched IRA, which is exactly the
+            // pattern 0015 removed for IRA's own keys.
+            //
+            // The child still inherits the rest of the environment: PATH and
+            // friends are how a command is found at all. What it does not
+            // inherit is IRA's keys, which have not been in the environment
+            // since 0015 -- so a server gets what it was given and nothing else
+            // that matters.
+            for name in crate::db::env_names(&cfg.name).unwrap_or_default() {
+                match crate::settings::secret::read(&crate::settings::secret::env_key(
+                    &cfg.name, &name,
+                )) {
+                    Ok(Some(value)) => {
+                        cmd.env(&name, value);
+                    }
+                    // Named but never given a value: pass nothing rather than
+                    // an empty string, which many servers read as "configured".
+                    Ok(None) => tracing::warn!(
+                        server = %cfg.name,
+                        var = %name,
+                        "no value stored for this variable, not passing it"
+                    ),
+                    Err(e) => tracing::error!(
+                        server = %cfg.name,
+                        var = %name,
+                        "could not read it from the keyring: {e:#}"
+                    ),
+                }
+            }
             let process = TokioChildProcess::new(cmd)?;
             Arc::new(().serve(process).await?)
         }
@@ -57,10 +89,22 @@ async fn connect(cfg: &Server) -> Result<Vec<Arc<dyn Tool>>> {
                     reqwest::header::HeaderValue::from_str(v)?,
                 );
             }
-            let transport = StreamableHttpClientTransport::from_config(
-                StreamableHttpClientTransportConfig::with_uri(url).custom_headers(headers),
-            );
-            Arc::new(().serve(transport).await?)
+            let config =
+                StreamableHttpClientTransportConfig::with_uri(url.clone()).custom_headers(headers);
+
+            // A server that has been signed in to gets a client that carries
+            // its token and refreshes it; everything else gets the plain one.
+            // Checked here rather than at save time because a token expires and
+            // a refresh happens on connect, so this is the only place that
+            // knows the truth.
+            match crate::oauth::client(&cfg.name, &url).await? {
+                Some(authed) => Arc::new(
+                    ()
+                        .serve(StreamableHttpClientTransport::with_client(authed, config))
+                        .await?,
+                ),
+                None => Arc::new(().serve(StreamableHttpClientTransport::from_config(config)).await?),
+            }
         }
         other => return Err(anyhow!("unknown transport: {other}")),
     };
@@ -109,22 +153,57 @@ async fn connect(cfg: &Server) -> Result<Vec<Arc<dyn Tool>>> {
     Ok(tools)
 }
 
-/// Connects to every configured server, keeping whatever answers.
+/// Removes a server, and everything it was trusted with.
+///
+/// The keyring first, and deliberately: `db::server_delete` drops the rows that
+/// say *which* variables this server had, so wiping the values afterwards would
+/// have nothing left to look them up by. Deleting the rows and leaving the
+/// secrets behind is the quiet failure this exists to prevent -- a token for a
+/// server nobody can see any more, sitting in Credential Manager.
+///
+/// Every keyring failure is logged and stepped over rather than returned: a
+/// removal that stops half way is worse than one that could not tidy up.
+pub fn forget(server: &str) -> Result<()> {
+    for name in crate::db::env_names(server).unwrap_or_default() {
+        let key = crate::settings::secret::env_key(server, &name);
+        if let Err(e) = crate::settings::secret::delete(&key) {
+            tracing::error!(server, var = %name, "could not remove it from the keyring: {e:#}");
+        }
+    }
+    if let Err(e) = crate::oauth::forget(server) {
+        tracing::error!(server, "could not remove the sign-in: {e:#}");
+    }
+    crate::db::server_delete(server)
+}
+
+/// Connects to one server, giving up after [`CONNECT_TIMEOUT`].
+///
+/// The timeout is here rather than inside `connect` so every caller gets it:
+/// a server that hangs must not hang IRA, and the settings window waits on
+/// this while a person watches a spinner.
+pub async fn connect_within_timeout(cfg: &Server) -> Result<Vec<Arc<dyn Tool>>> {
+    match tokio::time::timeout(CONNECT_TIMEOUT, connect(cfg)).await {
+        Ok(r) => r,
+        Err(_) => Err(anyhow!(
+            "{} did not answer within {}s",
+            cfg.name,
+            CONNECT_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+/// Connects to every enabled server, keeping whatever answers, grouped by the
+/// server it came from so one can later be replaced without the rest.
 ///
 /// A server that is missing, broken or slow is logged and skipped. Refusing to
 /// start because an optional capability is unavailable would make IRA less
 /// reliable than it is without tools at all.
-pub async fn connect_all(servers: &[Server]) -> Vec<Arc<dyn Tool>> {
+pub async fn connect_all(servers: &[Server]) -> Vec<(String, Vec<Arc<dyn Tool>>)> {
     let mut out = Vec::new();
-    for cfg in servers {
-        match tokio::time::timeout(CONNECT_TIMEOUT, connect(cfg)).await {
-            Ok(Ok(tools)) => out.extend(tools),
-            Ok(Err(e)) => tracing::error!(server = %cfg.name, "mcp connect failed: {e}"),
-            Err(_) => tracing::error!(
-                server = %cfg.name,
-                secs = CONNECT_TIMEOUT.as_secs(),
-                "mcp connect timed out"
-            ),
+    for cfg in servers.iter().filter(|s| s.enabled) {
+        match connect_within_timeout(cfg).await {
+            Ok(tools) => out.push((cfg.name.clone(), tools)),
+            Err(e) => tracing::error!(server = %cfg.name, "mcp connect failed: {e:#}"),
         }
     }
     out

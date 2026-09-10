@@ -81,10 +81,14 @@ mod tests {
     ///   IRA_STT_URL=http://127.0.0.1:8231/inference cargo test -- --nocapture
     #[tokio::test]
     async fn local_server_accepts_our_wav() {
-        if std::env::var("IRA_STT_URL").is_err() {
+        // The environment, only here: this is the test's own switch, not a way
+        // to configure IRA. It is handed to the settings layer because that is
+        // the only thing `transcribe` reads.
+        let Ok(url) = std::env::var("IRA_STT_URL") else {
             eprintln!("skipped: set IRA_STT_URL to a running whisper-server");
             return;
-        }
+        };
+        crate::settings::set_in_memory("IRA_STT_URL", &url);
         // A second of silence: whisper returns little, but a malformed
         // container fails the request outright, which is what this checks.
         let out = transcribe(&reqwest::Client::new(), &vec![0.0; 16_000], 16_000).await;

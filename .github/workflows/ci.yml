@@ -135,9 +135,14 @@ jobs:
             exit 1
           }
 
-          IRA_STT_URL=http://127.0.0.1:8231/inference \
-          IRA_LLM_URL=http://127.0.0.1:8299/v1/chat/completions \
-          IRA_LLM_MODEL=stub \
+          # Provider settings are not environment variables any more: they go
+          # to ira.local.db, which is what `ira set` writes. Keys are the other
+          # half of that and go to the OS keyring, which a runner does not have
+          # -- this job needs none, pointing at a local whisper and a stub.
+          ./target/release/ira set IRA_STT_URL http://127.0.0.1:8231/inference
+          ./target/release/ira set IRA_LLM_URL http://127.0.0.1:8299/v1/chat/completions
+          ./target/release/ira set IRA_LLM_MODEL stub
+
           IRA_AUDIO_FILE=corpus/speech-16k.wav \
           IRA_SKIP_WAKE=1 \
           IRA_UI=off \

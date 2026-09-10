@@ -175,18 +175,12 @@ directory.
 | `IRA_WAKEWORD` | `hey_jarvis_v0.1.onnx` | Classifier filename inside `IRA_MODELS` |
 | `IRA_VOICE` | `en_US-amy-medium.onnx` | Piper voice; sample rate read from the sidecar JSON |
 | `IRA_PIPER` | `piper/piper.exe`, or `piper/piper` off Windows | Piper executable |
-| `IRA_STT_URL` | *unset* | Set → local whisper.cpp; unset → Groq |
-| `GROQ_API_KEY` | *required\** | \*Unless `IRA_STT_URL` is set |
-| `IRA_LLM_URL` | *unset* | Set → OpenAI wire format; unset → Anthropic |
-| `IRA_LLM_KEY` | *unset* | Bearer token for `IRA_LLM_URL`; omit for a local server |
-| `IRA_LLM_MODEL` | `claude-sonnet-5` | Required with `IRA_LLM_URL` — gateways name models differently |
-| `ANTHROPIC_API_KEY` | *required\** | \*Unless `IRA_LLM_URL` is set |
 | `IRA_AUDIO_FILE` | *unset* | Replay a WAV instead of opening the mic (see [TEST-PLAN.md](TEST-PLAN.md)) |
 | `IRA_CLOCK` | *unset* | `virtual` drops replay pacing, for CI |
-| `IRA_CONFIG` | `ira.toml` | MCP servers and per-tool policy |
+| `IRA_CONFIG` | `ira.toml` | Imported into the database once, on the first start, then never read |
+| `IRA_SKILLS` | `skills` | Directory of `*.md` skills. Missing is normal — IRA runs without any |
 | `IRA_UI` | `8180` | Screen port. `off` disables it entirely |
 | `IRA_ORB` | *unset* | `off` disables the overlay. Windows only ([0013](decisions/0013-the-orb-is-an-overlay-on-the-same-stream.md)) |
-| `IRA_SETTINGS` | `ira.local.toml` | Where the settings window saves URLs and model ids. Keys are never in it ([0014](decisions/0014-settings-are-editable-while-she-runs.md)) |
 | `IRA_TRANSCRIPT` | `transcript.jsonl` | Where the conversation is recorded. `off` disables it |
 | `IRA_PTT` | *unset* | Set to disarm voice barge-in. Interrupting becomes the talk control, which is what makes speakers usable without echo cancellation |
 | `IRA_SPECULATE_MS` | `200` | Silence after which transcription starts. Above `ENDPOINT_MS` disables speculation, which is how the two are compared on one machine |
@@ -197,11 +191,159 @@ directory.
 | `IRA_WINGMAN_PROJECT` | *first listed* | Which project a coding task goes to. Wingman's own allowlist decides what is reachable |
 | `RUST_LOG` | `ira=info` | Must match the crate name; a rename silently disables logging |
 
-### `ira.toml`
+Provider settings are **not** in this table, and have not been environment
+variables since keys moved to the OS keyring. See the next section.
 
-Optional. Without it IRA runs with its built-ins and nothing else. Unknown keys
-are rejected rather than ignored: a typo in a `mutates` line would otherwise
-disarm the confirmation gate silently.
+### Provider settings
+
+Six values, in two stores. The environment is not consulted for any of them: a
+key on a command line ends up in shell history, in `ps`, and in whatever CI log
+echoed the step that set it ([0014](decisions/0014-settings-are-editable-while-she-runs.md)).
+
+| Setting | Store | Default | Effect |
+|---|---|---|---|
+| `GROQ_API_KEY` | keyring | *required\** | \*Unless `IRA_STT_URL` is set |
+| `ANTHROPIC_API_KEY` | keyring | *required\** | \*Unless `IRA_LLM_URL` is set |
+| `IRA_LLM_KEY` | keyring | *unset* | Bearer token for `IRA_LLM_URL`; omit for a local server |
+| `IRA_STT_URL` | `ira.local.db` | *unset* | Set → local whisper.cpp; unset → Groq |
+| `IRA_LLM_URL` | `ira.local.db` | *unset* | Set → OpenAI wire format; unset → Anthropic |
+| `IRA_LLM_MODEL` | `ira.local.db` | `claude-sonnet-5` | Required with `IRA_LLM_URL` — gateways name models differently |
+
+The keyring is the platform's own: Windows Credential Manager, macOS Keychain,
+or the freedesktop Secret Service. `ira.local.db` is SQLite beside IRA, holding
+one `settings (name, value)` table, and is gitignored.
+
+Either the settings window writes them, or:
+
+```
+ira set ANTHROPIC_API_KEY sk-ant-...
+ira set IRA_LLM_URL http://127.0.0.1:1234/v1/chat/completions
+ira set IRA_LLM_URL                     # no value clears it
+```
+
+`ira set` exists because the fatal start-up check for a missing key fires long
+before there is a settings window to type one into. It never prints a value
+back, and neither does the settings page — both are told only whether one is
+stored.
+
+### The HTTP surface
+
+Everything IRA serves, on loopback only
+([0018](decisions/0018-integrating-other-tools.md)).
+
+| Route | Guard | Does |
+|---|---|---|
+| `GET /` · `GET /settings` | none | The screen, and the settings page |
+| `GET /events` | none | Server-sent events. The integration point for anything watching |
+| `GET /state` | none | One object: state, watchers, tool names, running jobs, skill count |
+| `POST /talk` | states-no-origin allowed | Takes the floor, or interrupts |
+| `POST /say` | states-no-origin allowed | Queues words for when she next has the floor |
+| `POST /settings` | states-no-origin allowed | Saves one of the six provider values |
+| `POST /settings/admin` | **must state its origin** | Servers, tool policy, skills, sign-in |
+| `GET /oauth/callback` | the `state` parameter | Where a provider redirects after a sign-in |
+
+Two guard levels, and the difference is deliberate. The first refuses a browser
+that says it is elsewhere but allows a client that says nothing at all, so the
+documented `curl -X POST /talk` works — right for opening a microphone or
+queueing a sentence, neither of which can run anything. `/settings/admin` can
+make IRA spawn a process, so silence is not evidence there.
+
+`/oauth/callback` cannot be origin-guarded at all: a redirect from a provider is
+cross-site by definition. Its guard is the `state` — issued by IRA, held in
+memory, removed when used, so a replayed redirect matches nothing.
+
+```
+curl -X POST http://127.0.0.1:8180/say \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "The build finished."}'
+```
+
+Never interrupts. A pip sounds immediately and the words wait for the floor, the
+same path a finished background job takes. Capped at 500 characters, and refused
+rather than queued when the queue is full — IRA already having more to say than
+she can get through is not improved by adding to it.
+
+### MCP servers
+
+Added, edited and switched off in the settings window; stored in `ira.local.db`
+and connected without a restart
+([0017](decisions/0017-servers-and-skills-are-configured-in-the-window.md)).
+
+| Field | Meaning |
+|---|---|
+| Name | Letters, digits, dashes, underscores. Keys the rows and prefixes the tool names the model sees |
+| Kind | `stdio` runs a program here; `http` is a Streamable-HTTP URL |
+| Command, Arguments | `stdio` only. The program IRA spawns |
+| URL, Headers | `http` only |
+
+**A stdio server is spoken aloud before it is saved.** The command is a program
+IRA will run at every start, which is a bigger write than most tools make, so it
+goes through the same confirmation gate — an explicit spoken yes, or nothing is
+stored. Turning one back on asks again. The route that saves it is also stricter
+than `POST /talk`: a client that states no origin is refused rather than
+allowed, so the documented `curl -X POST /talk` has no equivalent here.
+
+Per tool, from the same window:
+
+| Control | Effect |
+|---|---|
+| Offer this tool | The `exposed` flag. Every schema is sent to the model on every round, and a tool-calling turn has two rounds |
+| Read-only — do not ask | `mutates = false`. **Absent is not false**: a tool nobody has judged asks first |
+| What she asks | The confirmation question, spoken before it runs |
+| How long it takes | `latency`. Instant means no filler; minutes means the turn does not wait — she answers now and reports when it lands |
+
+Saving a policy reconnects that server, because a tool's spec is built when it
+connects.
+
+**Try it** runs one tool from the window with typed JSON arguments and shows the
+raw result. It bypasses the confirmation gate on purpose: that gate exists
+because the *model* chose the tool, and here a person pressed a button with the
+tool's name on it. The tool's own latency budget still applies, so a hung server
+fails the same way it would inside a turn.
+
+#### What a server is given
+
+Most useful servers need a credential of their own. Names are in `mcp_env`;
+values are in the OS keyring at `IRA/env/<server>/<NAME>` and are never shown
+again — the same split the six provider keys follow.
+
+```
+ira mcp env github GITHUB_TOKEN ghp_...
+ira mcp env github GITHUB_HOST            # recorded, no value yet
+```
+
+A variable named but never given a value is **not passed at all**, rather than
+passed empty — many servers read an empty string as "configured" and then fail
+obscurely. The child still inherits the rest of the environment, because `PATH`
+is how a command is found; what it does not inherit is IRA's own keys, which
+have not been in the environment since 0015.
+
+Changes take effect when the server reconnects. Removing a server wipes its
+keyring entries first, then its rows — the rows are what say which entries
+exist, so the other order would orphan them.
+
+#### Signing in
+
+For a hosted server that wants OAuth rather than a static header. rmcp does
+discovery, dynamic client registration, PKCE, the exchange and the refresh;
+`oauth.rs` supplies the redirect (`http://127.0.0.1:<port>/oauth/callback`), the
+token store (the keyring, rewritten on every refresh), and the table of
+half-finished sign-ins keyed by CSRF state.
+
+Press **Sign in**, finish at the provider in the tab that opens, and the server
+reconnects with a token that refreshes itself. `Forget` deletes the tokens and
+the client registration. Only the client id and the scopes are in the database.
+
+#### `ira.toml`, imported once
+
+Servers used to live here. On the first start after the upgrade an existing file
+is imported into the database and a marker is written, and it is never read
+again — one source of truth, and a file that kept being re-read would fight the
+window every restart. `only` becomes the `exposed` flag on each named tool.
+
+A malformed file is reported and *not* marked as imported, so fixing it and
+restarting picks it up. Unknown keys are rejected rather than ignored: a typo in
+a `mutates` line would otherwise import a server with its gate disarmed.
 
 Windows paths need TOML *literal* strings (single quotes) — a backslash in a
 basic string is an escape.
@@ -236,6 +378,72 @@ url       = "http://127.0.0.1:8765"
 [mcp.server.headers]
 Authorization = "Bearer ..."
 ```
+
+### `skills/`
+
+One Markdown file per skill, in `skills/` beside IRA (or `IRA_SKILLS`). The
+filename is the skill's name; front matter holds a one-line `description`; the
+rest is instructions handed to the model when it asks for them.
+
+```markdown
+---
+description: How I write a standup update. Use when asked for one.
+---
+
+Three lines: yesterday, today, blockers. Name people, not tickets.
+Say what is blocked before what is done — that is the only part anyone acts on.
+```
+
+Skills are **prompt-level**: text, not code. Something that runs is an MCP
+server.
+
+| | |
+|---|---|
+| Name | The filename without `.md`. Not a field, so it cannot disagree with the file |
+| Description | `description:` in front matter. Absent → the first non-blank line of the body |
+| Body | Everything after the front matter. An empty one is not loaded, and says so |
+| Summary cap | 200 bytes — it sits in the prompt on every round of every turn |
+| Body cap | 16 KB, truncated with a note rather than silently |
+| Read | At start-up, and after every change made in the window. No restart |
+| Enabled | A row in `ira.local.db`. A disabled skill is never mentioned to the model |
+
+The model is given the names and descriptions in the `skill` tool's own
+description, and calls `skill(name)` to get a body. Only the summaries are paid
+for every round; a body costs only the turn that asked for it — the same trade
+`only` makes for MCP tools above.
+
+Bodies are held in memory and the tool resolves a name against that list, so its
+arguments contain no path and it performs no file IO. `name` is an `enum` in the
+schema, so the model cannot ask for a skill that does not exist.
+
+**A skill may be a folder instead of a file**, when it carries something:
+
+```text
+skills/standup.md               instructions only
+skills/standup/SKILL.md         instructions, plus the files beside them
+skills/standup/template.md
+```
+
+Files are *listed* to the model and fetched one at a time with
+`skill(name, file)` — the same trade as the bodies themselves, so a 200 KB
+template is not in every prompt that mentions the skill. A skill can only fetch
+its own files: `file` is an enum across every skill in the schema, and the
+membership check happens when it is called. Writing from the window produces the
+flat form unless the folder already exists.
+
+A missing `skills/` directory is normal. The `skill` tool is registered only
+while at least one skill is loaded and on — it appears and disappears with them
+— and an unreadable file is logged and skipped rather than taking the others
+with it.
+
+**The window writes files; the database indexes them.** A row holds the name,
+the path, the summary and whether the skill is on, so the window can list and
+switch skills without opening every file, and so a skill stays a self-contained
+`.md` that an editor and a repository can see. Writing from the window rewrites
+the file's front matter, `skills/` is created if it is not there, and a name
+that is not letters, digits, dashes and underscores is refused before it becomes
+a path. Deleting a skill deletes its file. A row whose file is gone is pruned at
+the next scan.
 
 ### kortex-memory
 

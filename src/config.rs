@@ -1,164 +1,169 @@
-//! `ira.toml`: which MCP servers to connect to, and what IRA believes about
-//! their tools.
+//! Where the MCP server list comes from, and the one-time import of the file it
+//! used to come from.
 //!
-//! The file is optional. Without it IRA runs with its built-ins and nothing
-//! else, which is the state P3 shipped in.
+//! Servers live in `ira.local.db` so the settings window can edit them while
+//! IRA runs ([0017](../docs/decisions/0017-servers-and-skills-are-configured-in-the-window.md)).
+//! `ira.toml` is read exactly once, on the first start after upgrading, and
+//! never again -- there is one source of truth, and a file that keeps being
+//! re-read would fight the window every restart.
 //!
-//! The shape deliberately mirrors Wingman's server block so an entry can be
-//! copied between them, but the per-tool policy is IRA's own and has no
-//! equivalent there -- see [`ToolPolicy`].
+//! The TOML types below exist only for that import. They are the shape 0002
+//! shipped, kept deliberately strict: `deny_unknown_fields` means a typo in a
+//! `mutates` line fails the import loudly rather than silently importing a
+//! server with its confirmation gate off.
 
+use crate::db;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// Set in `settings` once the import has run, so it runs once even if the file
+/// is still there and even if the user then deleted every server it brought in.
+const IMPORTED: &str = "_ira_toml_imported";
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Config {
+struct Toml {
     #[serde(default)]
-    pub mcp: Mcp,
+    mcp: Mcp,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Mcp {
-    /// `[[mcp.server]]` blocks.
+struct Mcp {
     #[serde(default)]
-    pub server: Vec<Server>,
+    server: Vec<TomlServer>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Server {
-    pub name: String,
-    /// `stdio` spawns a child process; `http` uses Streamable-HTTP.
-    pub transport: String,
-    pub command: Option<String>,
+struct TomlServer {
+    name: String,
+    transport: String,
+    command: Option<String>,
     #[serde(default)]
-    pub args: Vec<String>,
-    pub url: Option<String>,
+    args: Vec<String>,
+    url: Option<String>,
     #[serde(default)]
-    pub headers: BTreeMap<String, String>,
-    /// Tools to expose, by their server-side name. Empty means all of them.
-    ///
-    /// Every schema is sent to the model on every round, and a turn that calls
-    /// a tool has two rounds, so a server offering sixteen tools puts sixteen
-    /// schemas in front of the model twice per turn. In a loop measured in
-    /// hundreds of milliseconds that is worth choosing deliberately.
+    headers: BTreeMap<String, String>,
     #[serde(default)]
-    pub only: Vec<String>,
-    /// Per-tool policy, keyed by server-side tool name.
+    only: Vec<String>,
     #[serde(default)]
-    pub tools: BTreeMap<String, ToolPolicy>,
+    tools: BTreeMap<String, TomlPolicy>,
 }
 
-/// What IRA believes about one tool, regardless of what the server says.
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ToolPolicy {
-    /// Whether running it changes anything. Absent means yes.
-    pub mutates: Option<bool>,
-    /// `fast`, `slow` or `background`. Absent means slow.
-    pub latency: Option<String>,
-    /// The question asked before running it.
-    pub confirm: Option<String>,
+struct TomlPolicy {
+    mutates: Option<bool>,
+    latency: Option<String>,
+    confirm: Option<String>,
 }
 
-impl Server {
-    /// The policy for one tool.
-    ///
-    /// Unlisted tools are treated as writes. A server's own description of
-    /// itself is never consulted: a tool that declares itself harmless and is
-    /// not would otherwise walk straight through the confirmation gate. Being
-    /// asked about a harmless tool is a moment's irritation; the other error is
-    /// a sent email. See docs/decisions/0004.
-    pub fn policy(&self, tool: &str) -> ToolPolicy {
-        self.tools.get(tool).cloned().unwrap_or_default()
-    }
-
-    /// Whether a tool should be exposed to the model at all.
-    pub fn exposes(&self, tool: &str) -> bool {
-        self.only.is_empty() || self.only.iter().any(|t| t == tool)
+/// The configured servers, from the database.
+pub fn servers() -> Vec<db::Server> {
+    match db::servers() {
+        Ok(s) => s,
+        // A database IRA cannot read must not stop her answering questions. She
+        // is useful with no tools at all; she is useless if she will not start.
+        Err(e) => {
+            tracing::error!("could not read the server list: {e:#}");
+            Vec::new()
+        }
     }
 }
 
-/// Loads `ira.toml`, or `IRA_CONFIG` if set.
+/// Imports `ira.toml` into the database, once, on the first start after the
+/// window became the way to edit servers.
 ///
-/// A missing file is not an error -- IRA is useful without servers. A malformed
-/// one is: silently ignoring a typo in a `mutates` line would turn the
-/// confirmation gate off without saying so.
-pub fn load() -> Result<Config> {
+/// A missing file is the normal case. A malformed one is reported and skipped:
+/// this runs at start-up, and refusing to boot over a stray quote in a config
+/// file that is no longer the source of truth would be the wrong trade.
+pub fn import_toml_once() {
     let path = PathBuf::from(std::env::var("IRA_CONFIG").unwrap_or_else(|_| "ira.toml".into()));
     if !path.is_file() {
-        return Ok(Config::default());
+        return;
     }
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path.display()))?;
-    let cfg: Config = toml::from_str(&text)
-        .with_context(|| format!("parse {}", path.display()))?;
-    tracing::info!(path = %path.display(), servers = cfg.mcp.server.len(), "config");
-    Ok(cfg)
+    match db::settings_all() {
+        Ok(s) if s.contains_key(IMPORTED) => return,
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!("could not check whether {} was imported: {e:#}", path.display());
+            return;
+        }
+    }
+
+    match import(&path) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(
+            servers = n,
+            path = %path.display(),
+            "imported into ira.local.db -- the file is no longer read, edit servers in the settings window"
+        ),
+        Err(e) => {
+            tracing::error!("could not import {}: {e:#}", path.display());
+            // Deliberately not marked as imported: a file that failed to parse
+            // is one the user will want to fix and have picked up next time.
+            return;
+        }
+    }
+
+    if let Err(e) = db::settings_set(IMPORTED, "1") {
+        tracing::error!("could not record the import, it will run again: {e:#}");
+    }
+}
+
+fn import(path: &std::path::Path) -> Result<usize> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let cfg: Toml =
+        toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+
+    for s in &cfg.mcp.server {
+        db::server_set(&db::Server {
+            name: s.name.clone(),
+            transport: s.transport.clone(),
+            command: s.command.clone(),
+            args: s.args.clone(),
+            url: s.url.clone(),
+            headers: s.headers.clone(),
+            enabled: true,
+            tools: BTreeMap::new(),
+        })?;
+
+        // `only` was a separate list; in the database it is the `exposed` flag
+        // on each tool. A tool named in `only` but with no policy block still
+        // needs a row, or it would be exposed by the default and the list would
+        // have been silently dropped.
+        let named: Vec<&String> = s.only.iter().chain(s.tools.keys()).collect();
+        for tool in named {
+            let p = s.tools.get(tool).cloned().unwrap_or_default();
+            db::tool_policy_set(
+                &s.name,
+                tool,
+                &db::ToolPolicy {
+                    exposed: s.only.is_empty() || s.only.contains(tool),
+                    mutates: p.mutates,
+                    latency: p.latency.clone(),
+                    confirm: p.confirm.clone(),
+                },
+            )?;
+        }
+    }
+    Ok(cfg.mcp.server.len())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn parse(s: &str) -> Config {
+    fn parse(s: &str) -> Toml {
         toml::from_str(s).expect("valid config")
     }
 
-    #[test]
-    fn an_unlisted_tool_is_assumed_to_change_things() {
-        let cfg = parse(
-            r#"
-            [[mcp.server]]
-            name = "calendar"
-            transport = "stdio"
-            command = "mcp-calendar"
-
-            [mcp.server.tools]
-            list_events = { mutates = false, latency = "fast" }
-            "#,
-        );
-        let server = &cfg.mcp.server[0];
-
-        assert_eq!(server.policy("list_events").mutates, Some(false));
-        // The dangerous default: anything we have not vouched for asks first.
-        assert_eq!(server.policy("delete_everything").mutates, None);
-        assert_eq!(server.policy("delete_everything").latency, None);
-    }
-
-    #[test]
-    fn an_empty_only_list_exposes_everything() {
-        let cfg = parse(
-            r#"
-            [[mcp.server]]
-            name = "kortex"
-            transport = "http"
-            url = "http://127.0.0.1:8765"
-            "#,
-        );
-        let server = &cfg.mcp.server[0];
-        assert!(server.exposes("anything"));
-
-        let cfg = parse(
-            r#"
-            [[mcp.server]]
-            name = "kortex"
-            transport = "http"
-            url = "http://127.0.0.1:8765"
-            only = ["recall", "remember"]
-            "#,
-        );
-        let server = &cfg.mcp.server[0];
-        assert!(server.exposes("recall"));
-        assert!(!server.exposes("delete_org"), "only-list did not exclude anything");
-    }
-
-    /// A typo in a policy key must fail loudly. Ignoring it would silently
-    /// disarm the confirmation gate for that tool.
+    /// A typo in a policy key must fail the import loudly. Ignoring it would
+    /// silently bring in a server with the confirmation gate off for that tool.
     #[test]
     fn a_misspelled_key_is_rejected() {
         let bad = r#"
@@ -170,13 +175,43 @@ mod tests {
             [mcp.server.tools]
             send = { mutate = false }
             "#;
-        assert!(toml::from_str::<Config>(bad).is_err(), "typo was accepted");
+        assert!(toml::from_str::<Toml>(bad).is_err(), "typo was accepted");
     }
 
+    /// `only` and `tools` are two ways of naming the same tools, and the import
+    /// has to reconcile them into one `exposed` flag per row. A tool in `only`
+    /// with no policy block still needs a row; a tool with a policy block but
+    /// not in a non-empty `only` must come out hidden.
     #[test]
-    fn no_config_file_is_not_an_error() {
-        // The default is a config with no servers, not a failure.
-        let cfg = Config::default();
-        assert!(cfg.mcp.server.is_empty());
+    fn only_and_tools_become_one_exposed_flag() {
+        let cfg = parse(
+            r#"
+            [[mcp.server]]
+            name = "kortex"
+            transport = "http"
+            url = "http://127.0.0.1:8765"
+            only = ["recall", "remember"]
+
+            [mcp.server.tools]
+            recall = { mutates = false, latency = "fast" }
+            delete_org = { mutates = true }
+            "#,
+        );
+        let s = &cfg.mcp.server[0];
+
+        let named: Vec<&String> = s.only.iter().chain(s.tools.keys()).collect();
+        let exposed = |t: &str| s.only.is_empty() || s.only.contains(&t.to_string());
+
+        assert!(named.iter().any(|n| *n == "remember"), "a bare `only` entry needs a row");
+        assert!(exposed("recall"));
+        assert!(exposed("remember"));
+        assert!(!exposed("delete_org"), "a tool outside `only` must come out hidden");
+        assert_eq!(s.tools["recall"].mutates, Some(false));
+    }
+
+    /// No file, or a file with no servers, is not an error.
+    #[test]
+    fn an_empty_config_is_not_an_error() {
+        assert!(parse("").mcp.server.is_empty());
     }
 }
