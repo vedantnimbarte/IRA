@@ -1122,16 +1122,34 @@ async fn reply_json<W: tokio::io::AsyncWrite + Unpin>(write: &mut W, status: u16
 
 /// The settings window's page.
 ///
-/// Laid out as the two stages of a turn that leave this machine, in the order
-/// they happen, rather than as six equal rows: everything before transcription
-/// already runs here, so hearing and answering is what these values actually
-/// divide into. The thread down the left is the only ornament, and it is
-/// carrying that order.
+/// Three places to be, and a rail down the left that says which one you are in:
+/// the keys and endpoints IRA answers with, the MCP servers she calls tools
+/// from, and the skills she reads. The rail is fixed and only the pane beside
+/// it scrolls, so moving between them is one click from anywhere rather than a
+/// scroll back to the top.
 ///
-/// Values are set in a monospace face and nothing else is, because a key or a
-/// URL is read character by character and that is a legibility need rather than
-/// a label style. No web fonts: IRA runs without a network and a settings page
-/// that fetched a typeface would be the only part of her that did not.
+/// Within keys, hearing and answering are still two blocks in the order a turn
+/// happens, because everything before transcription already runs on this
+/// machine and that is what these six values actually divide into. The rail
+/// groups them; it does not regroup them.
+///
+/// Servers and skills are grids of cards rather than stacked rows. A card is
+/// the smallest thing that can answer "is this working" -- a status dot, what
+/// it is doing, and where it comes from -- and a grid of them fits on one
+/// screen where a stack of expandable rows did not. Opening one replaces the
+/// grid with that server's own page: its form, what it is given, signing in,
+/// and a block per tool. That is far too much to unfold inside a grid cell
+/// without shoving every other card down the page.
+///
+/// The orb's own light is used exactly once, on the rail beside the section you
+/// are in. It used to run down the side of every stage; one ornament that says
+/// where you are is worth more than four that say nothing.
+///
+/// Values are set in a monospace face and nothing else is, because a key, a URL
+/// or a command is read character by character and that is a legibility need
+/// rather than a label style. No web fonts: IRA runs without a network and a
+/// settings page that fetched a typeface would be the only part of her that did
+/// not.
 ///
 /// Served rather than built into the window, because the window is a webview
 /// and this is the thing it shows. Same origin as `POST /settings`, so the
@@ -1145,11 +1163,12 @@ const SETTINGS: &str = r##"<!doctype html>
 <title>IRA — settings</title>
 <style>
   :root {
-    --ground:#eef1f5; --surface:#fff; --sunk:#f5f7fa;
+    --ground:#eef1f5; --rail:#e3e8f0; --surface:#fff; --sunk:#f5f7fa;
     --ink:#131820; --soft:#3f4956; --muted:#78849a; --faint:#9aa5b8;
     --line:#dfe4ec; --edge:#cdd5e2;
     --good:#0d7a68; --bad:#a72f3c; --focus:#2a6df4;
-    /* The orb's own light, sampled from it. Used once, on the thread. */
+    --lift:0 6px 22px rgba(12,18,30,.12);
+    /* The orb's own light, sampled from it. Used once, on the rail. */
     --thread:linear-gradient(180deg,#19a2fe,#7f9bfb,#cc9bfd,#fe84e4,#71fbf0);
     --sans:"Segoe UI Variable Text","Segoe UI Variable","Segoe UI",system-ui,sans-serif;
     --display:"Segoe UI Variable Display","Segoe UI Variable","Segoe UI",system-ui,sans-serif;
@@ -1157,50 +1176,88 @@ const SETTINGS: &str = r##"<!doctype html>
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --ground:#0c1017; --surface:#141a23; --sunk:#10151d;
+      --ground:#0c1017; --rail:#080b11; --surface:#141a23; --sunk:#10151d;
       --ink:#e8ecf2; --soft:#b6c0cf; --muted:#7d8899; --faint:#5f6a7a;
       --line:#222a35; --edge:#2d3745;
       --good:#4fd6c4; --bad:#f08a94; --focus:#6ba2ff;
+      --lift:0 8px 26px rgba(0,0,0,.45);
     }
   }
   * { box-sizing:border-box; }
-  html { background:var(--ground); }
+  /* `.labelled` is a flex box, which outranks the `hidden` attribute the
+     server form uses to put away the fields the other kind of server
+     wants. Hiding wins. */
+  [hidden] { display:none !important; }
+  html, body { height:100%; }
   body {
     margin:0; background:var(--ground); color:var(--ink);
     font:400 14px/1.55 var(--sans);
     -webkit-font-smoothing:antialiased;
+    display:grid; grid-template-columns:236px minmax(0,1fr);
   }
-  .page { max-width:600px; margin:0 auto; padding:36px 40px 44px; }
 
-  /* --- the head ------------------------------------------------------- */
-  h1 {
-    font:300 26px/1.2 var(--display); letter-spacing:-.015em;
-    margin:0 0 6px;
+  /* --- the rail ------------------------------------------------------- */
+  #nav {
+    background:var(--rail); border-right:1px solid var(--line);
+    padding:26px 14px 18px; overflow:auto;
+    display:flex; flex-direction:column; gap:3px;
   }
-  .lede { margin:0; color:var(--muted); font-size:13.5px; max-width:46ch; }
+  .brand {
+    padding:2px 14px 22px; display:flex; flex-direction:column; gap:5px;
+    font:500 11.5px/1 var(--sans); color:var(--muted);
+  }
+  .brand span { font:300 20px/1 var(--display); letter-spacing:-.015em; color:var(--ink); }
+  .nav-item {
+    position:relative; display:flex; align-items:center; gap:10px; width:100%;
+    height:auto; padding:9px 12px 9px 14px; border:0; border-radius:8px; cursor:pointer;
+    background:transparent; color:var(--soft);
+    font:500 13.5px/1.4 var(--sans); text-align:left;
+    transition:background .13s ease, color .13s ease;
+  }
+  .nav-item:hover { background:var(--sunk); color:var(--ink); filter:none; }
+  .nav-item.on { background:var(--surface); color:var(--ink); }
+  /* The one ornament, and it is carrying where you are. */
+  .nav-item.on::before {
+    content:""; position:absolute; left:0; top:8px; bottom:8px; width:3px;
+    border-radius:3px; background:var(--thread);
+  }
+  .nav-count { margin-left:auto; font:400 11.5px/1 var(--mono); color:var(--faint); }
+  .nav-item.on .nav-count { color:var(--muted); }
 
-  /* --- a stage -------------------------------------------------------- */
-  .stage { position:relative; padding:30px 0 0 24px; }
-  /* The thread: the one ornament, and it is carrying the order of a turn. */
-  .stage::before {
-    content:""; position:absolute; left:0; top:36px; bottom:12px; width:2px;
-    border-radius:2px; background:var(--thread); opacity:.85;
+  /* --- the pane ------------------------------------------------------- */
+  #main { overflow:auto; padding:34px 40px 60px; }
+  .pane { max-width:880px; }
+  .detail { max-width:580px; }
+  .pane-head { display:flex; align-items:flex-start; gap:24px; margin:0 0 24px; }
+  .pane-title { flex:1; min-width:0; }
+  h1 { font:300 27px/1.2 var(--display); letter-spacing:-.02em; margin:0 0 7px; }
+  .pane-title p, .detail-sub { margin:0; color:var(--muted); font-size:13.5px; max-width:58ch; }
+  .detail-sub { margin:0 0 20px; }
+  .back {
+    height:auto; background:none; border:0; padding:4px 0; margin:0 0 16px;
+    cursor:pointer; color:var(--muted); font:400 13px/1 var(--sans);
   }
-  .stage:last-of-type::before { bottom:20px; }
-  h2 { font:400 17px/1.3 var(--display); letter-spacing:-.01em; margin:0 0 4px; }
-  .stage > p { margin:0; color:var(--muted); font-size:13px; max-width:52ch; }
+  .back:hover { color:var(--ink); filter:none; }
+  .empty { margin:18px 0 0; color:var(--muted); font-size:13px; max-width:52ch; }
+
+  /* --- a block -------------------------------------------------------- */
+  .block {
+    background:var(--surface); border:1px solid var(--line); border-radius:12px;
+    padding:22px 24px 8px; margin:0 0 16px;
+  }
+  .block > h2 { font:400 17px/1.3 var(--display); letter-spacing:-.01em; margin:0; }
+  .block-about { margin:5px 0 0; color:var(--muted); font-size:12.5px; max-width:56ch; }
 
   /* --- a field -------------------------------------------------------- */
-  .field { padding:18px 0 16px; border-bottom:1px solid var(--line); }
-  .field:first-of-type { padding-top:20px; }
-  .field:last-child { border-bottom:0; padding-bottom:2px; }
+  .field { padding:20px 0 18px; border-bottom:1px solid var(--line); }
+  .field:last-child { border-bottom:0; }
   .head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
   .name { font-size:14px; font-weight:600; color:var(--ink); }
   /* The variable name, because this is what `doctor` and the docs call it. */
   .var { font:400 11.5px/1 var(--mono); color:var(--faint); }
-  .about { margin:2px 0 0; color:var(--muted); font-size:12.5px; line-height:1.45; max-width:54ch; }
+  .about { margin:3px 0 0; color:var(--muted); font-size:12.5px; line-height:1.45; max-width:54ch; }
 
-  .control { display:flex; gap:8px; margin-top:10px; align-items:stretch; }
+  .control { display:flex; gap:8px; margin-top:11px; align-items:stretch; }
   input {
     flex:1 1 auto; min-width:0; height:38px; padding:0 12px;
     border:1px solid var(--edge); border-radius:9px;
@@ -1210,13 +1267,12 @@ const SETTINGS: &str = r##"<!doctype html>
   }
   input::placeholder { color:var(--faint); font-family:var(--sans); font-size:13px; }
   input:hover { border-color:var(--muted); }
-  input:focus { outline:none; border-color:var(--focus); background:var(--surface); }
+  input:focus { outline:none; border-color:var(--focus); background:var(--ground); }
   input.saved { border-color:var(--good); }
 
   /* Actions arrive when you are working on a field, so six of them are not
-     competing for attention while you read. */
-  /* A reserved column, so every box is the same width whether or not its
-     field has something to clear. */
+     competing for attention while you read. A reserved column, so every box is
+     the same width whether or not its field has something to clear. */
   .actions {
     display:flex; gap:8px; flex:0 0 152px; opacity:0; pointer-events:none;
     transform:translateX(-4px);
@@ -1224,7 +1280,7 @@ const SETTINGS: &str = r##"<!doctype html>
   }
   .field.busy .actions { opacity:1; pointer-events:auto; transform:none; }
   button {
-    height:38px; padding:0 15px; border-radius:9px; cursor:pointer;
+    height:38px; padding:0 16px; border-radius:9px; cursor:pointer;
     font:600 13px/1 var(--sans);
     border:1px solid var(--ink); background:var(--ink); color:var(--ground);
     transition:filter .12s ease;
@@ -1232,97 +1288,167 @@ const SETTINGS: &str = r##"<!doctype html>
   button.ghost { background:transparent; color:var(--muted); border-color:var(--edge); font-weight:400; }
   button:hover { filter:brightness(1.12); }
   button.ghost:hover { color:var(--ink); border-color:var(--muted); }
-  button:focus-visible, input:focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+    outline:2px solid var(--focus); outline-offset:2px;
+  }
 
-  .status { margin:7px 0 0; font-size:12.5px; color:var(--muted); min-height:1.3em; }
+  .status { margin:8px 0 0; font-size:12.5px; color:var(--muted); min-height:1.3em; }
   .status.is-set { color:var(--good); }
   .status.is-bad { color:var(--bad); }
 
-  footer {
-    margin-top:30px; padding-top:18px; border-top:1px solid var(--line);
-    color:var(--faint); font-size:12.5px; line-height:1.5; max-width:56ch;
+  .foot {
+    margin:22px 0 0; color:var(--faint); font-size:12.5px; line-height:1.55;
+    max-width:60ch;
   }
-  footer code { font:400 12px/1 var(--mono); color:var(--muted); }
+  .foot code { font:400 12px/1 var(--mono); color:var(--muted); }
 
-  /* --- rows, forms and switches: the servers and skills stages -------- */
+  /* --- the grids ------------------------------------------------------ */
+  .grid {
+    display:grid; grid-template-columns:repeat(auto-fill,minmax(218px,1fr));
+    gap:14px; align-items:stretch;
+  }
+  .card {
+    position:relative; display:flex; flex-direction:column; gap:7px;
+    background:var(--surface); border:1px solid var(--line); border-radius:12px;
+    padding:15px 16px 13px; min-height:134px;
+    transition:border-color .14s ease;
+  }
+  .card:hover { border-color:var(--edge); }
+  .card:focus-within { border-color:var(--focus); }
+  .card-top { display:flex; align-items:center; gap:9px; }
+  .dot { flex:none; width:7px; height:7px; border-radius:50%; background:var(--faint); }
+  .dot.live { background:var(--good); }
+  .dot.down { background:var(--bad); }
+  /* The name opens the card, stretched over the whole tile -- so the switch is
+     the only thing in it that does something else. */
+  .card-open {
+    flex:1; min-width:0; height:auto; padding:0; border:0; border-radius:0;
+    background:none; color:var(--ink); cursor:pointer; text-align:left;
+    font:600 14px/1.35 var(--sans);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .card-open:hover { filter:none; text-decoration:underline; }
+  .card-open::after { content:""; position:absolute; inset:0; border-radius:12px; }
+  .card .switch { position:relative; z-index:1; }
+  .card-state { margin:0; font-size:12.5px; color:var(--soft); }
+  .card-desc {
+    margin:0; font-size:12.5px; color:var(--muted);
+    display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;
+  }
+  .card-where {
+    margin:0; font:400 11.5px/1.45 var(--mono); color:var(--faint); overflow-wrap:anywhere;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
+  }
+  .card-foot {
+    margin:auto 0 0; padding-top:11px; border-top:1px solid var(--line);
+    font-size:11.5px; color:var(--muted); overflow-wrap:anywhere;
+  }
+  .card-foot.path { font:400 11px/1.4 var(--mono); color:var(--faint); }
+
+  /* --- rows, forms and switches --------------------------------------- */
   .row {
     display:flex; align-items:flex-start; gap:12px;
     padding:11px 0; border-bottom:1px solid var(--line);
   }
   .row-text { flex:1; min-width:0; display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 10px; }
   .row-name { font:500 13.5px/1.4 var(--sans); }
-  .row-sub {
-    flex-basis:100%; color:var(--muted); font-size:12.5px;
-    overflow-wrap:anywhere;
-  }
+  .row-sub { flex-basis:100%; color:var(--muted); font-size:12.5px; overflow-wrap:anywhere; }
   .link {
-    background:none; border:0; padding:0; cursor:pointer;
+    height:auto; background:none; border:0; padding:0; cursor:pointer;
     color:var(--focus); font:400 12.5px/1.4 var(--sans);
   }
-  .link:hover { text-decoration:underline; }
+  .link:hover { text-decoration:underline; filter:none; }
   /* A switch, not a checkbox: this is on/off for a whole capability, and it
      is the control that decides whether a program runs at all. */
   .switch {
-    flex:none; width:34px; height:20px; border-radius:10px; cursor:pointer;
+    flex:none; width:34px; height:20px; padding:0; border-radius:10px; cursor:pointer;
     border:1px solid var(--edge); background:var(--sunk); position:relative;
     transition:background .15s, border-color .15s;
   }
+  .switch:hover { filter:none; border-color:var(--muted); }
   .switch::after {
     content:""; position:absolute; top:2px; left:2px; width:14px; height:14px;
     border-radius:50%; background:var(--muted); transition:transform .15s, background .15s;
   }
   .switch.on { background:var(--good); border-color:var(--good); }
   .switch.on::after { transform:translateX(14px); background:#fff; }
-  .switch:focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
 
-  .panel { padding:4px 0 14px; border-bottom:1px solid var(--line); }
-  .form { display:flex; flex-direction:column; gap:10px; padding:12px 0; }
-  .labelled { display:flex; flex-direction:column; gap:4px; }
+  .form { display:flex; flex-direction:column; gap:11px; padding:14px 0 16px; }
+  .labelled { display:flex; flex-direction:column; gap:5px; }
   .small { color:var(--muted); font-size:12px; }
   .labelled input, .labelled textarea, .form select {
-    width:100%; padding:7px 9px; border:1px solid var(--edge); border-radius:6px;
-    background:var(--surface); color:var(--ink); font:400 12.5px/1.5 var(--mono);
+    width:100%; height:auto; padding:8px 10px; border:1px solid var(--edge); border-radius:8px;
+    background:var(--ground); color:var(--ink); font:400 12.5px/1.5 var(--mono);
   }
-  .labelled textarea { resize:vertical; min-height:64px; }
+  .labelled textarea { resize:vertical; min-height:72px; }
   .labelled input:disabled { color:var(--muted); background:var(--sunk); }
-  .form-actions { display:flex; gap:8px; }
-  .check { display:flex; align-items:center; gap:7px; font-size:12.5px; color:var(--soft); }
-  .check input { margin:0; }
-  .tool { padding:8px 0 8px 14px; border-left:2px solid var(--line); margin:6px 0; }
-  .warn { margin:2px 0 0; color:var(--bad); font-size:12.5px; max-width:52ch; }
-  .note { margin:14px 0 0; min-height:1.4em; color:var(--muted); font-size:12.5px; }
-  .note.is-set { color:var(--good); }
-  .note.is-bad { color:var(--bad); }
-  /* A tool'"'"'s raw answer. Monospace and scrollable because it is JSON as often
+  .form-actions { display:flex; gap:8px; padding-top:2px; }
+  .check { display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--soft); }
+  .check input { flex:none; width:auto; height:auto; margin:0; }
+  .tool { padding:12px 0 12px 14px; border-left:2px solid var(--line); margin:8px 0; }
+  .warn { margin:4px 0 0; color:var(--bad); font-size:12.5px; max-width:52ch; }
+  /* A tool's raw answer. Monospace and scrollable because it is JSON as often
      as it is prose, and wrapping it would make a one-line result three. */
   .result {
-    margin:8px 0 0; padding:8px 10px; max-height:14em; overflow:auto;
-    background:var(--sunk); border:1px solid var(--line); border-radius:6px;
+    margin:10px 0 0; padding:9px 11px; max-height:14em; overflow:auto;
+    background:var(--sunk); border:1px solid var(--line); border-radius:8px;
     font:400 12px/1.5 var(--mono); white-space:pre-wrap; overflow-wrap:anywhere;
   }
   .result.is-bad { color:var(--bad); }
 
+  /* What just happened, where it can be read from anywhere in a long pane. */
+  #note {
+    position:fixed; right:22px; bottom:18px; max-width:340px; margin:0;
+    padding:10px 14px; border-radius:10px;
+    border:1px solid var(--line); background:var(--surface); box-shadow:var(--lift);
+    color:var(--soft); font-size:12.5px;
+  }
+  #note:empty { display:none; }
+  #note.is-set { color:var(--good); border-color:var(--good); }
+  #note.is-bad { color:var(--bad); border-color:var(--bad); }
+
   @media (prefers-reduced-motion:reduce) {
     * { transition:none !important; }
   }
-  @media (max-width:520px) {
-    .page { padding:36px 22px 48px; }
+  @media (max-width:760px) {
+    body { grid-template-columns:1fr; grid-template-rows:auto minmax(0,1fr); }
+    #nav {
+      flex-direction:row; align-items:center; gap:6px; overflow-x:auto;
+      border-right:0; border-bottom:1px solid var(--line); padding:10px 12px;
+    }
+    .brand { display:none; }
+    .nav-item { width:auto; flex:none; padding:8px 12px; }
+    .nav-item.on::before { top:auto; bottom:2px; left:10px; right:10px; width:auto; height:3px; }
+    #main { padding:26px 20px 52px; }
     .control { flex-wrap:wrap; }
     .actions { opacity:1; pointer-events:auto; transform:none; }
   }
 </style>
 </head>
 <body>
-<div class="page">
-  <h1>Settings</h1>
-  <p class="lede">Saved here and used by the next thing IRA says. Nothing restarts.</p>
-  <div id="stages"></div>
-  <p class="note" id="note" role="status"></p>
-  <footer id="foot"></footer>
-</div>
+<nav id="nav" aria-label="Settings sections"></nav>
+<main id="main"></main>
+<p id="note" role="status"></p>
 <script>
-const stages = document.getElementById('stages');
+const nav = document.getElementById('nav');
+const main = document.getElementById('main');
 let state = { groups: [], fields: [], servers: [], skills: [], live: false };
+
+// Where you are. Kept outside `draw` because every save answers with the whole
+// state and redraws from it, and that must put you back where you were rather
+// than at the top of the first section.
+let view = { pane: 'keys', server: null, skill: null };
+
+// The count beside each section is live state, not decoration: it is the
+// answer to the question you opened settings to ask.
+const PANES = [
+  { id: 'keys', label: 'AI keys',
+    tally: () => state.fields.filter(f => f.set).length + ' set' },
+  { id: 'servers', label: 'MCP servers',
+    tally: () => state.servers.filter(s => s.enabled && s.connected).length + ' live' },
+  { id: 'skills', label: 'Skills',
+    tally: () => state.skills.filter(s => s.enabled).length + ' on' },
+];
 
 function el(tag, cls, text) {
   const n = document.createElement(tag);
@@ -1330,6 +1456,53 @@ function el(tag, cls, text) {
   if (text !== undefined) n.textContent = text;
   return n;
 }
+
+function go(pane, server, skill) {
+  view = {
+    pane,
+    server: server === undefined ? null : server,
+    skill: skill === undefined ? null : skill,
+  };
+  draw();
+  main.scrollTop = 0;
+}
+
+function head(title, about, action) {
+  const h = el('header', 'pane-head');
+  const t = el('div', 'pane-title');
+  t.append(el('h1', null, title), el('p', null, about));
+  h.append(t);
+  if (action) h.append(action);
+  return h;
+}
+
+function block(title, about) {
+  const b = el('section', 'block');
+  if (title) b.append(el('h2', null, title));
+  if (about) b.append(el('p', 'block-about', about));
+  return b;
+}
+
+function backTo(label, pane) {
+  const b = el('button', 'back', '← ' + label);
+  b.onclick = () => go(pane);
+  return b;
+}
+
+function toggle(label, on, onToggle) {
+  const sw = el('button', 'switch' + (on ? ' on' : ''));
+  sw.setAttribute('role', 'switch');
+  sw.setAttribute('aria-checked', on ? 'true' : 'false');
+  sw.setAttribute('aria-label', (on ? 'Turn off ' : 'Turn on ') + label);
+  sw.onclick = onToggle;
+  return sw;
+}
+
+// --- AI keys -----------------------------------------------------------
+//
+// Still two blocks in the order a turn happens. Everything before
+// transcription already runs on this machine, so hearing and answering is what
+// these six values divide into.
 
 // What the line under a box says. A field that is empty says what IRA does
 // instead of it, rather than only that it is empty.
@@ -1344,9 +1517,9 @@ function status(f) {
 function field(f) {
   const row = el('div', 'field');
 
-  const head = el('div', 'head');
-  head.append(el('span', 'name', f.label), el('span', 'var', f.name));
-  row.append(head);
+  const h = el('div', 'head');
+  h.append(el('span', 'name', f.label), el('span', 'var', f.name));
+  row.append(h);
   if (f.about) row.append(el('p', 'about', f.about));
 
   const control = el('div', 'control');
@@ -1394,20 +1567,39 @@ function field(f) {
   return row;
 }
 
+function keysPane() {
+  const pane = el('div', 'pane');
+  pane.append(head('AI keys',
+    'What IRA hears with and answers with. Saved here and used by the next thing she says. Nothing restarts.'));
+  for (const g of state.groups) {
+    const b = block(g.title, g.about);
+    for (const f of state.fields.filter(f => f.group === g.id)) b.append(field(f));
+    pane.append(b);
+  }
+  const foot = el('p', 'foot');
+  foot.innerHTML =
+    'Keys are held by the operating system’s keyring — Credential Manager, '
+    + 'Keychain, Secret Service — and never written to a file. Everything else '
+    + 'is saved in <code>ira.local.db</code> beside IRA. These are the only two '
+    + 'places IRA reads from: environment variables are not consulted.';
+  pane.append(foot);
+  return pane;
+}
+
 // --- servers and skills ------------------------------------------------
 //
-// Both stages are lists of things that can be added, so both are: a row per
-// item, a form that opens on the one you are editing, and one button that
-// opens an empty form. No modal, no route change -- the window is small and
-// a dialog inside a webview inside an overlay is a lot of layers for a form
-// with four boxes.
+// Both are lists of things that can be added, so both are a grid of cards and
+// a page per card. A card is the smallest thing that answers "is this
+// working"; opening one replaces the grid, because a server's form, its
+// environment, its sign-in and a block per tool is far more than fits under a
+// grid cell without pushing every other card down the page.
 
 // Everything the page changes about servers and skills goes through one
 // endpoint, which answers with the whole state. So every action ends the same
 // way: redraw from what came back, and say what happened.
 async function admin(payload, note) {
   const line = document.getElementById('note');
-  line.className = 'note';
+  line.className = '';
   line.textContent = note || 'Working…';
   try {
     const r = await fetch('/settings/admin', {
@@ -1417,20 +1609,19 @@ async function admin(payload, note) {
     });
     const answer = await r.json();
     if (!r.ok || answer.error) {
-      line.className = 'note is-bad';
+      line.className = 'is-bad';
       line.textContent = answer.error || ('Failed: ' + r.status + '.');
       return null;
     }
     state = answer;
-    const keep = window.scrollY;
+    const keep = main.scrollTop;
     draw();
-    window.scrollTo(0, keep);
-    const after = document.getElementById('note');
-    after.className = 'note is-set';
-    after.textContent = answer.note || 'Saved.';
+    main.scrollTop = keep;
+    line.className = 'is-set';
+    line.textContent = answer.note || 'Saved.';
     return answer;
   } catch (e) {
-    line.className = 'note is-bad';
+    line.className = 'is-bad';
     line.textContent = 'IRA is not answering.';
     return null;
   }
@@ -1440,13 +1631,107 @@ function row(title, subtitle, on, onToggle) {
   const r = el('div', 'row');
   const text = el('div', 'row-text');
   text.append(el('span', 'row-name', title), el('span', 'row-sub', subtitle));
-  const sw = el('button', 'switch' + (on ? ' on' : ''));
-  sw.setAttribute('role', 'switch');
-  sw.setAttribute('aria-checked', on ? 'true' : 'false');
-  sw.setAttribute('aria-label', (on ? 'Turn off ' : 'Turn on ') + title);
-  sw.onclick = onToggle;
-  r.append(text, sw);
+  r.append(text, toggle(title, on, onToggle));
   return r;
+}
+
+// What this server is doing, in the order you would ask it: is it on, did it
+// answer, and how much of what it offers has IRA actually been given.
+function serverState(s) {
+  if (!s.enabled) return 'Off. Nothing is run.';
+  if (!s.connected) return 'Nothing answered.';
+  const n = s.tools.length;
+  if (!n) return 'Connected, no tools.';
+  const offered = s.tools.filter(t => t.exposed).length;
+  return n + (n === 1 ? ' tool, ' : ' tools, ') + offered + ' offered';
+}
+
+function serverCard(s) {
+  const c = el('article', 'card');
+  const top = el('div', 'card-top');
+  const open = el('button', 'card-open', s.name);
+  open.onclick = () => go('servers', s.name);
+  top.append(
+    el('span', 'dot' + (!s.enabled ? '' : s.connected ? ' live' : ' down')),
+    open,
+    toggle(s.name, s.enabled, () => admin(
+      { op: 'server_toggle', name: s.name, on: !s.enabled },
+      s.enabled ? 'Turning off…' : 'Connecting…')));
+  c.append(top, el('p', 'card-state', serverState(s)));
+
+  const where = s.transport === 'stdio' ? (s.command || '') : (s.url || '');
+  if (where) c.append(el('p', 'card-where', where));
+  c.append(el('p', 'card-foot',
+    s.transport === 'stdio' ? 'A program on this machine' : 'A URL'));
+  return c;
+}
+
+function serversPane() {
+  if (view.server !== null) return serverDetail(view.server);
+
+  const pane = el('div', 'pane');
+  const add = el('button', null, 'Add a server');
+  add.onclick = () => go('servers', '');
+  pane.append(head('MCP servers',
+    'Each one is a program or a URL that brings tools IRA can call. You decide which of them she may use, and which she may use without asking.',
+    add));
+
+  const grid = el('div', 'grid');
+  for (const s of state.servers) grid.append(serverCard(s));
+  pane.append(grid);
+  if (!state.servers.length) {
+    pane.append(el('p', 'empty',
+      'No servers yet. Add one and IRA gains its tools the moment it answers.'));
+  }
+  return pane;
+}
+
+function serverDetail(name) {
+  const pane = el('div', 'pane detail');
+  pane.append(backTo('MCP servers', 'servers'));
+
+  if (name === '') {
+    pane.append(el('h1', null, 'Add a server'),
+      el('p', 'detail-sub',
+        'A program IRA runs, or a URL she calls. Its tools arrive when it connects.'));
+    const b = block();
+    b.append(serverForm(null));
+    pane.append(b);
+    return pane;
+  }
+
+  const s = state.servers.find(x => x.name === name);
+  // Removed while you were looking at it. The grid is where to be.
+  if (!s) { view.server = null; return serversPane(); }
+
+  pane.append(el('h1', null, s.name), el('p', 'detail-sub', serverState(s)));
+
+  const conn = block('Connection');
+  conn.append(serverForm(s));
+  pane.append(conn);
+
+  const env = block('What it is given',
+    'Values go to the keyring and are never shown again. Reconnect for a change here to take effect.');
+  env.append(envBlock(s));
+  pane.append(env);
+
+  if (s.transport === 'http') {
+    const sign = block('Signing in', 'Only needed if this server asks you to.');
+    sign.append(signInBlock(s));
+    pane.append(sign);
+  }
+
+  const tools = block('Tools',
+    'Which of them IRA may use, and which she may use without asking.');
+  if (s.enabled && !s.connected) {
+    tools.append(el('p', 'warn',
+      'Nothing answered, so there are no tools to configure. Fix the connection above and save to try again.'));
+  } else if (!s.tools.length) {
+    tools.append(el('p', 'row-sub', 'This server offers none.'));
+  }
+  for (const t of s.tools) tools.append(toolRow(s.name, t));
+  pane.append(tools);
+  return pane;
 }
 
 function serverForm(s) {
@@ -1472,12 +1757,16 @@ function serverForm(s) {
   const kindRow = el('label', 'labelled');
   kindRow.append(el('span', 'small', 'Kind'), kind);
 
+  const warning = el('p', 'warn',
+    'A program here is run by IRA every time she starts. She will read it back to you and wait for a spoken yes before saving it.');
+
   function showKind() {
     const stdio = kind.value === 'stdio';
     command.wrap.hidden = !stdio;
     args.wrap.hidden = !stdio;
     url.wrap.hidden = stdio;
     headers.wrap.hidden = stdio;
+    warning.hidden = !stdio;
   }
   kind.onchange = showKind;
 
@@ -1501,17 +1790,15 @@ function serverForm(s) {
     const remove = el('button', 'ghost', 'Remove');
     remove.onclick = () => {
       if (confirm('Remove ' + s.name + '? Its tools go with it.')) {
+        view.server = null;
         admin({ op: 'server_delete', name: s.name }, 'Removing…');
       }
     };
     actions.append(remove);
   }
 
-  form.append(name.wrap, kindRow, command.wrap, args.wrap, url.wrap, headers.wrap, actions);
+  form.append(name.wrap, kindRow, command.wrap, args.wrap, url.wrap, headers.wrap, actions, warning);
   showKind();
-  if (kind.value === 'stdio') {
-    form.append(el('p', 'warn', 'A program here is run by IRA every time she starts. She will read it back to you and wait for a spoken yes before saving it.'));
-  }
   return form;
 }
 
@@ -1519,24 +1806,21 @@ function serverForm(s) {
 // form, so it says what each choice costs rather than only what it is called.
 function toolRow(server, t) {
   const wrap = el('div', 'tool');
-  const head = el('div', 'row');
+  const h = el('div', 'row');
   const text = el('div', 'row-text');
   text.append(el('span', 'row-name', t.name),
     el('span', 'row-sub', t.mutates === false ? 'Runs without asking.'
       : t.mutates === true ? 'Asks first — you said it changes things.'
       : 'Asks first — nobody has said whether it changes anything.'));
-  const sw = el('button', 'switch' + (t.exposed ? ' on' : ''));
-  sw.setAttribute('role', 'switch');
-  sw.setAttribute('aria-checked', t.exposed ? 'true' : 'false');
-  sw.setAttribute('aria-label', (t.exposed ? 'Hide ' : 'Offer ') + t.name);
-  sw.onclick = () => admin({
+  h.append(text, toggle(t.name, t.exposed, () => admin({
     op: 'tool_policy', server, tool: t.name,
     exposed: !t.exposed, mutates: t.mutates, latency: t.latency, confirm: t.confirm,
-  }, t.exposed ? 'Hiding…' : 'Offering…');
-  head.append(text, sw);
-  wrap.append(head);
+  }, t.exposed ? 'Hiding…' : 'Offering…')));
+  wrap.append(h);
 
   if (!t.exposed) return wrap;
+
+  const form = el('div', 'form');
 
   const ask = el('label', 'check');
   const cb = el('input');
@@ -1548,7 +1832,7 @@ function toolRow(server, t) {
     latency: t.latency, confirm: t.confirm,
   }, 'Saving…');
   ask.append(cb, el('span', null, 'Read-only — do not ask before running it'));
-  wrap.append(ask);
+  form.append(ask);
 
   if (t.mutates !== false) {
     const q = box('What she asks', t.confirm || '', 'Add that to your calendar?');
@@ -1557,7 +1841,7 @@ function toolRow(server, t) {
       exposed: true, mutates: t.mutates, latency: t.latency,
       confirm: q.input.value.trim(),
     }, 'Saving…');
-    wrap.append(q.wrap);
+    form.append(q.wrap);
   }
 
   // How long it may take, which decides whether IRA fills the silence and
@@ -1579,7 +1863,7 @@ function toolRow(server, t) {
   }, 'Saving…');
   const paceRow = el('label', 'labelled');
   paceRow.append(el('span', 'small', 'How long it takes'), pace);
-  wrap.append(paceRow);
+  form.append(paceRow);
 
   // Run it now, without talking to her. Finding out a tool is misconfigured
   // mid-sentence is the worst time to find out.
@@ -1607,17 +1891,17 @@ function toolRow(server, t) {
   };
   const tryRow = el('div', 'form-actions');
   tryRow.append(run);
-  wrap.append(args.wrap, tryRow, out);
+  form.append(args.wrap, tryRow, out);
+  wrap.append(form);
   return wrap;
 }
 
 // What this server is given. Values go to the keyring and are never shown
-// again, exactly like the six provider keys above.
+// again, exactly like the provider keys.
 function envBlock(s) {
-  const wrap = el('div', 'tool');
-  wrap.append(el('p', 'small', 'What it is given'));
+  const wrap = el('div');
   if (!s.env.length) {
-    wrap.append(el('p', 'row-sub', 'Nothing. Most servers need a token or a URL of their own.'));
+    wrap.append(el('p', 'row-sub', 'Nothing yet. Most servers need a token or a URL of their own.'));
   }
   for (const v of s.env) {
     const r = el('div', 'row');
@@ -1631,6 +1915,7 @@ function envBlock(s) {
     wrap.append(r);
   }
 
+  const form = el('div', 'form');
   const name = box('Name', '', 'GITHUB_TOKEN');
   const value = box('Value', '', 'Stored in the keyring, never in a file');
   value.input.type = 'password';
@@ -1641,24 +1926,23 @@ function envBlock(s) {
   }, 'Saving…');
   const actions = el('div', 'form-actions');
   actions.append(add);
-  wrap.append(name.wrap, value.wrap, actions);
-  wrap.append(el('p', 'row-sub', 'Reconnect the server for a change here to take effect.'));
+  form.append(name.wrap, value.wrap, actions);
+  wrap.append(form);
   return wrap;
 }
 
 // Signing in, for a hosted server that wants OAuth rather than a header.
 function signInBlock(s) {
-  const wrap = el('div', 'tool');
-  wrap.append(el('p', 'small', 'Signing in'));
+  const wrap = el('div', 'form');
   wrap.append(el('p', 'row-sub', s.signed_in
     ? 'Signed in. The token is in the keyring and refreshes itself.'
-    : 'Not signed in. Only needed if this server asks you to.'));
+    : 'Not signed in.'));
 
   const actions = el('div', 'form-actions');
-  const go = el('button', null, s.signed_in ? 'Sign in again' : 'Sign in');
-  go.onclick = async () => {
+  const begin = el('button', null, s.signed_in ? 'Sign in again' : 'Sign in');
+  begin.onclick = async () => {
     const line = document.getElementById('note');
-    line.className = 'note';
+    line.className = '';
     line.textContent = 'Asking ' + s.name + ' how to sign in…';
     const r = await fetch('/settings/admin', {
       method: 'POST',
@@ -1667,17 +1951,17 @@ function signInBlock(s) {
     });
     const answer = await r.json();
     if (!r.ok || answer.error) {
-      line.className = 'note is-bad';
+      line.className = 'is-bad';
       line.textContent = answer.error || 'That did not work.';
       return;
     }
     // A new tab, not this one: losing the settings page mid-sign-in would
     // leave you looking at a provider with no way back.
-    line.className = 'note';
+    line.className = '';
     line.textContent = 'Finish signing in in the tab that just opened.';
     window.open(answer.open, '_blank', 'noopener');
   };
-  actions.append(go);
+  actions.append(begin);
   if (s.signed_in) {
     const forget = el('button', 'ghost', 'Forget');
     forget.onclick = () => admin({ op: 'oauth_forget', name: s.name }, 'Forgetting…');
@@ -1687,84 +1971,86 @@ function signInBlock(s) {
   return wrap;
 }
 
-function serversStage() {
-  const stage = el('section', 'stage');
-  stage.append(el('h2', null, 'Tools'),
-    el('p', null, 'MCP servers. Each one brings tools IRA can call; you decide which of them she may use, and which she may use without asking.'));
+// --- skills ------------------------------------------------------------
 
-  for (const s of state.servers) {
-    const where = s.transport === 'stdio' ? (s.command || '') : (s.url || '');
-    const status = !s.enabled ? 'Off. ' + where
-      : s.connected ? s.tools.length + (s.tools.length === 1 ? ' tool. ' : ' tools. ') + where
-      : 'Not connected. ' + where;
-    const r = row(s.name, status, s.enabled,
-      () => admin({ op: 'server_toggle', name: s.name, on: !s.enabled },
-        s.enabled ? 'Turning off…' : 'Connecting…'));
-
-    const open = el('button', 'link', 'Edit');
-    const panel = el('div', 'panel');
-    panel.hidden = true;
-    open.onclick = () => { panel.hidden = !panel.hidden; };
-    r.querySelector('.row-text').append(open);
-
-    panel.append(serverForm(s));
-    panel.append(envBlock(s));
-    if (s.transport === 'http') panel.append(signInBlock(s));
-    for (const t of s.tools) panel.append(toolRow(s.name, t));
-    if (s.enabled && !s.connected) {
-      panel.append(el('p', 'warn', 'Nothing answered, so there are no tools to configure. Fix it above and save to try again.'));
-    }
-    stage.append(r, panel);
-  }
-
-  const add = el('button', 'link', '+ Add a server');
-  const adding = el('div', 'panel');
-  adding.hidden = true;
-  add.onclick = () => {
-    adding.hidden = !adding.hidden;
-    if (!adding.hidden) { adding.replaceChildren(serverForm(null)); }
-  };
-  stage.append(add, adding);
-  return stage;
+function skillCard(s) {
+  const c = el('article', 'card');
+  const top = el('div', 'card-top');
+  const open = el('button', 'card-open', s.name);
+  open.onclick = () => go('skills', null, s.name);
+  top.append(
+    el('span', 'dot' + (s.enabled ? ' live' : '')),
+    open,
+    toggle(s.name, s.enabled, () => admin(
+      { op: 'skill_toggle', name: s.name, on: !s.enabled },
+      s.enabled ? 'Turning off…' : 'Turning on…')));
+  c.append(top);
+  c.append(el('p', 'card-desc', s.description
+    || 'No description, so IRA has only the name to go on.'));
+  c.append(el('p', 'card-foot path', s.path));
+  return c;
 }
 
-function skillsStage() {
-  const stage = el('section', 'stage');
-  stage.append(el('h2', null, 'Skills'),
-    el('p', null, 'Instructions in your own words, for a kind of task. IRA is shown the names and descriptions, and reads one in full when it applies.'));
+function skillsPane() {
+  if (view.skill !== null) return skillDetail(view.skill);
 
-  for (const s of state.skills) {
-    const r = row(s.name, s.description || s.path, s.enabled,
-      () => admin({ op: 'skill_toggle', name: s.name, on: !s.enabled },
-        s.enabled ? 'Turning off…' : 'Turning on…'));
-    const open = el('button', 'link', 'Edit');
-    const panel = el('div', 'panel');
-    panel.hidden = true;
-    open.onclick = async () => {
-      panel.hidden = !panel.hidden;
-      if (panel.hidden) return;
-      panel.replaceChildren(el('p', 'row-sub', 'Reading ' + s.path + '…'));
-      const r2 = await fetch('/settings/admin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ op: 'skill_body', name: s.name }),
-      });
-      const answer = await r2.json();
-      panel.replaceChildren(skillForm(s, answer.text || ''));
-    };
-    r.querySelector('.row-text').append(open);
-    stage.append(r, panel);
+  const pane = el('div', 'pane');
+  const add = el('button', null, 'Write a skill');
+  add.onclick = () => go('skills', null, '');
+  pane.append(head('Skills',
+    'Instructions in your own words, for a kind of task. IRA is shown every name and description, and reads one in full when it applies.',
+    add));
+
+  const grid = el('div', 'grid');
+  for (const s of state.skills) grid.append(skillCard(s));
+  pane.append(grid);
+  if (!state.skills.length) {
+    pane.append(el('p', 'empty',
+      'No skills yet. Write one for a task you explain to her more than once.'));
+  }
+  return pane;
+}
+
+function skillDetail(name) {
+  const pane = el('div', 'pane detail');
+  pane.append(backTo('Skills', 'skills'));
+
+  if (name === '') {
+    pane.append(el('h1', null, 'Write a skill'),
+      el('p', 'detail-sub',
+        'The description is what she reads first. Make it say when this applies.'));
+    const b = block();
+    b.append(skillForm(null, ''));
+    pane.append(b);
+    return pane;
   }
 
-  const add = el('button', 'link', '+ Write a skill');
-  const adding = el('div', 'panel');
-  adding.hidden = true;
-  add.onclick = () => {
-    adding.hidden = !adding.hidden;
-    if (!adding.hidden) adding.replaceChildren(skillForm(null, ''));
-  };
-  stage.append(add, adding);
-  return stage;
+  const s = state.skills.find(x => x.name === name);
+  if (!s) { view.skill = null; return skillsPane(); }
+
+  pane.append(el('h1', null, s.name), el('p', 'detail-sub', s.enabled
+    ? 'On. She reads it when it applies.'
+    : 'Off. She is not shown it at all.'));
+
+  const b = block();
+  b.append(el('p', 'row-sub', 'Reading ' + s.path + '…'));
+  pane.append(b);
+
+  // The body lives in a file, so it is fetched rather than held in state. If
+  // you have moved on by the time it arrives, it goes nowhere.
+  fetch('/settings/admin', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ op: 'skill_body', name: s.name }),
+  }).then(r => r.json()).then(answer => {
+    if (view.pane === 'skills' && view.skill === name) {
+      b.replaceChildren(skillForm(s, answer.text || ''));
+    }
+  }).catch(() => {
+    b.replaceChildren(el('p', 'warn', 'Could not read ' + s.path + '.'));
+  });
+
+  return pane;
 }
 
 function skillForm(s, text) {
@@ -1780,7 +2066,7 @@ function skillForm(s, text) {
     'How I write a standup update. Use when asked for one.');
   const instructions = box('Instructions', body, 'Three lines: yesterday, today, blockers.');
   instructions.input.replaceWith(instructions.area);
-  instructions.area.rows = 10;
+  instructions.area.rows = 12;
 
   const save = el('button', null, isNew ? 'Write it' : 'Save');
   save.onclick = () => admin({
@@ -1795,12 +2081,14 @@ function skillForm(s, text) {
   if (!isNew) {
     const remove = el('button', 'ghost', 'Delete');
     remove.onclick = () => {
-      if (confirm('Delete ' + s.name + '.md?')) admin({ op: 'skill_delete', name: s.name }, 'Deleting…');
+      if (confirm('Delete ' + s.name + '.md?')) {
+        view.skill = null;
+        admin({ op: 'skill_delete', name: s.name }, 'Deleting…');
+      }
     };
     actions.append(remove);
   }
   form.append(name.wrap, description.wrap, instructions.wrap, actions);
-  if (!isNew) form.append(el('p', 'row-sub', s.path));
   return form;
 }
 
@@ -1818,31 +2106,36 @@ function box(label, value, placeholder) {
   return { wrap, input, area };
 }
 
+// --- drawing -----------------------------------------------------------
+
 function draw() {
-  stages.replaceChildren();
-  for (const g of state.groups) {
-    const stage = el('section', 'stage');
-    stage.append(el('h2', null, g.title), el('p', null, g.about));
-    for (const f of state.fields.filter(f => f.group === g.id)) stage.append(field(f));
-    stages.append(stage);
+  nav.replaceChildren();
+  const brand = el('div', 'brand', 'IRA');
+  brand.append(el('span', null, 'Settings'));
+  nav.append(brand);
+  for (const p of PANES) {
+    const b = el('button', 'nav-item' + (view.pane === p.id ? ' on' : ''));
+    b.append(el('span', null, p.label), el('span', 'nav-count', p.tally()));
+    if (view.pane === p.id) b.setAttribute('aria-current', 'page');
+    b.onclick = () => go(p.id);
+    nav.append(b);
   }
-  stages.append(serversStage(), skillsStage());
-  document.getElementById('foot').innerHTML =
-    'Keys are held by the operating system’s keyring — Credential Manager, '
-    + 'Keychain, Secret Service — and never written to a file. Everything else '
-    + 'is saved in <code>ira.local.db</code> beside IRA. These are the only two '
-    + 'places IRA reads from: environment variables are not consulted.';
+
+  main.replaceChildren(
+    view.pane === 'servers' ? serversPane()
+      : view.pane === 'skills' ? skillsPane()
+      : keysPane());
 }
 
 async function load() {
   const r = await fetch('/settings/state');
   state = await r.json();
-  const keepScroll = window.scrollY;
+  const keep = main.scrollTop;
   draw();
   // The window can restore a scroll position from a previous visit, before
-  // there was anything to scroll. Opening settings at the bottom of the page
-  // looks like a fault; a save in place should not jump you either.
-  window.scrollTo(0, first ? 0 : keepScroll);
+  // there was anything to scroll. Opening settings partway down looks like a
+  // fault; a save in place should not jump you either.
+  main.scrollTop = first ? 0 : keep;
   first = false;
 }
 let first = true;
@@ -1878,7 +2171,7 @@ async function send(name, value) {
 }
 
 load().catch(() => {
-  stages.append(el('p', 'status is-bad', 'Could not read settings. IRA may have stopped.'));
+  main.replaceChildren(el('p', 'empty', 'Could not read settings. IRA may have stopped.'));
 });
 </script>
 </body>
@@ -2058,6 +2351,28 @@ mod tests {
             PAGE.matches("<script>").count(),
             PAGE.matches("</script>").count()
         );
+    }
+
+    /// The same for the settings page, which is the larger of the two and the
+    /// one a stray brace in a raw string would break silently: nothing but the
+    /// webview ever parses it.
+    #[test]
+    fn the_settings_page_is_whole() {
+        assert!(SETTINGS.starts_with("<!doctype html>"));
+        assert!(SETTINGS.trim_end().ends_with("</html>"));
+        assert_eq!(
+            SETTINGS.matches("<script>").count(),
+            SETTINGS.matches("</script>").count()
+        );
+        // The rail's three sections, each of which draws a different pane.
+        for pane in ["'keys'", "'servers'", "'skills'"] {
+            assert!(SETTINGS.contains(pane), "no {pane} pane");
+        }
+        // Every route the page calls, so a renamed one is caught here rather
+        // than by a button that quietly does nothing.
+        for route in ["/settings/state", "/settings/admin", "'/settings'"] {
+            assert!(SETTINGS.contains(route), "the page never calls {route}");
+        }
     }
 
 
