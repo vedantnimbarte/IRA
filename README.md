@@ -547,3 +547,16 @@ Each is marked with a `ponytail:` comment where it lives.
 | Piper respawn on barge-in | ~250 ms before she can speak again | If interruption recovery feels slow — keep a warm spare |
 | Background jobs in memory | Lost on restart, and reported as lost | Jobs routinely outlive the process |
 | No schema versioning | A column cannot change type or meaning | The first change that is not a new table |
+
+## Licence
+
+[MIT](LICENSE). Do what you like with her, keep the copyright notice.
+
+What she *downloads* is not hers to license, and each keeps its own terms:
+[openWakeWord](https://github.com/dscripka/openWakeWord) (Apache-2.0),
+[Silero VAD](https://github.com/snakers4/silero-vad) (MIT),
+[Piper](https://github.com/rhasspy/piper) (MIT) and the
+[Amy voice](https://huggingface.co/rhasspy/piper-voices) (MIT model, CC-BY
+dataset). Nothing here redistributes any of them — `ira fetch` gets them from
+their own releases, which is the other reason a first start downloads rather
+than an installer bundling.

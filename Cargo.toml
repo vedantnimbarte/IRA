@@ -2,6 +2,7 @@
 name = "ira"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 # The icon, compiled into the executable. Windows asks the binary for it --
 # the taskbar and alt-tab never see the installer's shortcut. Host-gated
