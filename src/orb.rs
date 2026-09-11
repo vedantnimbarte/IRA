@@ -555,7 +555,7 @@ impl raw_window_handle::HasWindowHandle for Handle {
 const SETTINGS_CLASS: &[u16] = &[
     b'I' as u16, b'R' as u16, b'A' as u16, b'S' as u16, b'e' as u16, b't' as u16, 0,
 ];
-const SETTINGS_SIZE: (i32, i32) = (640, 780);
+const SETTINGS_SIZE: (i32, i32) = (1000, 720);
 
 /// Opens the settings window, or brings it forward if it is already open.
 ///
