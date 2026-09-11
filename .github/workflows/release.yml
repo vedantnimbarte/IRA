@@ -117,9 +117,7 @@ jobs:
       # --- Linux ---------------------------------------------------------
       #
       # dpkg-deb over a staging tree rather than cargo-deb: it is four files and
-      # a command, it needs no Cargo.toml metadata, and it does not require the
-      # project to declare a license before it will build. (It should have one.
-      # That is a decision for a person, not for a packaging step.)
+      # a command, and it needs no Cargo.toml metadata to do them.
       - name: Build the .deb
         if: runner.os == 'Linux'
         shell: bash
@@ -142,6 +140,8 @@ jobs:
           install -m 644 packaging/linux/ira.desktop "$stage/usr/share/applications/ira.desktop"
           install -m 644 assets/ira-dark.svg "$stage/usr/share/icons/hicolor/scalable/apps/ira.svg"
           install -m 644 README.md "$stage/usr/share/doc/ira/README.md"
+          # Where Debian looks for a package's terms.
+          install -m 644 LICENSE "$stage/usr/share/doc/ira/copyright"
 
           # Written line by line rather than with a heredoc: a control file is
           # indentation-sensitive -- a continuation line is one that begins with
