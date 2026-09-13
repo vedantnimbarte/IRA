@@ -78,7 +78,7 @@ Events are evaluated per audio frame except where marked otherwise.
 | Listening | `!heard_speech && 3_000 ms` after a wake word | Idle | Discard utterance; **no sound** (a false wake must not announce itself) |
 | Listening | `!heard_speech && 2_000 ms` in a follow-up | Idle | Discard utterance; **no sound**. Shorter than the post-wake wait: a wake word is a promise to speak, a finished reply is not |
 | Holding | transcript arrives for this generation | Holding | Record `stt_ms`; begin the reply. An empty one gets a tone, a failed one an apology |
-| Holding | no transcript after 15 s | Holding | Say "I didn't catch that". The transcriber always answers, so this means it died |
+| Holding | no transcript after 15 s, not counting whisper-server starting | Holding | Say "I didn't catch that". The transcriber always answers, so this means it died. A wait on a start past 1.5 s is explained once instead |
 | Holding | `barge_ms > 0` (not under `IRA_PTT`) | Holding | Duck to 35 %. Restore if the speech stops without becoming an interruption |
 | Holding | `barge_ms >= 250 && past grace`, or the talk control | Listening | Cancel token; log the turn as barged; interrupt TTS; abandon any pending transcript; reset VAD; seed utterance from the full 1 s pre-roll |
 | Holding | a tool wants to change something | Confirming | Speak the question; hold the pending call; reset the utterance buffer |
@@ -142,6 +142,7 @@ need the LLM to report itself.
 | Condition | Response | User hears |
 |---|---|---|
 | STT request failed | Speak | "I didn't catch that." |
+| Transcript waited 1.5 s on whisper-server starting | Speak, once | "One moment, I'm still waking up." Not a failure: the reply follows, and the wait does not count toward the timeout |
 | STT returned empty text | Tone | Low double tone. Probably noise after a false wake; a sentence here would be worse than a sound |
 | Model request failed | Speak | "I'm having trouble thinking right now." |
 | Model stream broke mid-reply | Speak | Nothing new — finish the sentences already queued, then stop. A half-reply plus an apology is worse than a half-reply |
@@ -711,6 +712,14 @@ A turn gives up on a transcript after `TRANSCRIPT_TIMEOUT_MS`. The transcribing
 task always answers, even to report failure, so reaching that means the task
 died — and without the timeout the loop would hold the floor forever, which is
 the worst thing IRA can do.
+
+Time spent while whisper-server is still starting or warming does not count
+toward it: that is a transcriber on its way, not one that has died. On a
+saturated machine the model load alone took 28 s, and a question asked 11 s in
+used to be told "I didn't catch that". A question that has waited 1.5 s on a
+start is told "One moment, I'm still waking up." once, and the full timeout
+applies from the moment the server is up. `waiting_on_transcript` in `main.rs`
+is that decision.
 
 ## Speaking and stopping
 

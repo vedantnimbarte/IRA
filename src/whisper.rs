@@ -155,6 +155,7 @@ pub async fn warm() {
     if !model_path().is_file() {
         return;
     }
+    let _starting = Starting::begin();
     let model = model_path();
     if let Err(e) = ensure(&model).await {
         tracing::warn!("whisper-server did not start: {e:#}");
@@ -241,7 +242,38 @@ async fn ensure(model: &Path) -> Result<u16> {
     Ok(port)
 }
 
+/// Whether whisper-server is being started or warmed right now.
+///
+/// A turn waiting on a transcript asks this, because a server loading its model
+/// is not a transcriber that has died: on a busy machine the load alone took
+/// 28 s, and the first question asked in that time used to time out after 15 s
+/// and be told "I didn't catch that".
+pub fn starting() -> bool {
+    STARTING.load(Ordering::Relaxed) > 0
+}
+
+static STARTING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Holds `starting()` true for its lifetime, whatever path leaves the scope. A
+/// count, because a warm-up's own start nests inside it.
+struct Starting;
+
+impl Starting {
+    fn begin() -> Self {
+        STARTING.fetch_add(1, Ordering::Relaxed);
+        Starting
+    }
+}
+
+impl Drop for Starting {
+    fn drop(&mut self) {
+        STARTING.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 async fn start(binary: &Path, model: &Path) -> Result<Running> {
+    // Also a restart after a crash, which loads the model all over again.
+    let _starting = Starting::begin();
     if !binary.is_file() {
         bail!("no whisper-server at {} -- run `ira fetch --whisper`", binary.display());
     }
