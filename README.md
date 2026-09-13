@@ -410,7 +410,10 @@ ira set IRA_LLM_MODEL anthropic/claude-sonnet-4.5   # the gateway's id, not Anth
 
 Whatever the model, keep it fast. Time-to-first-sentence is what you hear — a
 reasoning model that deliberates four seconds before its first token feels broken
-in a voice loop no matter how good the answer is.
+in a voice loop no matter how good the answer is. On OpenRouter IRA asks for
+reasoning to be switched off, which took DeepSeek V4.1 Flash from 10 s to 6.6 s
+for a two-sentence reply; a model that insists on reasoning is asked once, then
+left alone.
 
 ## Running offline
 

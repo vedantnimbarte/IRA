@@ -136,7 +136,7 @@ pub async fn transcribe(wav: Vec<u8>) -> Result<String> {
     if !model.is_file() {
         bail!("no whisper model at {} -- run `ira fetch --whisper`", model.display());
     }
-    match server(&wav, &model).await {
+    match server(&wav, &model, true).await {
         Ok(text) => Ok(text),
         Err(e) => {
             if is_cuda_pack(&active_dir()) {
@@ -162,8 +162,18 @@ pub async fn warm() {
             GPU_FAILED.store(true, Ordering::Relaxed);
             if let Err(e) = ensure(&model).await {
                 tracing::warn!("CPU whisper-server did not start either: {e:#}");
+                return;
             }
         }
+    }
+    // A listening server is not a ready one: its first request still pays for
+    // CUDA kernels and buffers -- 4.4 s on a GTX 1650, whatever the audio. Half a
+    // second of silence pays it now, before anyone has asked anything, instead
+    // of inside the first question.
+    let t = std::time::Instant::now();
+    match server(&crate::stt::wav(&[0.0; 8_000], 16_000), &model, false).await {
+        Ok(_) => tracing::info!(ms = t.elapsed().as_millis() as u64, "whisper-server warmed"),
+        Err(e) => tracing::warn!("whisper warm-up failed: {e:#}"),
     }
 }
 
@@ -176,7 +186,10 @@ pub async fn stop() {
     }
 }
 
-async fn server(wav: &[u8], model: &Path) -> Result<String> {
+/// `retries` is whisper.cpp's temperature fallback, which re-decodes a window
+/// that came out uncertain. Right for speech; for the warm-up's silence it is
+/// several pointless decodes, since silence always comes out uncertain.
+async fn server(wav: &[u8], model: &Path, retries: bool) -> Result<String> {
     let port = ensure(model).await?;
     let form = reqwest::multipart::Form::new()
         .part(
@@ -188,7 +201,8 @@ async fn server(wav: &[u8], model: &Path) -> Result<String> {
         .text("response_format", "json")
         // whisper-server defaults to English, so a multilingual model has to be
         // told to listen for anything.
-        .text("language", language());
+        .text("language", language())
+        .text("temperature_inc", if retries { "0.2" } else { "0.0" });
     let resp = reqwest::Client::new()
         .post(format!("http://127.0.0.1:{port}/inference"))
         // A turn is seconds of speech. A server still busy after this is wedged.
@@ -488,7 +502,7 @@ mod tests {
         let pack_ran = !GPU_FAILED.load(Ordering::Relaxed);
         // After a CUDA failure: the CPU pack's server, where there is one.
         GPU_FAILED.store(true, Ordering::Relaxed);
-        let cpu = server(&wav, &model).await.unwrap();
+        let cpu = server(&wav, &model, true).await.unwrap();
         let once = cli(&wav, &model).await.unwrap();
         stop().await;
 

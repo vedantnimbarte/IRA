@@ -57,7 +57,7 @@ fn route(local: bool, url: Option<String>, installed: bool) -> Vec<Via> {
 }
 
 /// Minimal 16-bit PCM WAV. Whisper endpoints want a container, not raw samples.
-fn wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
+pub fn wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     let data_len = samples.len() as u32 * 2;
     let mut b = Vec::with_capacity(44 + data_len as usize);
     b.extend(b"RIFF");
