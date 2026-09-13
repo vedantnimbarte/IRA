@@ -203,7 +203,7 @@ variables since keys moved to the OS keyring. See the next section.
 
 ### Provider settings
 
-Eight values, in two stores. The environment is not consulted for any of them: a
+Ten values, in two stores. The environment is not consulted for any of them: a
 key on a command line ends up in shell history, in `ps`, and in whatever CI log
 echoed the step that set it ([0014](decisions/0014-settings-are-editable-while-she-runs.md)).
 
@@ -217,6 +217,8 @@ echoed the step that set it ([0014](decisions/0014-settings-are-editable-while-s
 | `IRA_STT_URL` | `ira.local.db` | *unset* | Your own whisper.cpp server, used instead of the one IRA runs |
 | `IRA_LLM_URL` | `ira.local.db` | *unset* | Set → OpenAI wire format; unset → Anthropic |
 | `IRA_LLM_MODEL` | `ira.local.db` | `claude-sonnet-5` | Required with `IRA_LLM_URL` — gateways name models differently |
+| `IRA_TTS_ENGINE` | `ira.local.db` | `kokoro` | `kokoro` → the natural voice, with Piper saying anything it cannot; `piper` → Piper only ([0021](decisions/0021-kokoro-is-the-voice.md)) |
+| `IRA_KOKORO_VOICE` | `ira.local.db` | `af_heart` | One of `af_heart` `af_bella` `af_nicole` `af_sarah` `am_michael` `am_fenrir` `bf_emma` `bm_george`. Heard from the next sentence |
 
 The keyring is the platform's own: Windows Credential Manager, macOS Keychain,
 or the freedesktop Secret Service. `ira.local.db` is SQLite beside IRA, holding
@@ -233,6 +235,7 @@ ira set IRA_LLM_URL                     # no value clears it
 ira fetch                               # the models, the voice, piper
 ira fetch --whisper                     # and local speech-to-text
 ira fetch --whisper --model small.en    # a particular whisper model, saved as the choice
+ira fetch --kokoro                      # the natural voice
 ```
 
 `ira fetch` is the same pinned list of URLs as `scripts/fetch-models.*`, in

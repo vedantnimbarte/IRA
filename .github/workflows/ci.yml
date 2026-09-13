@@ -162,6 +162,11 @@ jobs:
           # nothing -- which is the exact failure this repository keeps finding.
           grep -q 'heard .*user=' ira.log \
             || { echo 'FAIL: nothing was transcribed'; exit 1; }
+          # Kokoro is the default voice, and its phonemes come from the espeak-ng
+          # inside piper's download -- a library load nothing else exercises on
+          # Linux.
+          grep -q 'kokoro ready' ira.log \
+            || { echo 'FAIL: Kokoro did not load'; exit 1; }
           grep -q 'reply .*ira=' ira.log \
             || { echo 'FAIL: nothing was said back'; exit 1; }
 

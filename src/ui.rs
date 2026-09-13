@@ -674,11 +674,14 @@ fn settings_state(ui: &Ui) -> String {
         .collect();
 
     let (busy, ok, said) = crate::whisper::status();
+    let (voice_busy, voice_ok, voice_said) = crate::kokoro::status();
     serde_json::to_string(&json!({
         "groups": groups,
         "fields": fields,
         // What local transcription is doing, said under the engine switch.
         "whisper": { "busy": busy, "ok": ok, "status": said },
+        // And what the voice is doing, under its engine.
+        "voice": { "busy": voice_busy, "ok": voice_ok, "status": voice_said },
         "servers": servers,
         "skills": skills,
         // Without a registry the page is an editor for a database and should
@@ -700,6 +703,9 @@ fn save_setting(body: &[u8]) -> String {
         Ok(()) => {
             // The engine is a running process, not only a value: switching to
             // local downloads and starts it, switching away stops it.
+            if name == "IRA_TTS_ENGINE" {
+                crate::kokoro::apply();
+            }
             if matches!(name, "IRA_STT_ENGINE" | "IRA_WHISPER_MODEL" | "IRA_STT_URL") {
                 crate::whisper::apply();
             }
@@ -1445,7 +1451,7 @@ const SETTINGS: &str = r##"<!doctype html>
 <script>
 const nav = document.getElementById('nav');
 const main = document.getElementById('main');
-let state = { groups: [], fields: [], servers: [], skills: [], live: false, whisper: { busy: false, ok: true, status: '' } };
+let state = { groups: [], fields: [], servers: [], skills: [], live: false, whisper: { busy: false, ok: true, status: '' }, voice: { busy: false, ok: true, status: '' } };
 
 // Where you are. Kept outside `draw` because every save answers with the whole
 // state and redraws from it, and that must put you back where you were rather
@@ -1521,9 +1527,9 @@ function toggle(label, on, onToggle) {
 // instead of it, rather than only that it is empty.
 function status(f) {
   // The engine is a running thing, so its line says what it is doing.
-  if (f.name === 'IRA_STT_ENGINE') {
-    const w = state.whisper;
-    return { text: w.status, cls: w.busy ? '' : (w.ok ? 'is-set' : 'is-bad') };
+  const engine = { IRA_STT_ENGINE: state.whisper, IRA_TTS_ENGINE: state.voice }[f.name];
+  if (engine) {
+    return { text: engine.status, cls: engine.busy ? '' : (engine.ok ? 'is-set' : 'is-bad') };
   }
   if (!f.set) return { text: f.empty, cls: '' };
   // Which store it is in, so "stored where I cannot see it" and "saved in a
@@ -2172,7 +2178,7 @@ async function load() {
   // fault; a save in place should not jump you either.
   main.scrollTop = first ? 0 : keep;
   first = false;
-  if (state.whisper.busy) watchDownload();
+  if (state.whisper.busy || state.voice.busy) watchDownload();
 }
 let first = true;
 
@@ -2187,9 +2193,11 @@ async function watchDownload() {
     for (;;) {
       await new Promise(r => setTimeout(r, 1000));
       const now = await (await fetch('/settings/state')).json();
-      if (!now.whisper.busy) break;
-      const line = document.getElementById('status-IRA_STT_ENGINE');
-      if (line) line.textContent = now.whisper.status;
+      if (!now.whisper.busy && !now.voice.busy) break;
+      for (const [id, engine] of [['IRA_STT_ENGINE', now.whisper], ['IRA_TTS_ENGINE', now.voice]]) {
+        const line = document.getElementById('status-' + id);
+        if (line) line.textContent = engine.status;
+      }
     }
   } finally {
     watching = false;
@@ -2215,6 +2223,15 @@ async function send(name, value) {
       return;
     }
     await load();
+    // A voice is chosen by ear, so picking one says something in it. Through
+    // `/say`, which waits for the floor like any other news.
+    if (name === 'IRA_KOKORO_VOICE') {
+      fetch('/say', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: "Hi, it's me. This is how I sound now." }),
+      }).catch(() => {});
+    }
     // The one bit of motion: the box you just saved says so, briefly.
     const again = document.getElementById(name);
     if (again) {

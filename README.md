@@ -39,7 +39,8 @@ once there is a certificate to sign with.
 She downloads the wake models, the voice and piper — about 85 MB — the first
 time she runs, and local speech-to-text with them: 80 MB on most machines, or
 about 900 MB where an NVIDIA driver makes the GPU build and a bigger model
-worth it. She shows progress while she does it. Then give her a key:
+worth it. Her voice, Kokoro, is another 330 MB. She shows progress while she
+does it. Then give her a key:
 
 ```
 ira set ANTHROPIC_API_KEY sk-ant-...
@@ -353,7 +354,7 @@ thing IRA says — nothing restarts:
 | | |
 |---|---|
 | `ANTHROPIC_API_KEY` · `GROQ_API_KEY` · `IRA_LLM_KEY` | the OS keyring |
-| `IRA_STT_ENGINE` · `IRA_WHISPER_MODEL` · `IRA_STT_URL` · `IRA_LLM_URL` · `IRA_LLM_MODEL` | `ira.local.db`, gitignored |
+| `IRA_STT_ENGINE` · `IRA_WHISPER_MODEL` · `IRA_STT_URL` · `IRA_LLM_URL` · `IRA_LLM_MODEL` · `IRA_TTS_ENGINE` · `IRA_KOKORO_VOICE` | `ira.local.db`, gitignored |
 
 Those two stores are the only places IRA looks. **The environment is not read** —
 it used to be the fallback under both, and a key on a command line ends up in
@@ -435,6 +436,22 @@ Numbers and trade-offs: [BASELINE.md](docs/BASELINE.md).
 Wake word, endpointing and speech always happen here, and so does
 transcription unless you choose Groq. The model is the one stage that still
 needs the network.
+
+## Her voice
+
+Kokoro-82M, on this machine: a neural voice that sounds like a person rather
+than a reader, and costs about 300 ms more before she starts speaking than
+Piper does. Eight voices, Heart by default; picking one in the settings window
+says a line in it.
+
+```powershell
+ira set IRA_KOKORO_VOICE bf_emma   # heard from her next sentence
+ira set IRA_TTS_ENGINE piper       # the quicker, plainer voice
+```
+
+Piper keeps running underneath either way. If Kokoro is not downloaded or will
+not load, Piper says everything instead of her going quiet
+([0021](docs/decisions/0021-kokoro-is-the-voice.md)).
 
 ## Knobs
 

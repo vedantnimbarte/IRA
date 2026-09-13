@@ -41,7 +41,7 @@ mic ─┬─ 1. capture ──── cpal, 48k stereo → 16k mono          [on
                         5. generate ── Anthropic │ OpenAI-compatible [swappable]
                               │ sentence at a time
                               ▼
-                        6. speak ───── Piper → rodio          [on device]
+                        6. speak ───── Kokoro │ Piper → rodio [on device]
                                        clear() = instant silence
 ```
 
@@ -98,7 +98,8 @@ The exhaustive transition table lives in [SPEC.md](SPEC.md).
 | `audio.rs` | cpal capture, downmix, 16 kHz resample; WAV replay | **Closed** |
 | `wake.rs` | openWakeWord three-stage chain, refractory | **Closed** |
 | `vad.rs` | Silero v5, 576-sample window, recurrent state | **Closed** |
-| `tts.rs` | Piper subprocess, rodio queue, three earcons, ducking | **Closed** |
+| `tts.rs` | Kokoro thread or Piper subprocess, rodio queue, three earcons, ducking | **Closed** |
+| `kokoro.rs` | Kokoro-82M on `ort`, with phonemes from Piper's espeak-ng | Config |
 | `main.rs` | The state machine and turn orchestration | **Closed** |
 | `stt.rs` | Transcription: which engine, and the fallback that only moves toward privacy | Config |
 | `whisper.rs` | The whisper-server IRA runs: start, restart, CUDA→CPU, whisper-cli | Config |
