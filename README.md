@@ -37,12 +37,17 @@ once there is a certificate to sign with.
 ### The first start
 
 She downloads the wake models, the voice and piper — about 85 MB — the first
-time she runs, and shows progress while she does it. Then give her a key:
+time she runs, and local speech-to-text with them: 80 MB on most machines, or
+about 900 MB where an NVIDIA driver makes the GPU build and a bigger model
+worth it. She shows progress while she does it. Then give her a key:
 
 ```
 ira set ANTHROPIC_API_KEY sk-ant-...
-ira set GROQ_API_KEY gsk_...
 ```
+
+On Linux and macOS whisper.cpp has no prebuilt binary, so the first start stops
+and prints the four commands that build it — or `ira set IRA_STT_ENGINE cloud`
+and `ira set GROQ_API_KEY gsk_...` to transcribe at Groq instead.
 
 Keys go to the operating system's keyring. Everything else — the settings
 database, the transcript, the skills you write and the models above — lives in
@@ -69,7 +74,6 @@ From a checkout:
 ```powershell
 .\scripts\fetch-models.ps1
 cargo run --release -- set ANTHROPIC_API_KEY sk-ant-...
-cargo run --release -- set GROQ_API_KEY gsk_...
 cargo run --release
 ```
 
@@ -212,9 +216,9 @@ next start. They do not ask before saving a command either, because a terminal
 on this machine already is the authorisation.
 
 `ira fetch` downloads the models, the voice and piper, and `ira fetch
---whisper` adds offline speech-to-text on top. A first start runs the former
-by itself when the files are missing, so this is the way to retry after a
-download stopped part-way, and the way to add whisper later.
+--whisper` adds local speech-to-text on top. A first start runs both by itself
+when the files are missing, so this is the way to retry after a download
+stopped part-way.
 
 ## Talking to IRA from something else
 
@@ -349,7 +353,7 @@ thing IRA says — nothing restarts:
 | | |
 |---|---|
 | `ANTHROPIC_API_KEY` · `GROQ_API_KEY` · `IRA_LLM_KEY` | the OS keyring |
-| `IRA_LLM_URL` · `IRA_LLM_MODEL` · `IRA_STT_URL` | `ira.local.db`, gitignored |
+| `IRA_STT_ENGINE` · `IRA_WHISPER_MODEL` · `IRA_STT_URL` · `IRA_LLM_URL` · `IRA_LLM_MODEL` | `ira.local.db`, gitignored |
 
 Those two stores are the only places IRA looks. **The environment is not read** —
 it used to be the fallback under both, and a key on a command line ends up in
@@ -409,21 +413,28 @@ in a voice loop no matter how good the answer is.
 
 ## Running offline
 
-whisper.cpp's `whisper-server` speaks the same multipart API as Groq, so going
-offline is a URL rather than a code path:
+Transcription is local by default. IRA runs whisper.cpp's `whisper-server`
+herself — started with her, restarted if it dies, stopped when she exits — and
+picks the build from `nvidia-smi`: a driver that supports CUDA 12 gets the GPU
+pack and `small.en`, anything else the CPU pack and `tiny.en`. The settings
+window switches between this machine and Groq, and picks the model:
 
 ```powershell
-.\scripts\fetch-models.ps1 -Whisper
+ira set IRA_STT_ENGINE cloud        # Groq; needs GROQ_API_KEY
+ira set IRA_STT_ENGINE local        # back again
+ira set IRA_WHISPER_MODEL base.en   # downloaded and loaded on the next start
 ```
 
-Opt-in, because it is a bigger download than everything else combined. It reads
-`nvidia-smi` and picks the build to match — an NVIDIA driver gets the cuBLAS 11.8
-pack and `small.en`, anything else the CPU pack and `tiny.en` — then prints the
-two lines to run. Numbers and trade-offs: [BASELINE.md](docs/BASELINE.md).
+**Local never falls back to Groq**, however it fails — choosing it is choosing
+that audio stays here. It degrades within the machine instead: the CPU build if
+the GPU one will not run, then `whisper-cli` if no server will. Groq, when
+chosen, falls back to local if local is installed.
+`IRA_STT_URL` points her at a whisper-server you run yourself instead.
+Numbers and trade-offs: [BASELINE.md](docs/BASELINE.md).
 
-Wake word, endpointing and speech are always local. With `IRA_STT_URL` set, no
-audio leaves the machine at all. The model is the one stage that still needs the
-network.
+Wake word, endpointing and speech always happen here, and so does
+transcription unless you choose Groq. The model is the one stage that still
+needs the network.
 
 ## Knobs
 

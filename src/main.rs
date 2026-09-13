@@ -37,6 +37,7 @@ mod tts;
 mod ui;
 mod vad;
 mod wake;
+mod whisper;
 mod wingman;
 
 use anyhow::{Context, Result};
@@ -341,6 +342,7 @@ async fn run(hide_console: bool) -> Result<()> {
     // checks on settings. Keys come from the OS keyring and everything else
     // from ira.local.db; the environment is not consulted.
     settings::load();
+    whisper::init(&models);
     // Servers used to live in ira.toml. This brings an existing one into the
     // database on the first start after the window became the way to edit them,
     // and never reads it again. Before the subcommands below, so `ira doctor`
@@ -374,11 +376,18 @@ async fn run(hide_console: bool) -> Result<()> {
     // that is not on the machine.
     //
     // Only what IRA cannot run without, and only when it is absent -- a second
-    // start costs six `stat` calls. Offline STT stays opt-in behind
-    // `ira fetch --whisper`, being several times the size of all of this.
+    // start costs six `stat` calls.
     if !fetch::have_everything(&models, &voice, &piper) {
         tracing::info!("first start: fetching the models, the voice and piper");
         if let Err(e) = fetch::core_files(&models, &piper).await {
+            tracing::error!("{e:#}");
+        }
+    }
+    // Local transcription is the default, so it is part of what a start needs --
+    // including the first start after an upgrade that made it the default.
+    if stt::managed() && !whisper::complete() {
+        tracing::info!("fetching local speech-to-text");
+        if let Err(e) = fetch::whisper_files(&models, None).await {
             tracing::error!("{e:#}");
         }
     }
@@ -401,6 +410,11 @@ async fn run(hide_console: bool) -> Result<()> {
     let mut vad = vad::Vad::new(&models.join("silero_vad.onnx"), 0.5).context("load silero vad")?;
     let mut tts = tts::Tts::new(&piper, &voice).context("start piper")?;
     let mut mic = audio::Mic::open().context("open microphone")?;
+
+    // Loading the model now, not when the first question is waiting on it.
+    if stt::managed() {
+        tokio::spawn(whisper::warm());
+    }
 
     let client = reqwest::Client::new();
     let (turn_tx, mut turn_rx) = mpsc::channel::<Turn>(16);
@@ -1077,6 +1091,7 @@ async fn run(hide_console: bool) -> Result<()> {
         tracing::warn!(lost, "background jobs lost at shutdown");
         println!("{lost} background job(s) were still running and are lost.");
     }
+    whisper::stop().await;
     Ok(())
 }
 

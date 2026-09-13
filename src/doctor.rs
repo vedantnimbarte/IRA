@@ -49,9 +49,9 @@ impl Check {
 ///
 /// Pure so the four combinations can be tested without mutating the process
 /// environment, which races every other test in the binary.
-pub fn required_keys(stt_url: Option<&str>, llm_url: Option<&str>) -> Vec<&'static str> {
+pub fn required_keys(local_stt: bool, llm_url: Option<&str>) -> Vec<&'static str> {
     let mut keys = Vec::new();
-    if stt_url.is_none() {
+    if !local_stt {
         keys.push("GROQ_API_KEY");
     }
     if llm_url.is_none() {
@@ -100,24 +100,40 @@ pub fn files_and_keys(p: &Paths) -> Vec<Check> {
         ));
     }
 
-    let stt_url = crate::settings::get("IRA_STT_URL");
     let llm_url = crate::settings::get("IRA_LLM_URL");
 
-    for key in required_keys(stt_url.as_deref(), llm_url.as_deref()) {
+    for key in required_keys(crate::stt::local(), llm_url.as_deref()) {
         if crate::settings::is_set(key) {
             out.push(Check::ok(format!("{key} set")));
         } else {
             out.push(Check::fatal(
                 format!("{key} not set"),
                 match key {
-                    "GROQ_API_KEY" => "run `ira set GROQ_API_KEY <key>`, or `ira set IRA_STT_URL <url>` for local STT",
+                    "GROQ_API_KEY" => "run `ira set GROQ_API_KEY <key>`, or `ira set IRA_STT_ENGINE local`",
                     _ => "run `ira set ANTHROPIC_API_KEY <key>`, or `ira set IRA_LLM_URL <url>` for another provider",
                 },
             ));
         }
     }
 
-    if stt_url.is_some() {
+    // The one IRA runs herself. A URL is someone else's server, probed below.
+    if crate::stt::managed() {
+        let server = crate::whisper::exe(&crate::whisper::dir(), "whisper-server");
+        let model = crate::whisper::model_path();
+        let fix = if cfg!(windows) {
+            "run `ira fetch --whisper`, or `ira set IRA_STT_ENGINE cloud`"
+        } else {
+            "build whisper.cpp -- `ira fetch --whisper` prints how -- or `ira set IRA_STT_ENGINE cloud`"
+        };
+        for (what, path) in [("whisper-server", server), ("whisper model", model)] {
+            if path.is_file() {
+                out.push(Check::ok(format!("{what} present")));
+            } else {
+                out.push(Check::fatal(format!("{what} missing at {}", path.display()), fix));
+            }
+        }
+    }
+    if crate::stt::local() {
         out.push(Check::ok("STT local -- no audio leaves this machine"));
     }
 
@@ -145,7 +161,7 @@ pub async fn all(p: &Paths) -> Vec<Check> {
         )),
     }
 
-    if let Some(url) = crate::settings::get("IRA_STT_URL") {
+    if let Some(url) = crate::settings::get("IRA_STT_URL").filter(|_| crate::stt::local()) {
         let client = reqwest::Client::new();
         let probe = client
             .get(&url)
@@ -158,7 +174,7 @@ pub async fn all(p: &Paths) -> Vec<Check> {
             Ok(_) => out.push(Check::ok(format!("STT reachable at {url}"))),
             Err(e) => out.push(Check::fatal(
                 format!("STT unreachable at {url}: {e}"),
-                "start whisper-server, or `ira set IRA_STT_URL` to use Groq",
+                "start whisper-server, or clear IRA_STT_URL and IRA runs her own",
             )),
         }
     }
@@ -229,14 +245,14 @@ mod tests {
     /// wrong demands a key nobody needs, which is a refusal to start over
     /// nothing.
     #[test]
-    fn each_url_retires_its_own_key() {
+    fn each_backend_retires_its_own_key() {
         assert_eq!(
-            required_keys(None, None),
+            required_keys(false, None),
             vec!["GROQ_API_KEY", "ANTHROPIC_API_KEY"]
         );
-        assert_eq!(required_keys(Some("http://x/inference"), None), vec!["ANTHROPIC_API_KEY"]);
-        assert_eq!(required_keys(None, Some("http://x/v1/chat")), vec!["GROQ_API_KEY"]);
-        assert!(required_keys(Some("http://x"), Some("http://y")).is_empty());
+        assert_eq!(required_keys(true, None), vec!["ANTHROPIC_API_KEY"]);
+        assert_eq!(required_keys(false, Some("http://x/v1/chat")), vec!["GROQ_API_KEY"]);
+        assert!(required_keys(true, Some("http://y")).is_empty());
     }
 
     #[test]

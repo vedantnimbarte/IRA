@@ -37,20 +37,51 @@ use std::sync::{OnceLock, RwLock};
 /// where changing them is a decision rather than a preference.
 pub const FIELDS: &[Field] = &[
     Field {
+        name: "IRA_STT_ENGINE",
+        label: "Transcribe",
+        group: HEARING,
+        about: "On this machine, or at Groq. Local never falls back to Groq; Groq falls back to local when it is installed.",
+        // The window shows the engine's own status instead; see `whisper::status`.
+        empty: "",
+        secret: false,
+        choices: &[("local", "On this machine"), ("cloud", "At Groq")],
+    },
+    Field {
+        name: "IRA_WHISPER_MODEL",
+        label: "Local model",
+        group: HEARING,
+        about: "Bigger hears names better and answers later. Changing it downloads the model.",
+        empty: "",
+        secret: false,
+        // `whisper::MODELS`, spelled out because a const table cannot call
+        // anything. `every_model_choice_is_a_model` keeps the two together.
+        choices: &[
+            ("", "Picked for this machine"),
+            ("tiny.en", "tiny.en · 75 MB"),
+            ("base.en", "base.en · 142 MB"),
+            ("small.en", "small.en · 466 MB"),
+            ("tiny", "tiny, any language · 75 MB"),
+            ("base", "base, any language · 142 MB"),
+            ("small", "small, any language · 466 MB"),
+        ],
+    },
+    Field {
         name: "GROQ_API_KEY",
         label: "Groq key",
         group: HEARING,
         about: "",
-        empty: "Needed, unless you run whisper below.",
+        empty: "Needed only to transcribe at Groq.",
         secret: true,
+        choices: &[],
     },
     Field {
         name: "IRA_STT_URL",
-        label: "Local transcription",
+        label: "Your own whisper-server",
         group: HEARING,
-        about: "A whisper-server here. No audio leaves this machine.",
-        empty: "Transcribing at Groq.",
+        about: "Instead of the one IRA runs. Any whisper.cpp-compatible /inference URL.",
+        empty: "IRA runs her own.",
         secret: false,
+        choices: &[],
     },
     Field {
         name: "ANTHROPIC_API_KEY",
@@ -59,6 +90,7 @@ pub const FIELDS: &[Field] = &[
         about: "",
         empty: "Needed, unless you give another endpoint below.",
         secret: true,
+        choices: &[],
     },
     Field {
         name: "IRA_LLM_URL",
@@ -67,6 +99,7 @@ pub const FIELDS: &[Field] = &[
         about: "OpenAI chat-completions format: OpenRouter, LM Studio, Ollama.",
         empty: "Talking to Anthropic.",
         secret: false,
+        choices: &[],
     },
     Field {
         name: "IRA_LLM_KEY",
@@ -75,6 +108,7 @@ pub const FIELDS: &[Field] = &[
         about: "A server on this machine usually wants none.",
         empty: "No key sent.",
         secret: true,
+        choices: &[],
     },
     Field {
         name: "IRA_LLM_MODEL",
@@ -84,6 +118,7 @@ pub const FIELDS: &[Field] = &[
         // Filled in from `llm::MODEL`, so it cannot drift from the real default.
         empty: "",
         secret: false,
+        choices: &[],
     },
 ];
 
@@ -91,7 +126,7 @@ pub const FIELDS: &[Field] = &[
 ///
 /// Not a category scheme invented for the window: everything before
 /// transcription -- the wake word, knowing when you have stopped -- already runs
-/// here, so these six values are exactly the ones that decide what goes out.
+/// here, so these values are exactly the ones that decide what goes out.
 pub const GROUPS: &[Group] = &[
     Group {
         id: HEARING,
@@ -126,16 +161,19 @@ pub struct Field {
     /// Whether this goes to the OS keyring rather than the database, and is
     /// never sent back to the page.
     pub secret: bool,
+    /// The only values it takes, as `(value, label)`, the first being what unset
+    /// means. Empty for free text. The window draws a list instead of a box.
+    pub choices: &'static [(&'static str, &'static str)],
 }
 
 impl Field {
-    /// What the window shows under an empty box. The model's default lives in
-    /// `llm.rs`, so it is read from there rather than repeated here.
+    /// What the window shows under an empty box. The defaults that are decided
+    /// elsewhere are read from there rather than repeated here.
     pub fn when_empty(&self) -> String {
-        if self.empty.is_empty() {
-            format!("Using {}.", crate::llm::MODEL)
-        } else {
-            self.empty.into()
+        match self.name {
+            "IRA_LLM_MODEL" => format!("Using {}.", crate::llm::MODEL),
+            "IRA_WHISPER_MODEL" => format!("Using {}.", crate::whisper::auto_model()),
+            _ => self.empty.into(),
         }
     }
 
@@ -236,6 +274,10 @@ pub fn load() {
 pub fn set(name: &str, value: &str) -> Result<()> {
     let field = field(name).with_context(|| format!("{name} is not a setting"))?;
     let value = value.trim();
+    if !field.choices.is_empty() && !value.is_empty() && !field.choices.iter().any(|(v, _)| *v == value) {
+        let allowed: Vec<_> = field.choices.iter().map(|(v, _)| *v).filter(|v| !v.is_empty()).collect();
+        anyhow::bail!("{name} is one of: {}", allowed.join(", "));
+    }
 
     // The store first: failing to persist must not leave IRA running on a value
     // that will be gone at the next start-up.
@@ -362,6 +404,22 @@ mod tests {
         assert!(set("PATH", "/tmp").is_err());
         assert!(set("IRA_UI", "off").is_err());
         assert!(field("ANTHROPIC_API_KEY").is_some());
+        // A list is a list: a typo is refused rather than read as "not cloud".
+        assert!(set("IRA_STT_ENGINE", "clowd").is_err());
+    }
+
+    /// The picker and the catalogue cannot drift: every model offered is one
+    /// whisper.rs knows how to fetch, and every one it knows is offered.
+    #[test]
+    fn every_model_choice_is_a_model() {
+        let offered: Vec<_> = field("IRA_WHISPER_MODEL")
+            .unwrap()
+            .choices
+            .iter()
+            .map(|(v, _)| *v)
+            .filter(|v| !v.is_empty())
+            .collect();
+        assert_eq!(offered, crate::whisper::MODELS);
     }
 
     /// The whole point of the change: a variable in the shell is no longer a

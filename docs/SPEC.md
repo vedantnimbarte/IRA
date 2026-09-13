@@ -203,16 +203,18 @@ variables since keys moved to the OS keyring. See the next section.
 
 ### Provider settings
 
-Six values, in two stores. The environment is not consulted for any of them: a
+Eight values, in two stores. The environment is not consulted for any of them: a
 key on a command line ends up in shell history, in `ps`, and in whatever CI log
 echoed the step that set it ([0014](decisions/0014-settings-are-editable-while-she-runs.md)).
 
 | Setting | Store | Default | Effect |
 |---|---|---|---|
-| `GROQ_API_KEY` | keyring | *required\** | \*Unless `IRA_STT_URL` is set |
+| `IRA_STT_ENGINE` | `ira.local.db` | `local` | `local` → whisper on this machine, never Groq; `cloud` → Groq, then local if it fails and is installed ([0020](decisions/0020-she-runs-whisper-herself.md)) |
+| `IRA_WHISPER_MODEL` | `ira.local.db` | `tiny.en`, or `small.en` on a CUDA pack | One of `tiny.en` `base.en` `small.en` `tiny` `base` `small`. Changing it downloads it and restarts the server |
+| `GROQ_API_KEY` | keyring | *required\** | \*Only when `IRA_STT_ENGINE` is `cloud` |
 | `ANTHROPIC_API_KEY` | keyring | *required\** | \*Unless `IRA_LLM_URL` is set |
 | `IRA_LLM_KEY` | keyring | *unset* | Bearer token for `IRA_LLM_URL`; omit for a local server |
-| `IRA_STT_URL` | `ira.local.db` | *unset* | Set → local whisper.cpp; unset → Groq |
+| `IRA_STT_URL` | `ira.local.db` | *unset* | Your own whisper.cpp server, used instead of the one IRA runs |
 | `IRA_LLM_URL` | `ira.local.db` | *unset* | Set → OpenAI wire format; unset → Anthropic |
 | `IRA_LLM_MODEL` | `ira.local.db` | `claude-sonnet-5` | Required with `IRA_LLM_URL` — gateways name models differently |
 
@@ -229,8 +231,8 @@ ira set IRA_LLM_URL                     # no value clears it
 ```
 ```
 ira fetch                               # the models, the voice, piper
-ira fetch --whisper                     # and offline speech-to-text
-ira fetch --whisper --model small.en    # a particular whisper model
+ira fetch --whisper                     # and local speech-to-text
+ira fetch --whisper --model small.en    # a particular whisper model, saved as the choice
 ```
 
 `ira fetch` is the same pinned list of URLs as `scripts/fetch-models.*`, in
@@ -238,9 +240,12 @@ the program rather than beside it, because an installed IRA has no `scripts/`
 directory. Files already present are left alone, so it is safe to re-run after
 a download stops part-way. A first start with nothing downloaded runs it
 automatically rather than failing a check, and every "missing" message names
-it. Whisper is opt-in: it is several times the size of everything else, and on
-Linux and macOS upstream publishes no binaries, so there `--whisper` fetches
-the model and prints the cmake commands for the rest.
+it. Whisper is part of a first start while `IRA_STT_ENGINE` is `local`, the
+default. On Windows that is the pack `nvidia-smi` calls for (CUDA 12 on a
+driver that supports it, else CPU), each archive checked against a pinned
+SHA-256, plus the CPU pack beside a CUDA one for the fallback. On Linux and
+macOS upstream publishes no binaries, so there it fetches the model, prints the
+cmake commands for the rest, and IRA refuses to start until they have been run.
 
 
 `ira set` exists because the fatal start-up check for a missing key fires long
