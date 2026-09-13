@@ -238,7 +238,13 @@ impl Tts {
             // Sentences sent while this loads wait in the channel, so a voice
             // chosen a moment ago is the one that says them.
             let mut k = match crate::kokoro::Kokoro::new(&piper, &crate::kokoro::voice()) {
-                Ok(k) => {
+                Ok(mut k) => {
+                    // One sentence thrown away, so the first real one does not
+                    // pay for onnxruntime's first-run allocation and planning.
+                    // Before READY, so start-up's wait covers it too.
+                    if let Err(e) = k.speak("Hello there.") {
+                        tracing::warn!("kokoro warm-up failed: {e:#}");
+                    }
                     tracing::info!(ms = t.elapsed().as_millis() as u64, voice = %crate::kokoro::voice(), "kokoro ready");
                     st.store(READY, Ordering::Relaxed);
                     Some(k)

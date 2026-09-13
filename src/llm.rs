@@ -212,18 +212,36 @@ fn tool_exchange(call: &Call, result: &str, openai: bool) -> (Value, Value) {
     }
 }
 
+/// Words a reply's opening clause needs before a comma may end it. Fewer, and
+/// "Well, ..." becomes its own clipped utterance; this many is already a phrase
+/// that sounds finished with a comma's fall.
+const FIRST_CLAUSE_WORDS: usize = 5;
+
 /// Flush at sentence ends, or at a word boundary if one sentence runs long.
-fn split_sentence(buf: &mut String) -> Option<String> {
+///
+/// `first` is the reply's opening chunk, which may also end at a comma. Nothing
+/// is heard until the first chunk is synthesised whole, and a neural voice
+/// takes a second or more over a long sentence; its first clause is ready in a
+/// fraction of that. Later chunks wait for the full stop, because by then
+/// speech is already playing and a whole sentence is said more naturally.
+fn split_sentence(buf: &mut String, first: bool) -> Option<String> {
     let bytes = buf.as_bytes();
     for (i, &c) in bytes.iter().enumerate() {
-        if matches!(c, b'.' | b'!' | b'?') {
-            // Require whitespace (or end of buffer) after the mark, so "3.50"
-            // and "e.g." do not each become their own utterance.
-            let boundary = bytes.get(i + 1).is_none_or(|n| n.is_ascii_whitespace());
-            if boundary && i >= 1 {
-                let s: String = buf.drain(..=i).collect();
-                return Some(s.trim().to_string());
-            }
+        // Whitespace (or end of buffer) after the mark, so "3.50", "e.g." and
+        // "1,000" are not each cut in two.
+        let boundary = bytes.get(i + 1).is_none_or(|n| n.is_ascii_whitespace());
+        if matches!(c, b'.' | b'!' | b'?') && boundary && i >= 1 {
+            let s: String = buf.drain(..=i).collect();
+            return Some(s.trim().to_string());
+        }
+        // End of buffer is not enough for a comma: the next delta may be "000".
+        if first
+            && c == b','
+            && bytes.get(i + 1).is_some_and(|n| n.is_ascii_whitespace())
+            && buf[..i].split_whitespace().count() >= FIRST_CLAUSE_WORDS
+        {
+            let s: String = buf.drain(..=i).collect();
+            return Some(s.trim().to_string());
         }
     }
     if buf.len() > 160 {
@@ -415,26 +433,7 @@ async fn phrase_once(client: &reqwest::Client, ask: &str) -> Result<String> {
         body["system"] = system.into();
     }
 
-    let req = match &url {
-        Some(url) => match crate::settings::get("IRA_LLM_KEY") {
-            Some(key) => client.post(url).bearer_auth(key),
-            None => client.post(url),
-        },
-        None => client
-            .post("https://api.anthropic.com/v1/messages")
-            .header("anthropic-version", "2023-06-01")
-            .header(
-                "x-api-key",
-                crate::settings::get("ANTHROPIC_API_KEY")
-                    .ok_or_else(|| anyhow!("ANTHROPIC_API_KEY not set"))?,
-            ),
-    };
-
-    let resp = req
-        .timeout(std::time::Duration::from_secs(20))
-        .json(&body)
-        .send()
-        .await?;
+    let resp = send(client, &url, &mut body, Some(std::time::Duration::from_secs(20))).await?;
     if !resp.status().is_success() {
         return Err(anyhow!("llm {}: {}", resp.status(), resp.text().await?));
     }
@@ -445,6 +444,72 @@ async fn phrase_once(client: &reqwest::Client, ask: &str) -> Result<String> {
     } else {
         v["content"][0]["text"].as_str().unwrap_or_default().to_string()
     })
+}
+
+/// Set once a model has refused `reasoning` being switched off, so the rest of
+/// the session stops asking.
+static REASONING_REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether to ask for no reasoning. OpenRouter only: it documents the field for
+/// every model it serves, where another gateway may reject a field it does not
+/// know -- the reason `fold_usage` sends no `stream_options` either.
+fn reasoning_off(url: &Option<String>) -> bool {
+    url.as_deref().is_some_and(|u| u.contains("openrouter.ai"))
+        && !REASONING_REFUSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Sends a model request to whichever endpoint is configured.
+///
+/// **Reasoning is switched off on OpenRouter.** A reasoning model thinks before
+/// it writes a word, and in a voice loop that is dead air: DeepSeek V4.1 Flash
+/// spent about seven seconds of a fourteen-second wait thinking about "what is
+/// the weather today". Two short spoken sentences do not need it. A model whose
+/// reasoning is mandatory refuses the request with a 400, and then it is sent
+/// again without, and never asked for again this session.
+async fn send(
+    client: &reqwest::Client,
+    url: &Option<String>,
+    body: &mut Value,
+    timeout: Option<std::time::Duration>,
+) -> Result<reqwest::Response> {
+    let request = |body: &Value| -> Result<reqwest::RequestBuilder> {
+        let req = match url {
+            // A local server usually wants no key at all, so an absent one is
+            // not an error here the way a missing ANTHROPIC_API_KEY is.
+            Some(url) => match crate::settings::get("IRA_LLM_KEY") {
+                Some(key) => client.post(url).bearer_auth(key),
+                None => client.post(url),
+            },
+            None => client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("anthropic-version", "2023-06-01")
+                .header(
+                    "x-api-key",
+                    crate::settings::get("ANTHROPIC_API_KEY")
+                        .ok_or_else(|| anyhow!("ANTHROPIC_API_KEY not set"))?,
+                ),
+        };
+        let req = req.json(body);
+        Ok(match timeout {
+            Some(t) => req.timeout(t),
+            None => req,
+        })
+    };
+
+    if reasoning_off(url) {
+        body["reasoning"] = json!({ "enabled": false });
+    }
+    let resp = request(body)?.send().await?;
+    if resp.status() == reqwest::StatusCode::BAD_REQUEST && body.get("reasoning").is_some() {
+        let why = resp.text().await.unwrap_or_default();
+        tracing::warn!("the model would not switch reasoning off, so it stays on: {why}");
+        REASONING_REFUSED.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(b) = body.as_object_mut() {
+            b.remove("reasoning");
+        }
+        return Ok(request(body)?.send().await?);
+    }
+    Ok(resp)
 }
 
 /// Issues one request and streams it, speaking sentences as they complete.
@@ -477,24 +542,7 @@ async fn one_round(
         body["tools"] = json!(tools);
     }
 
-    let req = match url {
-        // A local server usually wants no key at all, so an absent one is not
-        // an error here the way a missing ANTHROPIC_API_KEY is.
-        Some(url) => match crate::settings::get("IRA_LLM_KEY") {
-            Some(key) => client.post(url).bearer_auth(key),
-            None => client.post(url),
-        },
-        None => client
-            .post("https://api.anthropic.com/v1/messages")
-            .header("anthropic-version", "2023-06-01")
-            .header(
-                "x-api-key",
-                crate::settings::get("ANTHROPIC_API_KEY")
-                    .ok_or_else(|| anyhow!("ANTHROPIC_API_KEY not set"))?,
-            ),
-    };
-
-    let resp = req.json(&body).send().await?;
+    let resp = send(client, url, &mut body, None).await?;
     if !resp.status().is_success() {
         return Err(anyhow!("llm {}: {}", resp.status(), resp.text().await?));
     }
@@ -516,6 +564,8 @@ async fn one_round(
     let mut buf = String::new();
     let mut full = String::new();
     let mut call = Call::default();
+    // Only a round's opening chunk may end at a comma. See `split_sentence`.
+    let mut sent_any = false;
 
     loop {
         let chunk = tokio::select! {
@@ -549,7 +599,8 @@ async fn one_round(
                 mark(timings);
                 full.push_str(t);
                 buf.push_str(t);
-                while let Some(s) = split_sentence(&mut buf) {
+                while let Some(s) = split_sentence(&mut buf, !sent_any) {
+                    sent_any = true;
                     if !s.is_empty() && out.send((s, cancel.clone())).await.is_err() {
                         return Ok(Round::Text(full));
                     }
@@ -612,15 +663,42 @@ mod tests {
     #[test]
     fn splits_on_sentence_end() {
         let mut b = String::from("Hello there. How are");
-        assert_eq!(split_sentence(&mut b).as_deref(), Some("Hello there."));
+        assert_eq!(split_sentence(&mut b, false).as_deref(), Some("Hello there."));
         assert_eq!(b, " How are");
-        assert_eq!(split_sentence(&mut b), None);
+        assert_eq!(split_sentence(&mut b, false), None);
+    }
+
+    /// The opening clause may end at a comma once it is a phrase; nothing else
+    /// may, and neither may a number's thousands separator.
+    #[test]
+    fn a_reply_may_open_with_a_clause() {
+        let mut b = String::from("I don't have access to weather data, so I can't");
+        assert_eq!(split_sentence(&mut b, true).as_deref(), Some("I don't have access to weather data,"));
+        assert_eq!(b, " so I can't");
+
+        let mut b = String::from("I don't have access to weather data, so I can't");
+        assert_eq!(split_sentence(&mut b, false), None, "only the first chunk");
+
+        let mut b = String::from("Well, it depends on");
+        assert_eq!(split_sentence(&mut b, true), None, "too short to stand alone");
+
+        let mut b = String::from("That will cost you about 1,000 rupees");
+        assert_eq!(split_sentence(&mut b, true), None, "a number is not a clause");
+        let mut b = String::from("That will cost you about 1,");
+        assert_eq!(split_sentence(&mut b, true), None, "the next delta may be 000");
+    }
+
+    #[test]
+    fn reasoning_is_only_switched_off_on_openrouter() {
+        assert!(reasoning_off(&Some("https://openrouter.ai/api/v1/chat/completions".into())));
+        assert!(!reasoning_off(&Some("http://127.0.0.1:1234/v1/chat/completions".into())));
+        assert!(!reasoning_off(&None));
     }
 
     #[test]
     fn does_not_split_decimals() {
         let mut b = String::from("It costs 3.50 dollars");
-        assert_eq!(split_sentence(&mut b), None);
+        assert_eq!(split_sentence(&mut b, false), None);
     }
 
     #[test]
@@ -628,7 +706,7 @@ mod tests {
         // Trailing partial word: the flush must stop at the last space and
         // leave the incomplete word behind for the next delta.
         let mut b = format!("{}partial", "word ".repeat(40));
-        let s = split_sentence(&mut b).expect("should flush");
+        let s = split_sentence(&mut b, false).expect("should flush");
         assert!(s.ends_with("word"), "got {s:?}");
         assert_eq!(b, "partial");
     }
