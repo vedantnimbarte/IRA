@@ -256,11 +256,17 @@ jobs:
             ### First run
 
             IRA downloads the wake models, the voice and piper — about 85 MB —
-            the first time she starts, and says so while she does it. Then give
-            her a key:
+            the first time she starts, and local speech-to-text with them: about
+            80 MB, or about 900 MB where an NVIDIA driver makes the GPU build
+            worth it. She says so while she does it. Then give her a key:
 
                 ira set ANTHROPIC_API_KEY sk-ant-...
-                ira set GROQ_API_KEY gsk_...
+
+            Transcription happens on this machine by default. To use Groq
+            instead: `ira set IRA_STT_ENGINE cloud` and
+            `ira set GROQ_API_KEY gsk_...`. On Linux and macOS whisper.cpp has
+            no prebuilt binary, so the first start prints the commands that
+            build it — or switch to Groq as above.
 
             Keys go to the operating system's keyring. Everything else lives in
             `%LOCALAPPDATA%\IRA`, `~/.local/share/ira`, or

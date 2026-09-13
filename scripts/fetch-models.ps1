@@ -2,9 +2,9 @@
 # Run from the repo root:  .\scripts\fetch-models.ps1
 
 #
-# Add -Whisper for offline STT (see "Local STT" in the README). It is opt-in
-# because it is a much larger download than everything else here combined, and
-# IRA talks to Groq by default -- nothing breaks without it.
+# Add -Whisper for local STT (see "Running offline" in the README). IRA
+# transcribes locally by default and fetches this herself on a first start, so
+# this is for fetching it ahead of time or forcing a backend.
 #
 #   .\scripts\fetch-models.ps1 -Whisper                  # detect GPU, pick a pack
 #   .\scripts\fetch-models.ps1 -Whisper -Backend cpu     # force the CPU build
@@ -15,7 +15,7 @@ param(
     [switch]$Whisper,
     [ValidateSet('auto', 'cpu', 'cuda11', 'cuda12')]
     [string]$Backend = 'auto',
-    [ValidateSet('tiny.en', 'base.en', 'small.en', 'medium.en', 'tiny', 'base', 'small', 'medium')]
+    [ValidateSet('tiny.en', 'base.en', 'small.en', 'tiny', 'base', 'small')]
     [string]$Model
 )
 
@@ -87,14 +87,12 @@ function Resolve-Backend {
         Write-Host 'gpu   none detected -- CPU build'
         return 'cpu'
     }
-    # cuda11 on a 12.x driver on purpose: CUDA is backward compatible, and the
-    # 11.8 pack is 45 MB against cuda12's 443 MB for the same speed on any card
-    # CUDA 11.8 has kernels for.
-    #
-    # ponytail: that excludes cards newer than CUDA 11.8 (Blackwell, sm_120),
-    # which fail at load rather than falling back. Pass -Backend cuda12 there.
-    Write-Host "gpu   NVIDIA, driver reports CUDA $major.x -- cuBLAS 11.8 build"
-    return 'cuda11'
+    # cuda12 whenever the driver can run it, despite 443 MB against 45: the
+    # 11.8 archive leaves cuBLAS out and will not start without the CUDA 11
+    # toolkit installed. Same rule as `detect_backend` in src/fetch.rs.
+    $pack = if ($major -ge 12) { 'cuda12' } elseif ($major -eq 11) { 'cuda11' } else { 'cpu' }
+    Write-Host "gpu   NVIDIA, driver reports CUDA $major.x -- $pack build"
+    return $pack
 }
 
 if ($Whisper) {
@@ -138,14 +136,9 @@ if ($Whisper) {
 
 Write-Host ''
 Write-Host 'done. now:'
-Write-Host '  $env:ANTHROPIC_API_KEY = "sk-ant-..."'
+Write-Host '  cargo run --release -- set ANTHROPIC_API_KEY sk-ant-...'
 if ($Whisper) {
-    Write-Host ''
-    Write-Host '  # offline STT -- leave this running in its own window:'
-    Write-Host "  .\whisper\whisper-server.exe -m .\models\ggml-$Model.bin --host 127.0.0.1 --port 8231"
-    Write-Host '  $env:IRA_STT_URL = "http://127.0.0.1:8231/inference"'
-    Write-Host ''
-} else {
-    Write-Host '  $env:GROQ_API_KEY = "gsk_..."'
+    Write-Host "  cargo run --release -- set IRA_WHISPER_MODEL $Model"
 }
+# Without -Whisper, IRA fetches it herself on her first start.
 Write-Host '  cargo run --release'

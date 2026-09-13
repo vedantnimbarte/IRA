@@ -36,7 +36,7 @@ See [0001](decisions/0001-audio-path-stays-in-one-process.md) and
 mic ─┬─ 1. capture ──── cpal, 48k stereo → 16k mono          [on device]
      ├─ 2. wake ─────── openWakeWord: mel → embed → classify [on device]
      ├─ 3. endpoint ─── Silero VAD v5, 512-sample chunks      [on device]
-     └─ 4. transcribe ─ Groq Whisper │ local whisper.cpp      [swappable]
+     └─ 4. transcribe ─ local whisper.cpp │ Groq Whisper     [swappable]
                               │
                         5. generate ── Anthropic │ OpenAI-compatible [swappable]
                               │ sentence at a time
@@ -45,9 +45,10 @@ mic ─┬─ 1. capture ──── cpal, 48k stereo → 16k mono          [on
                                        clear() = instant silence
 ```
 
-Stages 4 and 5 are URLs, not code paths — both alternatives already speak wire
-formats IRA emits (see
-[0003](decisions/0003-stt-and-model-are-urls.md)). Stages 1–3 and 6 never leave
+Stage 4 runs here by default, on a whisper-server IRA starts herself, and Groq
+is one setting away ([0020](decisions/0020-she-runs-whisper-herself.md)). Stage 5
+is a URL, not a code path ([0003](decisions/0003-stt-and-model-are-urls.md)).
+Stages 1–3 and 6 never leave
 the machine.
 
 The critical property is that stage 5 streams into stage 6 *sentence by
@@ -99,7 +100,8 @@ The exhaustive transition table lives in [SPEC.md](SPEC.md).
 | `vad.rs` | Silero v5, 576-sample window, recurrent state | **Closed** |
 | `tts.rs` | Piper subprocess, rodio queue, three earcons, ducking | **Closed** |
 | `main.rs` | The state machine and turn orchestration | **Closed** |
-| `stt.rs` | Transcription over HTTP, either backend | Config |
+| `stt.rs` | Transcription: which engine, and the fallback that only moves toward privacy | Config |
+| `whisper.rs` | The whisper-server IRA runs: start, restart, CUDA→CPU, whisper-cli | Config |
 | `llm.rs` | Streaming generation, sentence splitting, the tool loop | Config |
 | `tool.rs` | The `Tool` trait, registry, confirmation gate, background jobs | **Trait** |
 | `mcp.rs` | MCP servers adapted to that trait | Config |
@@ -197,8 +199,8 @@ socket or a dropped message, and the loop never learns about it. See
 
 Captured audio lives in a bounded in-memory buffer for the length of one utterance
 and is dropped when the turn ends. Nothing is written to disk, and nothing is
-retained for training. With local STT configured, no audio leaves the machine at
-all — a supported configuration today, not a roadmap item.
+retained for training. With local STT, the default, no audio leaves the machine at
+all.
 
 ## Decision record
 
@@ -206,7 +208,7 @@ all — a supported configuration today, not a roadmap item.
 |---|---|---|
 | [0001](decisions/0001-audio-path-stays-in-one-process.md) | The audio path stays in one process | accepted |
 | [0002](decisions/0002-tools-behind-a-trait-mcp-via-one-adapter.md) | Tools sit behind a Rust trait, with MCP through one adapter | accepted |
-| [0003](decisions/0003-stt-and-model-are-urls.md) | STT and the model are URLs, not code paths | accepted |
+| [0003](decisions/0003-stt-and-model-are-urls.md) | STT and the model are URLs, not code paths | accepted, amended by 0020 |
 | [0004](decisions/0004-write-status-is-ours-not-the-servers.md) | Write status is declared by us, never by the server | accepted |
 | [0005](decisions/0005-slow-tools-get-filler-speech.md) | Slow tools get filler speech | accepted |
 | [0006](decisions/0006-background-jobs-return-an-id.md) | Background jobs return an id; no queue, no database | accepted |

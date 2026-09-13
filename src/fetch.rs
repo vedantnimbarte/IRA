@@ -104,7 +104,7 @@ pub async fn core_files(models: &Path, piper: &Path) -> Result<()> {
         .parent()
         .and_then(Path::parent)
         .ok_or_else(|| anyhow!("IRA_PIPER has no directory to unpack beside: {}", piper.display()))?;
-    unpack(&client, &format!("{PIPER_RELEASE}/{asset}"), into).await?;
+    unpack(&client, &format!("{PIPER_RELEASE}/{asset}"), into, None).await?;
 
     // Check the one file that matters rather than trusting the extraction: an
     // archive can unpack partially and still exit zero, and the symptom of that
@@ -136,15 +136,23 @@ pub async fn run(args: &[String], models: &Path, voice: &Path, piper: &Path) -> 
                 eprintln!("Downloads the wake models, the VAD, the voice and piper into");
                 eprintln!("the data directory. Files already there are left alone.");
                 eprintln!();
-                eprintln!("--whisper adds offline speech-to-text, which is a much larger");
-                eprintln!("download than everything else here combined and is not needed");
-                eprintln!("unless you want IRA to hear you without a network.");
+                eprintln!("--whisper adds local speech-to-text, which IRA also fetches by");
+                eprintln!("herself when it is the engine and not yet here. --model picks");
+                eprintln!("the model and saves the choice: {}.", crate::whisper::MODELS.join(", "));
                 return 0;
             }
             other => {
                 eprintln!("unknown option: {other}");
                 return 2;
             }
+        }
+    }
+    // Saved rather than only fetched: a model on disk that the settings do not
+    // name is 466 MB IRA never uses.
+    if let Some(m) = &model {
+        if let Err(e) = crate::settings::set("IRA_WHISPER_MODEL", m) {
+            eprintln!("{e:#}");
+            return 2;
         }
     }
 
@@ -158,7 +166,7 @@ pub async fn run(args: &[String], models: &Path, voice: &Path, piper: &Path) -> 
         return 1;
     }
     if whisper {
-        if let Err(e) = whisper_files(models, model, backend).await {
+        if let Err(e) = whisper_files(models, backend).await {
             eprintln!("fetch failed: {e:#}");
             return 1;
         }
@@ -166,83 +174,101 @@ pub async fn run(args: &[String], models: &Path, voice: &Path, piper: &Path) -> 
     eprintln!();
     eprintln!("done. now:");
     eprintln!("  ira set ANTHROPIC_API_KEY sk-ant-...");
-    eprintln!("  ira set GROQ_API_KEY gsk_...");
     eprintln!("  ira");
     0
 }
 
-/// Offline speech-to-text.
+/// SHA-256 of each whisper.cpp v1.7.6 archive, lowercase hex.
 ///
-/// Windows gets the prebuilt archive upstream publishes. Nothing else does, and
-/// the source build the shell script does -- clone, cmake, copy -- is not
-/// something to run from inside a running assistant, so those platforms get the
-/// commands and a pointer at the script that already does it properly.
-async fn whisper_files(models: &Path, model: Option<String>, backend: Option<String>) -> Result<()> {
+/// What comes out of these is an executable IRA then runs, so the archive is
+/// checked before it is unpacked. Recorded from the GitHub release API's own
+/// `digest` field -- the same values Echo pins. Bumping the release means
+/// re-recording them from `api.github.com/repos/ggml-org/whisper.cpp/releases/tags/<tag>`.
+fn whisper_asset(backend: &str) -> Result<(&'static str, &'static str)> {
+    Ok(match backend {
+        "cpu" => ("whisper-bin-x64.zip", "0d2eca299c248f965bd0341bcb219db4b433c7f0c0ce2200d4df85765e8156a9"),
+        "cuda11" => ("whisper-cublas-11.8.0-bin-x64.zip", "d42f531781627f8cdceffc18fa03414ae90d1748a5c3f103ada64c991dd7f828"),
+        "cuda12" => ("whisper-cublas-12.4.0-bin-x64.zip", "3fc4d3ebd9a678313de50c04d9e59c43117ae190f0cb7bff602d4aeefc4efe3d"),
+        other => bail!("unknown backend {other}; expected cpu, cuda11 or cuda12"),
+    })
+}
+
+/// Local speech-to-text: the binaries, and the model the settings name.
+///
+/// Windows gets the prebuilt archives upstream publishes -- the one for this
+/// machine's GPU in `whisper/`, and beside a CUDA one the CPU pack in
+/// `whisper/cpu/`, which is what IRA falls back to when CUDA fails. Separate
+/// directories because each ships its own conflicting copy of the ggml DLLs.
+///
+/// Nothing else has prebuilt binaries, and the source build the shell script
+/// does -- clone, cmake, copy -- is not something to run from inside a running
+/// assistant, so those platforms get the commands.
+///
+/// Also what `whisper::apply` runs when the window switches to local.
+pub async fn whisper_files(models: &Path, backend: Option<String>) -> Result<()> {
     let client = reqwest::Client::new();
-    let dir = models.parent().unwrap_or(Path::new(".")).join("whisper");
+    let dir = crate::whisper::dir();
+    let model = crate::whisper::model();
 
     if !cfg!(windows) {
-        let model = model.unwrap_or_else(|| "base.en".into());
-        eprintln!();
-        eprintln!("whisper.cpp publishes no prebuilt binaries for {}.", std::env::consts::OS);
-        eprintln!("It is a source build, and it is tuned for the machine that builds it:");
-        eprintln!();
-        eprintln!("  git clone --depth 1 --branch v1.7.6 https://github.com/ggml-org/whisper.cpp w");
-        eprintln!("  cmake -S w -B w/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF");
-        eprintln!("  cmake --build w/build --config Release -j");
-        eprintln!("  mkdir -p {} && cp w/build/bin/whisper-* {}", dir.display(), dir.display());
-        eprintln!();
-        eprintln!("The model itself is a download, and that part is done here.");
+        if !crate::whisper::exe(&dir, "whisper-server").is_file() {
+            eprintln!();
+            eprintln!("whisper.cpp publishes no prebuilt binaries for {}.", std::env::consts::OS);
+            eprintln!("It is a source build, and it is tuned for the machine that builds it:");
+            eprintln!();
+            eprintln!("  git clone --depth 1 --branch v1.7.6 https://github.com/ggml-org/whisper.cpp w");
+            eprintln!("  cmake -S w -B w/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF");
+            eprintln!("  cmake --build w/build --config Release -j");
+            eprintln!("  mkdir -p {} && cp w/build/bin/whisper-* {}", dir.display(), dir.display());
+            eprintln!();
+            eprintln!("Or transcribe at Groq instead: ira set IRA_STT_ENGINE cloud");
+            eprintln!();
+            eprintln!("The model itself is a download, and that part is done here.");
+        }
         get(&client, &format!("{GGML}/ggml-{model}.bin"), &models.join(format!("ggml-{model}.bin"))).await?;
         return Ok(());
     }
 
     let backend = match backend {
         Some(b) => b,
-        None => detect_backend(),
-    };
-    let asset = match backend.as_str() {
-        "cpu" => "whisper-bin-x64.zip",
-        "cuda11" => "whisper-cublas-11.8.0-bin-x64.zip",
-        "cuda12" => "whisper-cublas-12.4.0-bin-x64.zip",
-        other => bail!("unknown backend {other}; expected cpu, cuda11 or cuda12"),
-    };
-    // A GPU makes a bigger model affordable, and small.en keeps proper nouns
-    // that tiny.en drops. On CPU the same model is too slow to talk to.
-    let model = model.unwrap_or_else(|| {
-        if backend == "cpu" { "tiny.en".into() } else { "small.en".to_string() }
-    });
-
-    let server = dir.join("whisper-server.exe");
-    if server.is_file() {
-        eprintln!("have  whisper-server.exe");
-    } else {
-        let stage = dir.with_extension("unpacking");
-        let _ = std::fs::remove_dir_all(&stage);
-        unpack(&client, &format!("{WHISPER_RELEASE}/{asset}"), &stage).await?;
-        // The archive nests everything under `Release\`. Flatten it: the
-        // binaries load their ggml and cudart DLLs from their own directory, so
-        // a preserved folder layout gives you an exe that cannot start.
-        std::fs::create_dir_all(&dir)?;
-        flatten(&stage, &dir)?;
-        let _ = std::fs::remove_dir_all(&stage);
-        if !server.is_file() {
-            bail!(
-                "whisper-server.exe missing after unpacking {asset} -- delete {} and try again",
-                dir.display()
-            );
+        None => {
+            let b = detect_backend();
+            eprintln!("gpu   {}", if b == "cpu" { "none detected -- CPU build".to_string() } else { format!("NVIDIA -- {b} build") });
+            b
         }
+    };
+    pack(&client, &dir, &backend).await?;
+    if crate::whisper::is_cuda_pack(&dir) {
+        pack(&client, &dir.join("cpu"), "cpu").await?;
     }
     get(&client, &format!("{GGML}/ggml-{model}.bin"), &models.join(format!("ggml-{model}.bin"))).await?;
+    Ok(())
+}
 
-    eprintln!();
-    eprintln!("offline STT -- leave this running in its own window:");
-    eprintln!(
-        "  {} -m {} --host 127.0.0.1 --port 8231",
-        server.display(),
-        models.join(format!("ggml-{model}.bin")).display()
-    );
-    eprintln!("  ira set IRA_STT_URL http://127.0.0.1:8231/inference");
+/// One whisper.cpp archive, verified and flattened into `dir`, unless its
+/// server is already there.
+async fn pack(client: &reqwest::Client, dir: &Path, backend: &str) -> Result<()> {
+    let server = crate::whisper::exe(dir, "whisper-server");
+    if server.is_file() {
+        eprintln!("have  {}", server.display());
+        return Ok(());
+    }
+    let (asset, sha) = whisper_asset(backend)?;
+    let stage = dir.with_extension("unpacking");
+    let _ = std::fs::remove_dir_all(&stage);
+    unpack(client, &format!("{WHISPER_RELEASE}/{asset}"), &stage, Some(sha)).await?;
+    // The archive nests everything under `Release\`. Flatten it: the
+    // binaries load their ggml and cudart DLLs from their own directory, so
+    // a preserved folder layout gives you an exe that cannot start.
+    std::fs::create_dir_all(dir)?;
+    flatten(&stage, dir)?;
+    let _ = std::fs::remove_dir_all(&stage);
+    if !server.is_file() {
+        bail!(
+            "whisper-server.exe missing after unpacking {asset} -- delete {} and try again",
+            dir.display()
+        );
+    }
     Ok(())
 }
 
@@ -251,33 +277,29 @@ async fn whisper_files(models: &Path, model: Option<String>, backend: Option<Str
 /// nvidia-smi ships with every NVIDIA driver, so its absence is a reliable "no
 /// card here" rather than something to warn about.
 ///
-/// cuda11 on a 12.x driver on purpose: CUDA is backward compatible, and the
-/// 11.8 pack is 45 MB against cuda12's 443 MB for the same speed on any card
-/// CUDA 11.8 has kernels for.
-///
-/// ponytail: that excludes cards newer than CUDA 11.8 (Blackwell, sm_120),
-/// which fail at load rather than falling back. Pass `--backend cuda12` there.
-fn detect_backend() -> String {
-    let out = std::process::Command::new("nvidia-smi").output();
-    let Ok(out) = out else {
-        eprintln!("gpu   none detected -- CPU build");
-        return "cpu".into();
-    };
-    if !out.status.success() {
-        eprintln!("gpu   none detected -- CPU build");
-        return "cpu".into();
+/// cuda12 whenever the driver can run it, despite 443 MB against cuda11's 45:
+/// the 11.8 archive leaves cuBLAS out, so on a machine without the CUDA 11
+/// toolkit installed its server exits at once with a missing DLL. The 12.4
+/// archive carries cuBLAS itself. Found by running the 11.8 pack on a GTX 1650.
+pub fn detect_backend() -> String {
+    match std::process::Command::new("nvidia-smi").output() {
+        Ok(out) if out.status.success() => backend_for(&String::from_utf8_lossy(&out.stdout)).into(),
+        _ => "cpu".into(),
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    // Header line reads: "... CUDA Version: 12.4 ..."
-    match text.split("CUDA Version:").nth(1).and_then(|r| r.trim_start().split('.').next()) {
-        Some(major) if major.trim().parse::<u32>().is_ok() => {
-            eprintln!("gpu   NVIDIA, driver reports CUDA {}.x -- cuBLAS 11.8 build", major.trim());
-            "cuda11".into()
-        }
-        _ => {
-            eprintln!("gpu   none detected -- CPU build");
-            "cpu".into()
-        }
+}
+
+/// The pack for what `nvidia-smi` printed. Its header reads "CUDA Version: 13.1",
+/// the newest generation the driver runs, and older ones stay compatible.
+fn backend_for(smi: &str) -> &'static str {
+    let major = smi
+        .split("CUDA Version:")
+        .nth(1)
+        .and_then(|r| r.split_whitespace().next())
+        .and_then(|v| v.split('.').next()?.parse::<u32>().ok());
+    match major {
+        Some(m) if m >= 12 => "cuda12",
+        Some(11) => "cuda11",
+        _ => "cpu",
     }
 }
 
@@ -347,13 +369,24 @@ async fn get(client: &reqwest::Client, url: &str, dest: &Path) -> Result<()> {
 /// `tar` rather than a zip crate: Windows 10 and later ship bsdtar as `tar.exe`
 /// and it reads zip, and `tar` has been on every unix for decades. Three crates
 /// and their dependency trees, for a step that runs at most twice.
-async fn unpack(client: &reqwest::Client, url: &str, into: &Path) -> Result<()> {
+///
+/// `sha256`, when given, must match before anything is extracted.
+async fn unpack(client: &reqwest::Client, url: &str, into: &Path, sha256: Option<&str>) -> Result<()> {
     let name = url.rsplit('/').next().unwrap_or("archive");
     // Never reused between runs: a half-downloaded archive unpacks a
     // half-populated directory and still looks like it worked.
     let tmp = std::env::temp_dir().join(format!("ira-{}-{}", std::process::id(), name));
     let _ = std::fs::remove_file(&tmp);
     get(client, url, &tmp).await?;
+    if let Some(want) = sha256 {
+        use sha2::Digest;
+        let got = sha2::Sha256::digest(std::fs::read(&tmp)?);
+        let got: String = got.iter().map(|b| format!("{b:02x}")).collect();
+        if got != want {
+            let _ = std::fs::remove_file(&tmp);
+            bail!("{name} is not the file that was pinned (sha256 {got}); refusing to unpack it");
+        }
+    }
     std::fs::create_dir_all(into)?;
 
     let status = std::process::Command::new("tar")
@@ -372,6 +405,13 @@ async fn unpack(client: &reqwest::Client, url: &str, into: &Path) -> Result<()> 
 
 fn name_of(path: &Path) -> String {
     path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned()
+}
+
+/// The latest progress, for the settings window, which has no terminal to watch.
+static LINE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+pub fn progress_line() -> String {
+    LINE.lock().map(|l| l.clone()).unwrap_or_default()
 }
 
 /// One line per file while it downloads.
@@ -401,10 +441,19 @@ impl Progress {
     }
 
     fn at(&mut self, done: u64) {
-        if !self.tty || self.last.elapsed().as_millis() < 100 {
+        if self.last.elapsed().as_millis() < 100 {
             return;
         }
         self.last = std::time::Instant::now();
+        if let Ok(mut line) = LINE.lock() {
+            *line = match self.total {
+                Some(total) => format!("Downloading {}: {} of {}", self.name, mb(done), mb(total)),
+                None => format!("Downloading {}: {}", self.name, mb(done)),
+            };
+        }
+        if !self.tty {
+            return;
+        }
         match self.total {
             Some(total) => eprint!("\rfetch {} {} / {}   ", self.name, mb(done), mb(total)),
             None => eprint!("\rfetch {} {}   ", self.name, mb(done)),
@@ -467,6 +516,16 @@ mod tests {
 
     /// The archive holds `piper/`, so it has to unpack into the grandparent of
     /// the executable. Off by one directory and it lands in `piper/piper/`.
+    #[test]
+    fn a_driver_gets_the_pack_that_runs_on_it() {
+        let smi = |v: &str| format!("| NVIDIA-SMI 591.86   Driver Version: 591.86   CUDA Version: {v}     |");
+        assert_eq!(backend_for(&smi("13.1")), "cuda12");
+        assert_eq!(backend_for(&smi("12.4")), "cuda12");
+        assert_eq!(backend_for(&smi("11.8")), "cuda11");
+        assert_eq!(backend_for(&smi("10.2")), "cpu");
+        assert_eq!(backend_for("No devices were found"), "cpu");
+    }
+
     #[test]
     fn piper_unpacks_one_level_above_itself() {
         let piper = Path::new("/data/piper/piper.exe");

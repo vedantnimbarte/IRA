@@ -49,7 +49,7 @@ context, the decision, its consequences, and what would change it.
 |---|---|---|
 | [0001](decisions/0001-audio-path-stays-in-one-process.md) | The audio path stays in one process | accepted |
 | [0002](decisions/0002-tools-behind-a-trait-mcp-via-one-adapter.md) | Tools sit behind a Rust trait, with MCP through one adapter | accepted |
-| [0003](decisions/0003-stt-and-model-are-urls.md) | STT and the model are URLs, not code paths | accepted |
+| [0003](decisions/0003-stt-and-model-are-urls.md) | STT and the model are URLs, not code paths | accepted, amended by 0020 |
 | [0004](decisions/0004-write-status-is-ours-not-the-servers.md) | Write status is declared by us, never by the server | accepted |
 | [0005](decisions/0005-slow-tools-get-filler-speech.md) | Slow tools get filler speech | accepted |
 | [0006](decisions/0006-background-jobs-return-an-id.md) | Background jobs return an id; no queue, no database | accepted |
@@ -66,6 +66,7 @@ context, the decision, its consequences, and what would change it.
 | [0017](decisions/0017-servers-and-skills-are-configured-in-the-window.md) | Servers and skills are configured in the window, and stored in the database | accepted |
 | [0018](decisions/0018-integrating-other-tools.md) | Integrating other tools, in both directions | accepted |
 | [0019](decisions/0019-installed-rather-than-cloned.md) | Installed rather than cloned: per-user data, a first-run download, real installers | accepted |
+| [0020](decisions/0020-she-runs-whisper-herself.md) | She runs whisper herself, and local is the default | accepted |
 
 ## Looking for something specific?
 
@@ -73,7 +74,7 @@ context, the decision, its consequences, and what would change it.
 |---|---|
 | Run IRA | [README](../README.md) |
 | Set an environment variable | [SPEC.md](SPEC.md#environment-variables) |
-| Run STT offline | [README](../README.md) — Local STT |
+| Run STT offline, or switch to Groq | [README](../README.md) — Running offline |
 | Use OpenRouter or a local model | [README](../README.md) — OpenRouter |
 | Understand barge-in | [ARCHITECTURE.md](ARCHITECTURE.md) — the governing constraint |
 | Add a tool | [ARCHITECTURE.md](ARCHITECTURE.md) — tool subsystem, then [SPEC.md](SPEC.md) — types |

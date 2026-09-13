@@ -1,6 +1,6 @@
 # 0003 — STT and the model are URLs, not code paths
 
-**Status:** accepted
+**Status:** accepted, amended by [0020](0020-she-runs-whisper-herself.md)
 **Date:** 2026-09-06
 
 ## Context

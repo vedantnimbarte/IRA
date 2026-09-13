@@ -586,6 +586,7 @@ fn settings_state(ui: &Ui) -> String {
                 "secret": f.secret,
                 "set": crate::settings::is_set(f.name),
                 "store": f.store(),
+                "choices": f.choices.iter().map(|(v, l)| json!([v, l])).collect::<Vec<_>>(),
             });
             if !f.secret {
                 o["value"] = json!(crate::settings::get(f.name).unwrap_or_default());
@@ -672,9 +673,12 @@ fn settings_state(ui: &Ui) -> String {
         })
         .collect();
 
+    let (busy, ok, said) = crate::whisper::status();
     serde_json::to_string(&json!({
         "groups": groups,
         "fields": fields,
+        // What local transcription is doing, said under the engine switch.
+        "whisper": { "busy": busy, "ok": ok, "status": said },
         "servers": servers,
         "skills": skills,
         // Without a registry the page is an editor for a database and should
@@ -693,7 +697,14 @@ fn save_setting(body: &[u8]) -> String {
         return error("a settings change needs a name and a value");
     };
     match crate::settings::set(name, value) {
-        Ok(()) => json!({ "saved": name }).to_string(),
+        Ok(()) => {
+            // The engine is a running process, not only a value: switching to
+            // local downloads and starts it, switching away stops it.
+            if matches!(name, "IRA_STT_ENGINE" | "IRA_WHISPER_MODEL" | "IRA_STT_URL") {
+                crate::whisper::apply();
+            }
+            json!({ "saved": name }).to_string()
+        }
         // The message can name the setting and the reason; it must never quote
         // the value back, because for half of these the value is a key.
         Err(e) => error(format!("{name} was not saved: {e}")),
@@ -1130,7 +1141,7 @@ async fn reply_json<W: tokio::io::AsyncWrite + Unpin>(write: &mut W, status: u16
 ///
 /// Within keys, hearing and answering are still two blocks in the order a turn
 /// happens, because everything before transcription already runs on this
-/// machine and that is what these six values actually divide into. The rail
+/// machine and that is what these values actually divide into. The rail
 /// groups them; it does not regroup them.
 ///
 /// Servers and skills are grids of cards rather than stacked rows. A card is
@@ -1258,7 +1269,7 @@ const SETTINGS: &str = r##"<!doctype html>
   .about { margin:3px 0 0; color:var(--muted); font-size:12.5px; line-height:1.45; max-width:54ch; }
 
   .control { display:flex; gap:8px; margin-top:11px; align-items:stretch; }
-  input {
+  input, .control select {
     flex:1 1 auto; min-width:0; height:38px; padding:0 12px;
     border:1px solid var(--edge); border-radius:9px;
     background:var(--sunk); color:var(--ink);
@@ -1266,9 +1277,11 @@ const SETTINGS: &str = r##"<!doctype html>
     transition:border-color .15s ease, background .15s ease;
   }
   input::placeholder { color:var(--faint); font-family:var(--sans); font-size:13px; }
-  input:hover { border-color:var(--muted); }
-  input:focus { outline:none; border-color:var(--focus); background:var(--ground); }
-  input.saved { border-color:var(--good); }
+  input:hover, .control select:hover { border-color:var(--muted); }
+  input:focus, .control select:focus { outline:none; border-color:var(--focus); background:var(--ground); }
+  input.saved, select.saved { border-color:var(--good); }
+  /* A list says words, not a value, so it reads in the text face. */
+  .control select { flex:0 1 320px; font-family:var(--sans); cursor:pointer; }
 
   /* Actions arrive when you are working on a field, so six of them are not
      competing for attention while you read. A reserved column, so every box is
@@ -1432,7 +1445,7 @@ const SETTINGS: &str = r##"<!doctype html>
 <script>
 const nav = document.getElementById('nav');
 const main = document.getElementById('main');
-let state = { groups: [], fields: [], servers: [], skills: [], live: false };
+let state = { groups: [], fields: [], servers: [], skills: [], live: false, whisper: { busy: false, ok: true, status: '' } };
 
 // Where you are. Kept outside `draw` because every save answers with the whole
 // state and redraws from it, and that must put you back where you were rather
@@ -1502,11 +1515,16 @@ function toggle(label, on, onToggle) {
 //
 // Still two blocks in the order a turn happens. Everything before
 // transcription already runs on this machine, so hearing and answering is what
-// these six values divide into.
+// these values divide into.
 
 // What the line under a box says. A field that is empty says what IRA does
 // instead of it, rather than only that it is empty.
 function status(f) {
+  // The engine is a running thing, so its line says what it is doing.
+  if (f.name === 'IRA_STT_ENGINE') {
+    const w = state.whisper;
+    return { text: w.status, cls: w.busy ? '' : (w.ok ? 'is-set' : 'is-bad') };
+  }
   if (!f.set) return { text: f.empty, cls: '' };
   // Which store it is in, so "stored where I cannot see it" and "saved in a
   // file next to IRA" are not the same sentence.
@@ -1523,6 +1541,29 @@ function field(f) {
   if (f.about) row.append(el('p', 'about', f.about));
 
   const control = el('div', 'control');
+  const s = status(f);
+  const line = el('p', 'status ' + s.cls, s.text);
+  line.id = 'status-' + f.name;
+  line.setAttribute('role', 'status');
+
+  // A fixed set of values is a list, saved the moment it changes. The first
+  // choice is what unset means, so an unset one shows as that.
+  if (f.choices.length) {
+    const pick = el('select');
+    pick.id = f.name;
+    for (const [value, label] of f.choices) {
+      const o = el('option', null, label);
+      o.value = value;
+      pick.append(o);
+    }
+    pick.value = f.value || f.choices[0][0];
+    pick.setAttribute('aria-describedby', line.id);
+    pick.onchange = () => send(f.name, pick.value);
+    control.append(pick);
+    row.append(control, line);
+    return row;
+  }
+
   const input = el('input');
   input.id = f.name;
   input.type = f.secret ? 'password' : 'text';
@@ -1557,12 +1598,6 @@ function field(f) {
   };
 
   control.append(input, actions);
-
-  const s = status(f);
-  const line = el('p', 'status ' + s.cls, s.text);
-  line.id = 'status-' + f.name;
-  line.setAttribute('role', 'status');
-
   row.append(control, line);
   return row;
 }
@@ -2137,8 +2172,30 @@ async function load() {
   // fault; a save in place should not jump you either.
   main.scrollTop = first ? 0 : keep;
   first = false;
+  if (state.whisper.busy) watchDownload();
 }
 let first = true;
+
+// While a download runs, only its line is rewritten: redrawing the page every
+// second would wipe a key someone is halfway through typing. The full redraw
+// waits until it is over.
+let watching = false;
+async function watchDownload() {
+  if (watching) return;
+  watching = true;
+  try {
+    for (;;) {
+      await new Promise(r => setTimeout(r, 1000));
+      const now = await (await fetch('/settings/state')).json();
+      if (!now.whisper.busy) break;
+      const line = document.getElementById('status-IRA_STT_ENGINE');
+      if (line) line.textContent = now.whisper.status;
+    }
+  } finally {
+    watching = false;
+  }
+  await load();
+}
 
 async function send(name, value) {
   const input = document.getElementById(name);

@@ -118,7 +118,7 @@ impl Turn {
 /// Which STT backend a turn used, for the log line. Local means no audio left
 /// the machine.
 pub fn stt_backend() -> &'static str {
-    if crate::settings::is_set("IRA_STT_URL") {
+    if crate::stt::local() {
         "local"
     } else {
         "groq"

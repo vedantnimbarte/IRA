@@ -5,9 +5,9 @@
 # The POSIX counterpart of fetch-models.ps1. Keep the two in step: they fetch
 # the same files, from the same pinned releases, into the same directories.
 #
-# Add --whisper for offline STT (see "Local STT" in the README). It is opt-in
-# because it is a much larger download than everything else here combined, and
-# IRA talks to Groq by default -- nothing breaks without it.
+# Add --whisper for local STT (see "Running offline" in the README). IRA
+# transcribes locally by default and fetches the model herself, but only this
+# script builds whisper-server on Linux and macOS.
 #
 #   ./scripts/fetch-models.sh --whisper
 #   ./scripts/fetch-models.sh --whisper --model small.en
@@ -124,14 +124,10 @@ fi
 
 echo
 echo "done. now:"
-echo '  export ANTHROPIC_API_KEY="sk-ant-..."'
+echo '  cargo run --release -- set ANTHROPIC_API_KEY sk-ant-...'
 if [ "$WHISPER" = "1" ]; then
-    echo
-    echo '  # offline STT -- leave this running in its own terminal:'
-    echo "  ./whisper/whisper-server -m ./models/ggml-$MODEL.bin --host 127.0.0.1 --port 8231"
-    echo '  export IRA_STT_URL="http://127.0.0.1:8231/inference"'
-    echo
-else
-    echo '  export GROQ_API_KEY="gsk_..."'
+    echo "  cargo run --release -- set IRA_WHISPER_MODEL $MODEL"
 fi
+# Without --whisper, IRA fetches the model on her first start and says how to
+# build whisper-server.
 echo "  cargo run --release"

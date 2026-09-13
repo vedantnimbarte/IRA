@@ -30,6 +30,9 @@ toml = "0.8"
 rmcp = { version = "3", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "auth"] }
 keyring = { version = "4.2.0", features = ["apple-native-keyring-store"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+# Checking the whisper.cpp archives before running what is in them. Already in
+# the tree through oauth2 and wry, so this adds no crate.
+sha2 = "0.10"
 
 # The orb, an always-on-top overlay. Windows-only on purpose: the event loop
 # runs on a spawned thread, which is a Windows affordance, and a target-specific
@@ -53,6 +56,8 @@ windows-sys = { version = "0.61", features = [
     # would have printed at a log file first. See console.rs.
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
+    # Tying whisper-server to IRA's lifetime however she exits. See whisper.rs.
+    "Win32_System_JobObjects",
     "Win32_Security_Credentials",
     "Win32_System_LibraryLoader",
     "Win32_UI_HiDpi",
