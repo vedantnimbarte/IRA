@@ -71,7 +71,15 @@ const SPECULATE_MS: u64 = 200;
 /// The transcribing task always answers, even to report failure, so reaching
 /// this means the task itself died. Without it the loop would hold the floor
 /// forever and IRA would simply stop responding -- the worst failure it has.
+///
+/// Time spent while whisper-server is still starting does not count: that is a
+/// transcriber on its way, not one that has died. See `waiting_on_transcript`.
 const TRANSCRIPT_TIMEOUT_MS: u64 = 15_000;
+
+/// How long a question waits on a starting whisper-server in silence before IRA
+/// says why. Shorter, and a start that was about to finish gets a needless
+/// sentence; longer, and the silence reads as not having been heard.
+const WAKING_AFTER_MS: u64 = 1_500;
 
 /// Speculation only helps while it starts before the endpoint fires, and the
 /// saving is exactly the gap between them. Checked at compile time because
@@ -128,6 +136,9 @@ const PRE_ROLL_KEEP: usize = audio::SR as usize * 2 / 5; // 400 ms
 /// Fixed phrases, not model output: an LLM failure must not need the LLM to
 /// report itself, and a failure the user cannot hear is the same as a crash.
 const SAY_STT_FAILED: &str = "I didn't catch that.";
+/// Said while a question waits on whisper-server loading, so the silence has a
+/// reason. It is not a failure: the answer follows once the server is up.
+const SAY_WAKING: &str = "One moment, I'm still waking up.";
 const SAY_LLM_FAILED: &str = "I'm having trouble thinking right now.";
 const SAY_CANCELLED: &str = "Cancelled.";
 
@@ -193,6 +204,38 @@ fn listening_next(
         Next::Answer
     } else {
         Next::Wait
+    }
+}
+
+/// What a turn waiting on its transcript should do this frame.
+#[derive(Debug, PartialEq)]
+enum Waiting {
+    /// Keep waiting.
+    Wait,
+    /// Keep waiting, and say the server is still starting.
+    SayWaking,
+    /// The transcriber has died. Apologise and move on.
+    GiveUp,
+}
+
+/// Decides, per frame, how long a transcript is worth waiting for.
+///
+/// `waited_ms` is the whole wait, which is what decides whether the silence has
+/// gone on long enough to explain. `counted_ms` is the part that counts toward
+/// the timeout, which the caller restarts for as long as `starting` holds -- so
+/// a server that took 28 s to load still leaves the full timeout for the
+/// transcription itself.
+fn waiting_on_transcript(starting: bool, waited_ms: u64, counted_ms: u64, told: bool) -> Waiting {
+    if starting {
+        if !told && waited_ms >= WAKING_AFTER_MS {
+            Waiting::SayWaking
+        } else {
+            Waiting::Wait
+        }
+    } else if counted_ms > TRANSCRIPT_TIMEOUT_MS {
+        Waiting::GiveUp
+    } else {
+        Waiting::Wait
     }
 }
 
@@ -566,6 +609,11 @@ async fn run(hide_console: bool) -> Result<()> {
     // When the endpoint fired, so stt_ms measures the wait the user actually
     // experienced rather than how long transcription took.
     let mut stt_started = Instant::now();
+    // The part of that wait which counts toward the timeout: restarted for as
+    // long as whisper-server is still starting. See `waiting_on_transcript`.
+    let mut transcript_clock = Instant::now();
+    // Whether this turn has already said it is still waking up. Once is plenty.
+    let mut told_waking = false;
     let speculate = speculate_ms();
 
     tracing::info!(stt_backend, %llm_model, "ready -- say the wake word; ctrl-c to quit");
@@ -704,6 +752,8 @@ async fn run(hide_console: bool) -> Result<()> {
                                 let timings = t.timings.clone();
                                 turn = Some(t);
                                 stt_started = Instant::now();
+                                transcript_clock = stt_started;
+                                told_waking = false;
                                 hold_base_ms = tts.elapsed_ms();
                                 tts.begin_turn();
                                 go(&mut state, State::Holding, &ui);
@@ -854,15 +904,32 @@ async fn run(hide_console: bool) -> Result<()> {
                             wake_ms = 0;
                             wake_at = Some(Instant::now());
                             go(&mut state, State::Listening, &ui);
-                        } else if awaiting
-                            && stt_started.elapsed().as_millis() as u64 > TRANSCRIPT_TIMEOUT_MS
-                        {
-                            tracing::error!("no transcript came back");
-                            awaiting = false;
-                            llm_running = false;
-                            ui.send(ui::Event::Failed { what: "transcription".into() });
-                            let _ = tts.say(SAY_STT_FAILED);
-                        } else if !llm_running && !awaiting && tts.idle() {
+                        } else if awaiting {
+                            let starting = whisper::starting();
+                            if starting {
+                                transcript_clock = Instant::now();
+                            }
+                            match waiting_on_transcript(
+                                starting,
+                                stt_started.elapsed().as_millis() as u64,
+                                transcript_clock.elapsed().as_millis() as u64,
+                                told_waking,
+                            ) {
+                                Waiting::Wait => {}
+                                Waiting::SayWaking => {
+                                    told_waking = true;
+                                    tracing::info!("whisper-server still starting; saying so");
+                                    let _ = tts.say(SAY_WAKING);
+                                }
+                                Waiting::GiveUp => {
+                                    tracing::error!("no transcript came back");
+                                    awaiting = false;
+                                    llm_running = false;
+                                    ui.send(ui::Event::Failed { what: "transcription".into() });
+                                    let _ = tts.say(SAY_STT_FAILED);
+                                }
+                            }
+                        } else if !llm_running && tts.idle() {
                             if ducked {
                                 tts.unduck();
                                 ducked = false;
@@ -991,6 +1058,13 @@ async fn run(hide_console: bool) -> Result<()> {
                                     &t.timings.stt_ms,
                                     stt_started.elapsed().as_millis() as u64,
                                 );
+                            }
+                            // "Still waking up" was the turn's first sound, not
+                            // its reply. Without this the turn line reports it as
+                            // first audio, and total_ms comes out shorter than
+                            // the transcription it waited on.
+                            if told_waking {
+                                tts.begin_turn();
                             }
                             let timings = turn
                                 .as_ref()
@@ -1250,6 +1324,25 @@ fn spawn_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The race this exists for: a busy machine took 28 s to load whisper, and
+    /// the first question, asked 11 s in, timed out at 15 s. A start in progress
+    /// never gives up and is explained once; once the server is up, the full
+    /// timeout applies to the transcription itself.
+    #[test]
+    fn a_starting_transcriber_is_waited_for_and_explained_once() {
+        use Waiting::*;
+        // Still starting, 20 s in: no giving up, however long it has been.
+        assert_eq!(waiting_on_transcript(true, 20_000, 0, true), Wait);
+        // Explained after a beat, and only once.
+        assert_eq!(waiting_on_transcript(true, 500, 0, false), Wait);
+        assert_eq!(waiting_on_transcript(true, WAKING_AFTER_MS, 0, false), SayWaking);
+        assert_eq!(waiting_on_transcript(true, 9_000, 0, true), Wait);
+        // Started: 30 s waited in total, but only 2 s of it counts.
+        assert_eq!(waiting_on_transcript(false, 30_000, 2_000, true), Wait);
+        // A transcriber that is up and silent for the whole timeout has died.
+        assert_eq!(waiting_on_transcript(false, 16_000, TRANSCRIPT_TIMEOUT_MS + 1, false), GiveUp);
+    }
 
 
     /// The barge-in race, as a test.
