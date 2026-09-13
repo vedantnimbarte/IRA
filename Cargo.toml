@@ -38,6 +38,11 @@ sha2 = "0.10"
 # runs on a spawned thread, which is a Windows affordance, and a target-specific
 # dependency also keeps webkit2gtk out of the Linux CI job for a feature that
 # platform does not get. decisions/0013.
+# espeak-ng is loaded from beside piper at run time; see kokoro.rs. Already in
+# the tree.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 # The orb, an always-on-top overlay. Windows-only on purpose, and a
 # target-specific dependency keeps all of it out of the Linux CI job for a

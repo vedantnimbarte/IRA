@@ -1,8 +1,15 @@
-//! Piper TTS as a long-lived subprocess, playing through rodio.
+//! Speech: Kokoro on a thread of its own, or Piper as a long-lived subprocess,
+//! both playing through rodio.
 //!
 //! One piper process stays alive and takes sentences on stdin, so there is no
 //! model-load cost per reply. Barge-in clears the rodio queue (instant silence)
 //! and respawns piper to throw away whatever it was mid-way through generating.
+//!
+//! Kokoro is the voice when `IRA_TTS_ENGINE` allows it and its model is on disk
+//! ([decisions/0021](../docs/decisions/0021-kokoro-is-the-voice.md)). Piper stays
+//! running underneath regardless, and Kokoro's thread hands it any sentence it
+//! cannot say -- every one, if Kokoro will not load -- because a voice that
+//! fails must fall back to a voice rather than to silence.
 
 use anyhow::{anyhow, Context, Result};
 use rodio::buffer::SamplesBuffer;
@@ -92,7 +99,8 @@ pub struct Tts {
     _stream: MixerDeviceSink,
     sink: Arc<Player>,
     child: Option<Child>,
-    stdin: Option<ChildStdin>,
+    /// Shared with the Kokoro thread, which hands Piper any sentence it cannot say.
+    stdin: Arc<std::sync::Mutex<Option<ChildStdin>>>,
     /// Millis since process start when piper last produced audio bytes.
     last_audio: Arc<AtomicU64>,
     /// Piper has been given a sentence it has not started rendering yet.
@@ -112,7 +120,26 @@ pub struct Tts {
     /// because `begin_turn` clears them through a shared reference.
     fence: AtomicBool,
     elided: AtomicBool,
+    /// Kokoro, while it is the engine. Dropping it ends its thread.
+    kokoro: Option<KokoroThread>,
+    /// Bumped by barge-in. A sentence Kokoro was given under an older number is
+    /// thrown away, even one it has already finished synthesising.
+    generation: Arc<AtomicU64>,
 }
+
+/// Kokoro's thread, and how to reach it.
+struct KokoroThread {
+    tx: std::sync::mpsc::Sender<(u64, String)>,
+    state: Arc<std::sync::atomic::AtomicU8>,
+    /// Sentences sent and not yet spoken. `awaiting` is "this is above zero",
+    /// kept separately because a queue of three sentences is not finished when
+    /// the first one has played.
+    pending: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+const LOADING: u8 = 0;
+const READY: u8 = 1;
+const FAILED: u8 = 2;
 
 impl Tts {
     pub fn new(piper: &Path, voice: &Path) -> Result<Self> {
@@ -134,19 +161,124 @@ impl Tts {
             _stream: stream,
             sink,
             child: None,
-            stdin: None,
+            stdin: Arc::new(std::sync::Mutex::new(None)),
             last_audio: Arc::new(AtomicU64::new(0)),
             awaiting: Arc::new(AtomicBool::new(false)),
             first_audio: Arc::new(AtomicU64::new(0)),
             fence: AtomicBool::new(false),
             elided: AtomicBool::new(false),
+            kokoro: None,
+            generation: Arc::new(AtomicU64::new(0)),
             started: Instant::now(),
             piper: piper.to_path_buf(),
             voice: voice.to_path_buf(),
             sample_rate,
         };
         tts.spawn()?;
+        // Start-up is already a wait, so the first sentence gets Kokoro rather
+        // than Piper standing in while it loads. Bounded, because a load that
+        // hangs must not keep IRA from starting.
+        tts.sync_engine();
+        if let Some(k) = &tts.kokoro {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while k.state.load(Ordering::Relaxed) == LOADING && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
         Ok(tts)
+    }
+
+    /// Starts or stops Kokoro to match the settings. Checked before every
+    /// sentence, so a choice made in the window is heard on the next one.
+    ///
+    /// A Kokoro that failed to load stays failed for the session rather than
+    /// being retried a sentence at a time; Piper speaks instead.
+    fn sync_engine(&mut self) {
+        let want = crate::settings::get("IRA_TTS_ENGINE").as_deref() != Some("piper")
+            && crate::kokoro::installed();
+        match (self.kokoro.is_some(), want) {
+            (false, true) => self.kokoro = Some(self.start_kokoro()),
+            (true, false) => {
+                tracing::info!("kokoro stopped; piper speaks");
+                self.kokoro = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn start_kokoro(&self) -> KokoroThread {
+        let (tx, rx) = std::sync::mpsc::channel::<(u64, String)>();
+        let state = Arc::new(std::sync::atomic::AtomicU8::new(LOADING));
+        let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (st, pend) = (state.clone(), pending.clone());
+        let (sink, last, awaiting, first, generation, stdin) = (
+            self.sink.clone(),
+            self.last_audio.clone(),
+            self.awaiting.clone(),
+            self.first_audio.clone(),
+            self.generation.clone(),
+            self.stdin.clone(),
+        );
+        let (piper, started) = (self.piper.clone(), self.started);
+        let rate = NonZero::new(crate::kokoro::SAMPLE_RATE).expect("nonzero");
+
+        std::thread::spawn(move || {
+            let t = Instant::now();
+            // Sentences sent while this loads wait in the channel, so a voice
+            // chosen a moment ago is the one that says them.
+            let mut k = match crate::kokoro::Kokoro::new(&piper, &crate::kokoro::voice()) {
+                Ok(k) => {
+                    tracing::info!(ms = t.elapsed().as_millis() as u64, voice = %crate::kokoro::voice(), "kokoro ready");
+                    st.store(READY, Ordering::Relaxed);
+                    Some(k)
+                }
+                Err(e) => {
+                    tracing::error!("kokoro would not load, piper speaks instead: {e:#}");
+                    st.store(FAILED, Ordering::Relaxed);
+                    None
+                }
+            };
+
+            while let Ok((sent_in, line)) = rx.recv() {
+                let current = || sent_in == generation.load(Ordering::Relaxed);
+                let mut handed_to_piper = false;
+                if current() {
+                    let said = k.as_mut().map(|k| {
+                        if let Err(e) = k.set_voice(&crate::kokoro::voice()) {
+                            tracing::warn!("{e:#}");
+                        }
+                        k.speak(&line)
+                    });
+                    match said {
+                        // Checked again: a barge-in during synthesis arrives
+                        // after the queue was cleared, and must not play.
+                        Some(Ok(samples)) if current() && !samples.is_empty() => {
+                            let now = started.elapsed().as_millis() as u64;
+                            last.store(now, Ordering::Relaxed);
+                            let _ = first.compare_exchange(0, now.max(1), Ordering::Relaxed, Ordering::Relaxed);
+                            sink.append(SamplesBuffer::new(mono(), rate, samples));
+                        }
+                        Some(Ok(_)) => {}
+                        // Not loaded, or this sentence failed: Piper says it.
+                        failed => {
+                            if let Some(Err(e)) = failed {
+                                tracing::error!("kokoro: {e:#}");
+                            }
+                            match to_piper(&stdin, &line) {
+                                Ok(()) => handed_to_piper = true,
+                                Err(e) => tracing::error!("piper: {e:#}"),
+                            }
+                        }
+                    }
+                }
+                // Piper clears `awaiting` itself when its audio arrives; doing it
+                // here too would call the turn over before it has said a word.
+                if pend.fetch_sub(1, Ordering::Relaxed) == 1 && !handed_to_piper {
+                    awaiting.store(false, Ordering::Relaxed);
+                }
+            }
+        });
+        KokoroThread { tx, state, pending }
     }
 
     fn spawn(&mut self) -> Result<()> {
@@ -162,7 +294,7 @@ impl Tts {
             .with_context(|| format!("spawn piper at {}", self.piper.display()))?;
 
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no piper stdout"))?;
-        self.stdin = child.stdin.take();
+        *self.stdin.lock().map_err(|_| anyhow!("piper stdin lock poisoned"))? = child.stdin.take();
         self.child = Some(child);
 
         let sink = self.sink.clone();
@@ -237,13 +369,22 @@ impl Tts {
     }
 
     fn write_line(&mut self, text: &str) -> Result<()> {
-        let stdin = self.stdin.as_mut().ok_or_else(|| anyhow!("piper stdin closed"))?;
-        writeln!(stdin, "{}", text.replace('\n', " "))?;
-        stdin.flush()?;
+        self.sync_engine();
+        // Before the sentence goes anywhere: whoever renders it clears these,
+        // and setting them afterwards could undo a clear that already happened.
         self.last_audio
             .store(self.started.elapsed().as_millis() as u64, Ordering::Relaxed);
         self.awaiting.store(true, Ordering::Relaxed);
-        Ok(())
+        let line = text.replace('\n', " ");
+
+        if let Some(k) = self.kokoro.as_ref().filter(|k| k.state.load(Ordering::Relaxed) != FAILED) {
+            k.pending.fetch_add(1, Ordering::Relaxed);
+            if k.tx.send((self.generation.load(Ordering::Relaxed), line.clone())).is_ok() {
+                return Ok(());
+            }
+            k.pending.fetch_sub(1, Ordering::Relaxed);
+        }
+        to_piper(&self.stdin, &line)
     }
 
     /// Millis since this `Tts` was created. The clock the other timings share.
@@ -286,13 +427,17 @@ impl Tts {
 
     /// Barge-in: silence immediately, then discard piper's in-flight work.
     pub fn interrupt(&mut self) -> Result<()> {
+        // Kokoro's queued and in-flight sentences are now stale.
+        self.generation.fetch_add(1, Ordering::Relaxed);
         self.sink.clear();
         // clear() also pauses the sink in rodio; re-arm it for the next reply.
         self.sink.play();
         // A duck must never outlive the turn that caused it, or the next reply
         // is quiet for no reason anyone could explain.
         self.sink.set_volume(1.0);
-        self.stdin.take();
+        if let Ok(mut s) = self.stdin.lock() {
+            s.take();
+        }
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();
             let _ = c.wait();
@@ -375,9 +520,21 @@ impl Tts {
     }
 }
 
+/// One line to Piper. Shared by the loop and by Kokoro's thread, which sends
+/// Piper whatever it could not say itself.
+fn to_piper(stdin: &std::sync::Mutex<Option<ChildStdin>>, line: &str) -> Result<()> {
+    let mut guard = stdin.lock().map_err(|_| anyhow!("piper stdin lock poisoned"))?;
+    let stdin = guard.as_mut().ok_or_else(|| anyhow!("piper stdin closed"))?;
+    writeln!(stdin, "{line}")?;
+    stdin.flush()?;
+    Ok(())
+}
+
 impl Drop for Tts {
     fn drop(&mut self) {
-        self.stdin.take();
+        if let Ok(mut s) = self.stdin.lock() {
+            s.take();
+        }
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();
         }

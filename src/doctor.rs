@@ -137,6 +137,18 @@ pub fn files_and_keys(p: &Paths) -> Vec<Check> {
         out.push(Check::ok("STT local -- no audio leaves this machine"));
     }
 
+    // A warning rather than a refusal: Piper is a voice too.
+    if crate::kokoro::chosen() {
+        if crate::kokoro::installed() {
+            out.push(Check::ok("kokoro voice present"));
+        } else {
+            out.push(Check::warn(
+                format!("kokoro voice missing in {} -- piper will speak", crate::kokoro::dir().display()),
+                "run `ira fetch --kokoro`, or `ira set IRA_TTS_ENGINE piper`",
+            ));
+        }
+    }
+
     // Every gateway names models differently, so the Anthropic default is
     // almost certainly wrong on someone else's endpoint.
     if llm_url.is_some() && !crate::settings::is_set("IRA_LLM_MODEL") {

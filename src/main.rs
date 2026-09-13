@@ -21,6 +21,7 @@ mod config;
 mod db;
 mod doctor;
 mod fetch;
+mod kokoro;
 mod llm;
 mod mcp;
 mod metrics;
@@ -343,6 +344,7 @@ async fn run(hide_console: bool) -> Result<()> {
     // from ira.local.db; the environment is not consulted.
     settings::load();
     whisper::init(&models);
+    kokoro::init(&models);
     // Servers used to live in ira.toml. This brings an existing one into the
     // database on the first start after the window became the way to edit them,
     // and never reads it again. Before the subcommands below, so `ira doctor`
@@ -388,6 +390,14 @@ async fn run(hide_console: bool) -> Result<()> {
     if stt::managed() && !whisper::complete() {
         tracing::info!("fetching local speech-to-text");
         if let Err(e) = fetch::whisper_files(&models, None).await {
+            tracing::error!("{e:#}");
+        }
+    }
+    // The same for the voice. Not fatal if it fails: Piper is already here and
+    // speaks instead.
+    if kokoro::chosen() && !kokoro::installed() {
+        tracing::info!("fetching the Kokoro voice");
+        if let Err(e) = fetch::kokoro_files().await {
             tracing::error!("{e:#}");
         }
     }

@@ -67,6 +67,7 @@ context, the decision, its consequences, and what would change it.
 | [0018](decisions/0018-integrating-other-tools.md) | Integrating other tools, in both directions | accepted |
 | [0019](decisions/0019-installed-rather-than-cloned.md) | Installed rather than cloned: per-user data, a first-run download, real installers | accepted |
 | [0020](decisions/0020-she-runs-whisper-herself.md) | She runs whisper herself, and local is the default | accepted |
+| [0021](decisions/0021-kokoro-is-the-voice.md) | Kokoro is the voice, and Piper is what she falls back to | accepted |
 
 ## Looking for something specific?
 

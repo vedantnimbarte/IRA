@@ -120,13 +120,42 @@ pub const FIELDS: &[Field] = &[
         secret: false,
         choices: &[],
     },
+    Field {
+        name: "IRA_TTS_ENGINE",
+        label: "Voice engine",
+        group: SPEAKING,
+        about: "Kokoro sounds like a person and starts about half a second later. Piper is quicker and plainer.",
+        // The window shows the engine's own status instead; see `kokoro::status`.
+        empty: "",
+        secret: false,
+        choices: &[("kokoro", "Kokoro · natural"), ("piper", "Piper · quickest")],
+    },
+    Field {
+        name: "IRA_KOKORO_VOICE",
+        label: "Voice",
+        group: SPEAKING,
+        about: "Heard from her next sentence. Picking one says a line in it.",
+        empty: "",
+        secret: false,
+        // `kokoro::VOICES`, spelled out because a const table cannot call
+        // anything. `every_voice_choice_is_a_voice` keeps the two together.
+        choices: &[
+            ("af_heart", "Heart · American, female"),
+            ("af_bella", "Bella · American, female"),
+            ("af_nicole", "Nicole · American, female, soft"),
+            ("af_sarah", "Sarah · American, female"),
+            ("am_michael", "Michael · American, male"),
+            ("am_fenrir", "Fenrir · American, male"),
+            ("bf_emma", "Emma · British, female"),
+            ("bm_george", "George · British, male"),
+        ],
+    },
 ];
 
-/// The two stages of a turn that leave this machine, in the order they happen.
+/// The stages of a turn, in the order they happen.
 ///
-/// Not a category scheme invented for the window: everything before
-/// transcription -- the wake word, knowing when you have stopped -- already runs
-/// here, so these values are exactly the ones that decide what goes out.
+/// Not a category scheme invented for the window: hearing and answering are the
+/// two that can leave this machine, and speaking is the one that never does.
 pub const GROUPS: &[Group] = &[
     Group {
         id: HEARING,
@@ -138,10 +167,16 @@ pub const GROUPS: &[Group] = &[
         title: "Answering",
         about: "The one stage that still needs the network.",
     },
+    Group {
+        id: SPEAKING,
+        title: "Speaking",
+        about: "Text becomes her voice. Always on this machine.",
+    },
 ];
 
 const HEARING: &str = "hearing";
 const ANSWERING: &str = "answering";
+const SPEAKING: &str = "speaking";
 
 pub struct Group {
     pub id: &'static str,
@@ -420,6 +455,13 @@ mod tests {
             .filter(|v| !v.is_empty())
             .collect();
         assert_eq!(offered, crate::whisper::MODELS);
+    }
+
+    /// The same for voices: every one offered is one `ira fetch` downloads.
+    #[test]
+    fn every_voice_choice_is_a_voice() {
+        let offered = field("IRA_KOKORO_VOICE").unwrap().choices;
+        assert_eq!(offered, crate::kokoro::VOICES);
     }
 
     /// The whole point of the change: a variable in the shell is no longer a

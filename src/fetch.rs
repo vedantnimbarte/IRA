@@ -122,16 +122,18 @@ pub async fn core_files(models: &Path, piper: &Path) -> Result<()> {
 /// `ira fetch`. Returns the exit code.
 pub async fn run(args: &[String], models: &Path, voice: &Path, piper: &Path) -> i32 {
     let mut whisper = false;
+    let mut kokoro = false;
     let mut model: Option<String> = None;
     let mut backend: Option<String> = None;
     let mut rest = args.iter();
     while let Some(a) = rest.next() {
         match a.as_str() {
             "--whisper" => whisper = true,
+            "--kokoro" => kokoro = true,
             "--model" => model = rest.next().cloned(),
             "--backend" => backend = rest.next().cloned(),
             "-h" | "--help" => {
-                eprintln!("usage: ira fetch [--whisper] [--model <name>] [--backend cpu|cuda11|cuda12]");
+                eprintln!("usage: ira fetch [--whisper] [--kokoro] [--model <name>] [--backend cpu|cuda11|cuda12]");
                 eprintln!();
                 eprintln!("Downloads the wake models, the VAD, the voice and piper into");
                 eprintln!("the data directory. Files already there are left alone.");
@@ -139,6 +141,9 @@ pub async fn run(args: &[String], models: &Path, voice: &Path, piper: &Path) -> 
                 eprintln!("--whisper adds local speech-to-text, which IRA also fetches by");
                 eprintln!("herself when it is the engine and not yet here. --model picks");
                 eprintln!("the model and saves the choice: {}.", crate::whisper::MODELS.join(", "));
+                eprintln!();
+                eprintln!("--kokoro adds the natural voice (about 330 MB), which IRA also");
+                eprintln!("fetches by herself while it is the voice and not yet here.");
                 return 0;
             }
             other => {
@@ -156,7 +161,7 @@ pub async fn run(args: &[String], models: &Path, voice: &Path, piper: &Path) -> 
         }
     }
 
-    if have_everything(models, voice, piper) && !whisper {
+    if have_everything(models, voice, piper) && !whisper && !kokoro {
         eprintln!("everything is already here: {}", models.display());
         return 0;
     }
@@ -171,11 +176,33 @@ pub async fn run(args: &[String], models: &Path, voice: &Path, piper: &Path) -> 
             return 1;
         }
     }
+    if kokoro {
+        if let Err(e) = kokoro_files().await {
+            eprintln!("fetch failed: {e:#}");
+            return 1;
+        }
+    }
     eprintln!();
     eprintln!("done. now:");
     eprintln!("  ira set ANTHROPIC_API_KEY sk-ant-...");
     eprintln!("  ira");
     0
+}
+
+/// Kokoro: the model, its vocabulary and every voice the window offers.
+///
+/// No SHA-256 here, unlike the whisper archives: these come from a Hugging Face
+/// commit, which is immutable, where a GitHub release asset can be replaced. And
+/// nothing in them is executed.
+pub async fn kokoro_files() -> Result<()> {
+    use crate::kokoro::{model_path, vocab_path, voice_path, REVISION, VOICES};
+    let client = reqwest::Client::new();
+    get(&client, &format!("{REVISION}/onnx/model.onnx"), &model_path()).await?;
+    get(&client, &format!("{REVISION}/tokenizer.json"), &vocab_path()).await?;
+    for (voice, _) in VOICES {
+        get(&client, &format!("{REVISION}/voices/{voice}.bin"), &voice_path(voice)).await?;
+    }
+    Ok(())
 }
 
 /// SHA-256 of each whisper.cpp v1.7.6 archive, lowercase hex.
