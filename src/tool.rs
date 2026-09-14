@@ -9,9 +9,13 @@
 //! minutes and reports later. A contract of "function returning an answer" fits
 //! the first two and would have to be rewritten for the third.
 //!
-//! Only one built-in ships here, deliberately. Memory -- the obvious first tool
-//! -- is kortex-memory, which is an MCP server with sixteen tools, so it arrives
-//! at P4 through the adapter rather than being reimplemented in this file.
+//! Built-ins are the things that are either instant or about this machine
+//! itself: the clock here, reminders (`remind`), looking back (`audit`), and on
+//! Windows opening apps (`launch`) and the media keys, clipboard and power
+//! (`system`). [`BUILTIN_TOOLS`] lists them, and each can be switched off in
+//! the settings window. Memory -- the obvious first tool -- is kortex-memory,
+//! an MCP server with sixteen tools, so it arrives through the adapter rather
+//! than being reimplemented here.
 
 use crate::ui::{Event, Ui};
 use anyhow::{anyhow, Result};
@@ -101,6 +105,14 @@ pub struct ToolCtx {
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
     async fn call(&self, args: Value, ctx: &ToolCtx) -> Result<ToolOutcome>;
+
+    /// The confirmation question for these particular arguments -- "Restart
+    /// the computer?" rather than one line for every power action. `None`
+    /// falls back to `spec().confirm`. Only ever asked; it cannot skip the
+    /// gate, which `mutates` alone decides.
+    fn question(&self, _args: &Value) -> Option<String> {
+        None
+    }
 }
 
 /// A background job that has finished, on its way back to the loop.
@@ -265,9 +277,9 @@ impl Host {
         let spec = tool.spec();
 
         if spec.mutates {
-            let question = spec
-                .confirm
-                .clone()
+            let question = tool
+                .question(&args)
+                .or_else(|| spec.confirm.clone())
                 .unwrap_or_else(|| format!("Run {name}. Yes or no?"));
             let (tx, rx) = oneshot::channel();
             self.confirm
@@ -354,16 +366,75 @@ impl Tool for Clock {
     }
 
     async fn call(&self, _args: Value, _ctx: &ToolCtx) -> Result<ToolOutcome> {
-        // No chrono dependency for this: the model formats it for speech
-        // anyway, so it only needs the parts, not a rendered string.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| anyhow!("system clock is before the epoch: {e}"))?;
+        // Rendered here in local time, not handed over as a bare timestamp:
+        // the model has no way to know this machine's timezone, and reminders
+        // set "at 3pm" need it to agree with the clock on the wall.
+        let offset = crate::remind::local_offset_secs();
+        let sign = if offset < 0 { '-' } else { '+' };
         Ok(ToolOutcome::Answer(format!(
-            "The Unix timestamp is {} seconds. Convert it to local time for the user.",
-            now.as_secs()
+            "It is {} local time (UTC{sign}{:02}:{:02}).",
+            crate::remind::describe_local(crate::audit::now_ms()),
+            offset.abs() / 3600,
+            offset.abs() % 3600 / 60
         )))
     }
+}
+
+/// Every built-in tool, by the name its own `spec()` answers with, paired
+/// with what the settings page shows beside its switch. One place that lists
+/// them, so start-up and the settings toggle read from the same table rather
+/// than two lists that can drift.
+#[cfg(windows)]
+pub const BUILTIN_TOOLS: &[(&str, &str, &str)] = &[
+    ("clock", "Clock", "The current date and time."),
+    ("remind", "Reminders and timers", "Set a reminder or timer, said aloud when it is due."),
+    ("reminders", "List and cancel reminders", "Say which reminders are set, or cancel one."),
+    ("recall", "Recall", "Look back through earlier conversations and what IRA did."),
+    ("open", "Open", "Open an installed app, a file, a folder, or a website."),
+    ("close_app", "Close app", "Close a running application by name. Asks first."),
+    ("running_apps", "What's running", "Say what is or isn't currently running."),
+    ("media", "Media and volume", "Play, pause, skip, and turn the volume up or down."),
+    ("clipboard_read", "Read clipboard", "Read the text you last copied."),
+    ("clipboard_write", "Copy to clipboard", "Put text on the clipboard. Asks first."),
+    ("power", "Power", "Lock, sleep, sign out, restart or shut down. Asks first."),
+    ("cancel_shutdown", "Cancel shutdown", "Stop a restart or shutdown that is counting down."),
+];
+#[cfg(not(windows))]
+pub const BUILTIN_TOOLS: &[(&str, &str, &str)] = &[
+    ("clock", "Clock", "The current date and time."),
+    ("remind", "Reminders and timers", "Set a reminder or timer, said aloud when it is due."),
+    ("reminders", "List and cancel reminders", "Say which reminders are set, or cancel one."),
+    ("recall", "Recall", "Look back through earlier conversations and what IRA did."),
+];
+
+/// Builds one built-in by name. The single place that knows how to construct
+/// each of them, so switching one back on after it was turned off is this
+/// call plus a registry insert, not a bespoke path per tool.
+pub fn spawn_builtin(name: &str) -> Option<Arc<dyn Tool>> {
+    let tool: Arc<dyn Tool> = match name {
+        "clock" => Arc::new(Clock),
+        "remind" => Arc::new(crate::remind::Remind),
+        "reminders" => Arc::new(crate::remind::Reminders),
+        "recall" => Arc::new(crate::audit::Recall),
+        #[cfg(windows)]
+        "open" => Arc::new(crate::launch::OpenTarget),
+        #[cfg(windows)]
+        "close_app" => Arc::new(crate::launch::CloseApp),
+        #[cfg(windows)]
+        "running_apps" => Arc::new(crate::launch::RunningApps),
+        #[cfg(windows)]
+        "media" => Arc::new(crate::system::Media),
+        #[cfg(windows)]
+        "clipboard_read" => Arc::new(crate::system::ClipboardRead),
+        #[cfg(windows)]
+        "clipboard_write" => Arc::new(crate::system::ClipboardWrite),
+        #[cfg(windows)]
+        "power" => Arc::new(crate::system::Power),
+        #[cfg(windows)]
+        "cancel_shutdown" => Arc::new(crate::system::CancelShutdown),
+        _ => return None,
+    };
+    Some(tool)
 }
 
 /// Cap on a tool description, which lands directly in the model's prompt.

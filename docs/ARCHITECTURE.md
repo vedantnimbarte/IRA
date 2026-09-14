@@ -108,6 +108,10 @@ The exhaustive transition table lives in [SPEC.md](SPEC.md).
 | `mcp.rs` | MCP servers adapted to that trait | Config |
 | `oauth.rs` | Signing in to a hosted MCP server; tokens in the keyring | Config |
 | `wingman.rs` | Wingman's own HTTP API adapted to that trait | Config |
+| `launch.rs` | Opening/closing an installed app, file, folder or URL; what's running. Windows only | Closed |
+| `system.rs` | Media and volume keys, the clipboard, lock/sleep/restart. Windows only | Closed |
+| `remind.rs` | Reminders and timers that survive a restart; local time for the clock | Closed |
+| `audit.rs` | The activity log: every turn's tools, questions and settings changes; `recall` | Closed |
 | `config.rs` | The server list, and the one-time `ira.toml` import | Config |
 | `cli.rs` | `ira set`, `ira mcp`, `ira skill`: the window from a terminal | Config |
 | `db.rs` | `ira.local.db`: settings, servers, tool policy, the skill index | Config |

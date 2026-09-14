@@ -6,7 +6,7 @@
 //! added the MCP servers, their per-tool policy, and which skills are on --
 //! everything the settings window can edit, in one place it can write to.
 //!
-//! Six tables, none of them large:
+//! Eight tables. Only `audit` grows on its own, and it is pruned by age:
 //!
 //! ```text
 //!   settings      name → value          URLs and model ids (keys are in the keyring)
@@ -15,6 +15,8 @@
 //!   mcp_env       one row per variable  names only -- values are in the keyring
 //!   mcp_oauth     one row per server    client id and scopes -- tokens are in the keyring
 //!   skill         one row per file      which are on, and what they say they do
+//!   audit         one row per event     what was asked and what was done (audit.rs)
+//!   reminder      one row per reminder  when, and what to say
 //! ```
 //!
 //! **Nothing secret is in here.** Every table that touches a credential stores
@@ -107,6 +109,28 @@ fn open() -> Result<Connection> {
              server    TEXT PRIMARY KEY,
              client_id TEXT,
              scopes    TEXT NOT NULL DEFAULT '[]'
+         );
+         -- What was asked and what was done. One row per event; `grp` ties
+         -- the rows of one turn (or of one standalone action) together. See
+         -- audit.rs.
+         CREATE TABLE IF NOT EXISTS audit (
+             id     INTEGER PRIMARY KEY AUTOINCREMENT,
+             grp    INTEGER NOT NULL,
+             at     INTEGER NOT NULL,
+             kind   TEXT NOT NULL,
+             name   TEXT,
+             detail TEXT,
+             result TEXT,
+             ok     INTEGER,
+             ms     INTEGER
+         );
+         CREATE INDEX IF NOT EXISTS audit_grp ON audit (grp);
+         -- Due times are Unix milliseconds, so a reminder set before a restart
+         -- or a reboot still means the same moment afterwards.
+         CREATE TABLE IF NOT EXISTS reminder (
+             id   INTEGER PRIMARY KEY AUTOINCREMENT,
+             due  INTEGER NOT NULL,
+             text TEXT NOT NULL
          );",
     )
     .context("create the tables")?;
@@ -147,6 +171,20 @@ pub fn settings_delete(name: &str) -> Result<()> {
         .execute("DELETE FROM settings WHERE name = ?1", (name,))
         .with_context(|| format!("clear {name}"))?;
     Ok(())
+}
+
+/// Whether a built-in tool is turned on. One key in the same `settings`
+/// table as everything else here, not a new table: this is a single on/off
+/// bit per tool, and nothing else is ever going to hang off it the way
+/// exposure/mutates/latency/confirm hang off an MCP tool's policy. Absent
+/// means on, the same default `mcp_tool.exposed` uses for a tool nobody has
+/// judged yet.
+pub fn builtin_enabled(name: &str) -> Result<bool> {
+    Ok(settings_all()?.get(&format!("builtin:{name}")).map(|v| v != "0").unwrap_or(true))
+}
+
+pub fn builtin_set_enabled(name: &str, on: bool) -> Result<()> {
+    settings_set(&format!("builtin:{name}"), if on { "1" } else { "0" })
 }
 
 // -------------------------------------------------------------- mcp servers --
@@ -494,6 +532,193 @@ pub fn skills_prune(keep: &[String]) -> Result<()> {
         tracing::info!(gone = ?stale, "skills removed from the index");
     }
     Ok(())
+}
+
+// -------------------------------------------------------------------- audit --
+
+/// One event on its way in. Everything but `grp` and `kind` is optional
+/// because events carry different things: a heard utterance has no result, a
+/// settings change has no duration.
+#[derive(Debug, Default)]
+pub struct AuditEntry<'a> {
+    pub grp: i64,
+    pub at: i64,
+    pub kind: &'a str,
+    pub name: Option<&'a str>,
+    pub detail: Option<&'a str>,
+    pub result: Option<&'a str>,
+    pub ok: Option<bool>,
+    pub ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuditRow {
+    pub id: i64,
+    pub grp: i64,
+    pub at: i64,
+    pub kind: String,
+    pub name: Option<String>,
+    pub detail: Option<String>,
+    pub result: Option<String>,
+    pub ok: Option<bool>,
+    pub ms: Option<i64>,
+}
+
+pub fn audit_insert(e: &AuditEntry) -> Result<i64> {
+    let conn = open()?;
+    conn.execute(
+        "INSERT INTO audit (grp, at, kind, name, detail, result, ok, ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        (e.grp, e.at, e.kind, e.name, e.detail, e.result, e.ok, e.ms),
+    )
+    .context("record an audit event")?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Fills in what an event only knows later -- a tool's result, a question's
+/// answer, a turn's duration. A `None` leaves that column as it was.
+pub fn audit_finish(id: i64, result: Option<&str>, ok: Option<bool>, ms: Option<i64>) -> Result<()> {
+    open()?
+        .execute(
+            "UPDATE audit SET result = COALESCE(?2, result), ok = COALESCE(?3, ok),
+                              ms = COALESCE(?4, ms)
+             WHERE id = ?1",
+            (id, result, ok, ms),
+        )
+        .context("finish an audit event")?;
+    Ok(())
+}
+
+/// What to look for in the log. `kinds` narrows to groups containing at least
+/// one row of those kinds; `before` pages backwards by group.
+#[derive(Debug, Default)]
+pub struct AuditQuery<'a> {
+    pub text: &'a str,
+    pub kinds: &'a [&'a str],
+    pub before: Option<i64>,
+    pub since: Option<i64>,
+    pub limit: usize,
+}
+
+/// Every row of the newest `limit` matching groups, newest group first and
+/// each group's rows in the order they happened.
+///
+/// A match anywhere in a group brings back the whole group: finding "spotify"
+/// in a tool's arguments is only useful next to what was said and what came of
+/// it.
+pub fn audit_groups(q: &AuditQuery) -> Result<Vec<AuditRow>> {
+    if !exists() {
+        return Ok(Vec::new());
+    }
+    let like = format!(
+        "%{}%",
+        q.text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    );
+    let kinds = format!(",{},", q.kinds.join(","));
+    let conn = open()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, grp, at, kind, name, detail, result, ok, ms FROM audit
+         WHERE grp IN (
+             SELECT DISTINCT grp FROM audit
+             WHERE (?1 = '' OR detail LIKE ?2 ESCAPE '\\' OR name LIKE ?2 ESCAPE '\\'
+                    OR result LIKE ?2 ESCAPE '\\')
+               AND grp < ?3 AND grp >= ?4
+               AND (?5 = ',,' OR grp IN (
+                    SELECT grp FROM audit WHERE instr(?5, ',' || kind || ',') > 0))
+             ORDER BY grp DESC LIMIT ?6)
+         ORDER BY grp DESC, id ASC",
+    )?;
+    let rows = stmt.query_map(
+        (
+            q.text,
+            &like,
+            q.before.unwrap_or(i64::MAX),
+            q.since.unwrap_or(0),
+            &kinds,
+            q.limit as i64,
+        ),
+        |r| {
+            Ok(AuditRow {
+                id: r.get(0)?,
+                grp: r.get(1)?,
+                at: r.get(2)?,
+                kind: r.get(3)?,
+                name: r.get(4)?,
+                detail: r.get(5)?,
+                result: r.get(6)?,
+                ok: r.get(7)?,
+                ms: r.get(8)?,
+            })
+        },
+    )?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The group of the newest row of this kind -- the turn in progress, when the
+/// kind is `heard`.
+pub fn audit_latest_grp(kind: &str) -> Result<Option<i64>> {
+    if !exists() {
+        return Ok(None);
+    }
+    Ok(open()?.query_row("SELECT MAX(grp) FROM audit WHERE kind = ?1", (kind,), |r| r.get(0))?)
+}
+
+/// Conversation turns since `at` (Unix ms). The count beside Activity.
+pub fn audit_turns_since(at: i64) -> Result<i64> {
+    if !exists() {
+        return Ok(0);
+    }
+    Ok(open()?.query_row(
+        "SELECT COUNT(*) FROM audit WHERE kind = 'heard' AND at >= ?1",
+        (at,),
+        |r| r.get(0),
+    )?)
+}
+
+/// Drops whole groups older than `at`, so a turn is never half-pruned.
+pub fn audit_prune(at: i64) -> Result<usize> {
+    if !exists() {
+        return Ok(0);
+    }
+    Ok(open()?.execute("DELETE FROM audit WHERE grp < ?1", (at,))?)
+}
+
+pub fn audit_clear() -> Result<()> {
+    open()?.execute("DELETE FROM audit", ())?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------- reminders --
+
+#[derive(Debug, Clone)]
+pub struct ReminderRow {
+    pub id: i64,
+    /// Unix milliseconds.
+    pub due: i64,
+    pub text: String,
+}
+
+pub fn reminder_add(due: i64, text: &str) -> Result<i64> {
+    let conn = open()?;
+    conn.execute("INSERT INTO reminder (due, text) VALUES (?1, ?2)", (due, text))
+        .context("save a reminder")?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Every pending reminder, soonest first.
+pub fn reminders() -> Result<Vec<ReminderRow>> {
+    if !exists() {
+        return Ok(Vec::new());
+    }
+    let conn = open()?;
+    let mut q = conn.prepare("SELECT id, due, text FROM reminder ORDER BY due, id")?;
+    let rows = q.query_map([], |r| Ok(ReminderRow { id: r.get(0)?, due: r.get(1)?, text: r.get(2)? }))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Whether there was one to delete.
+pub fn reminder_delete(id: i64) -> Result<bool> {
+    Ok(open()?.execute("DELETE FROM reminder WHERE id = ?1", (id,))? > 0)
 }
 
 /// `IRA_DATA` is process-wide, so a test that points it at its own temp
