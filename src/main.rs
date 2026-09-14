@@ -14,6 +14,7 @@
 //! needs `webrtc-audio-processing` wired into audio.rs before it is usable.
 
 mod audio;
+mod audit;
 mod cli;
 #[cfg(windows)]
 mod console;
@@ -22,16 +23,21 @@ mod db;
 mod doctor;
 mod fetch;
 mod kokoro;
+#[cfg(windows)]
+mod launch;
 mod llm;
 mod mcp;
 mod metrics;
 mod oauth;
 mod paths;
+mod remind;
 mod settings;
 mod skills;
 #[cfg(windows)]
 mod orb;
 mod stt;
+#[cfg(windows)]
+mod system;
 mod tool;
 mod transcript;
 mod tts;
@@ -476,6 +482,8 @@ async fn run(hide_console: bool) -> Result<()> {
     let (speech_tx, mut speech_rx) = mpsc::channel::<(String, CancellationToken)>(32);
 
     let (ui, mut talk_rx) = ui::Ui::start().await;
+    // Subscribed before anything can be said, so the first turn is recorded.
+    audit::start(&ui);
     // The overlay: the same events, drawn as one light, over whatever you are
     // doing. It reads the broadcast directly rather than the served page.
     #[cfg(windows)]
@@ -513,11 +521,21 @@ async fn run(hide_console: bool) -> Result<()> {
     // from outside by `POST /say` have made no sound yet and do pip.
     let (say_tx, mut say_rx) = mpsc::channel::<(String, bool)>(8);
     let say_tx_for_jobs = say_tx.clone();
-    // Tools. The clock is the only built-in; everything else arrives over MCP
-    // as configuration rather than code.
+    // Reminders go off through the same queue: news from outside the turn.
+    remind::start(say_tx.clone());
+    // Tools. Built-ins are `tool::BUILTIN_TOOLS`; everything else arrives over
+    // MCP as configuration rather than code. Each is skipped if the settings
+    // page has turned it off -- absent means on, same as an MCP tool nobody
+    // has judged.
     let host = {
         let h = tool::Host::new(confirm_tx, ui.clone(), jobs_tx);
-        h.add(Arc::new(tool::Clock));
+        for (name, _, _) in tool::BUILTIN_TOOLS {
+            if db::builtin_enabled(name).unwrap_or(true) {
+                if let Some(t) = tool::spawn_builtin(name) {
+                    h.add(t);
+                }
+            }
+        }
         // Only when the user has written one: a `skill` tool offering an empty
         // list is a tool the model can see and cannot use.
         skills::sync_registry(&h);

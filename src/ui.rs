@@ -28,6 +28,12 @@ const DEFAULT_PORT: u16 = 8180;
 /// shows what just happened rather than an empty screen.
 const BACKLOG: usize = 200;
 
+/// The settings page's typeface, baked into the binary. IRA runs without a
+/// network, so this is served from loopback rather than fetched from Google
+/// Fonts -- the same reasoning as the icon, just at runtime instead of build
+/// time.
+const INTER_FONT: &[u8] = include_bytes!("../assets/Inter.woff2");
+
 #[derive(Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
@@ -231,7 +237,10 @@ impl Ui {
         // queue means IRA is already behind on things to say, and the honest
         // answer is to refuse rather than to pile on.
         match admin.say.try_send((text.to_string(), true)) {
-            Ok(()) => json!({ "queued": text.chars().count() }).to_string(),
+            Ok(()) => {
+                crate::audit::record("say", "say", text, None, Some(true));
+                json!({ "queued": text.chars().count() }).to_string()
+            }
             Err(_) => error("she already has more to say than she can get through"),
         }
     }
@@ -512,6 +521,17 @@ Connection: close
         return;
     }
 
+    if line.starts_with("GET /settings/inter.woff2") {
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: font/woff2\r\n\
+             Cache-Control: max-age=31536000, immutable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            INTER_FONT.len()
+        );
+        let _ = write.write_all(head.as_bytes()).await;
+        let _ = write.write_all(INTER_FONT).await;
+        return;
+    }
+
     if !line.starts_with("GET /events") {
         let body = if line.starts_with("GET /settings") { SETTINGS } else { PAGE }.as_bytes();
         let head = format!(
@@ -661,6 +681,18 @@ fn settings_state(ui: &Ui) -> String {
         })
         .collect();
 
+    let builtins: Vec<Value> = crate::tool::BUILTIN_TOOLS
+        .iter()
+        .map(|(name, label, about)| {
+            json!({
+                "name": name,
+                "label": label,
+                "about": about,
+                "enabled": crate::db::builtin_enabled(name).unwrap_or(true),
+            })
+        })
+        .collect();
+
     let skills: Vec<Value> = crate::skills::index()
         .into_iter()
         .map(|s| {
@@ -683,7 +715,13 @@ fn settings_state(ui: &Ui) -> String {
         // And what the voice is doing, under its engine.
         "voice": { "busy": voice_busy, "ok": voice_ok, "status": voice_said },
         "servers": servers,
+        "builtins": builtins,
         "skills": skills,
+        "audit": {
+            "enabled": crate::audit::enabled(),
+            "retention_days": crate::audit::retention_days(),
+            "today": crate::db::audit_turns_since(crate::remind::start_of_today_ms()).unwrap_or(0),
+        },
         // Without a registry the page is an editor for a database and should
         // say so, rather than promising changes that only land on a restart.
         "live": host.is_some(),
@@ -699,7 +737,18 @@ fn save_setting(body: &[u8]) -> String {
     let (Some(name), Some(value)) = (v["name"].as_str(), v["value"].as_str()) else {
         return error("a settings change needs a name and a value");
     };
-    match crate::settings::set(name, value) {
+    let saved = crate::settings::set(name, value);
+    // Which setting, never its value -- half of these are keys.
+    let label = crate::settings::field(name).map(|f| f.label).unwrap_or(name);
+    let what = if value.trim().is_empty() { "Cleared" } else { "Changed" };
+    crate::audit::record(
+        "setting",
+        "set",
+        &format!("{what} {label}"),
+        saved.as_ref().err().map(|e| format!("{e:#}")).as_deref(),
+        Some(saved.is_ok()),
+    );
+    match saved {
         Ok(()) => {
             // The engine is a running process, not only a value: switching to
             // local downloads and starts it, switching away stops it.
@@ -744,10 +793,19 @@ async fn admin_op(ui: &Ui, body: &[u8]) -> String {
         // Returns a URL rather than state: the page has to open it, because
         // signing in happens at the provider's site and not here.
         "oauth_begin" => {
-            return match begin_sign_in(ui, &name).await {
+            let begun = begin_sign_in(ui, &name).await;
+            let failed = begun.as_ref().err().map(|e| format!("{e:#}"));
+            crate::audit::record(
+                "setting",
+                op,
+                &format!("Started signing in to {name}"),
+                failed.as_deref(),
+                Some(begun.is_ok()),
+            );
+            return match begun {
                 Ok(url) => json!({ "open": url }).to_string(),
                 Err(e) => error(format!("{e:#}")),
-            }
+            };
         }
         "oauth_forget" => crate::oauth::forget(&name).map(|()| None),
         "env_delete" => delete_env(&v).map(|()| None),
@@ -755,11 +813,23 @@ async fn admin_op(ui: &Ui, body: &[u8]) -> String {
         // does not work. The result is shown raw -- this is a wiring check, not
         // a conversation, and a model's phrasing of a failure would hide it.
         "tool_try" => {
-            return match try_tool(ui, &v).await {
+            let tried = try_tool(ui, &v).await;
+            crate::audit::record_try(
+                v["tool"].as_str().unwrap_or_default(),
+                v["args"].as_str().unwrap_or_default(),
+                &tried,
+            );
+            return match tried {
                 Ok(text) => json!({ "tried": v["tool"], "text": text }).to_string(),
                 Err(e) => error(format!("{e:#}")),
-            }
+            };
         }
+        // Read-only, and answers with a page of the log rather than state: the
+        // log is too long to ride along with every save.
+        "activity" => return crate::audit::page(&v).to_string(),
+        "audit_clear" => crate::db::audit_clear().map(|()| Some("Activity cleared.".to_string())),
+        "audit_retention" => crate::audit::set_retention_days(v["days"].as_i64().unwrap_or(-1))
+            .map(|()| None),
         "skill_save" => crate::skills::write(
             &name,
             v["description"].as_str().unwrap_or_default(),
@@ -769,6 +839,24 @@ async fn admin_op(ui: &Ui, body: &[u8]) -> String {
         "skill_delete" => crate::skills::delete(&name).map(|()| None),
         "skill_toggle" => {
             crate::skills::enable(&name, v["on"].as_bool().unwrap_or(false)).map(|()| None)
+        }
+        // Live, not just stored: a built-in is one struct with no connection
+        // to reconnect, so the registry can be updated in the same breath as
+        // the database rather than waiting for a restart.
+        "builtin_toggle" => {
+            let on = v["on"].as_bool().unwrap_or(false);
+            crate::db::builtin_set_enabled(&name, on).map(|()| {
+                if let Some(host) = ui.host() {
+                    if on {
+                        if let Some(t) = crate::tool::spawn_builtin(&name) {
+                            host.add(t);
+                        }
+                    } else {
+                        host.remove(&name);
+                    }
+                }
+                None
+            })
         }
         // Read-only, and the one op that answers with something other than
         // state: the page asks for one body when a skill is opened for editing,
@@ -781,6 +869,14 @@ async fn admin_op(ui: &Ui, body: &[u8]) -> String {
         }
         other => return error(format!("unknown change: {other}")),
     };
+
+    if let Some(sentence) = describe_change(op, &name, &v) {
+        let (result, ok) = match &outcome {
+            Ok(note) => (note.clone(), true),
+            Err(e) => (Some(format!("{e:#}")), false),
+        };
+        crate::audit::record("setting", op, &sentence, result.as_deref(), Some(ok));
+    }
 
     match outcome {
         Ok(note) => {
@@ -795,6 +891,43 @@ async fn admin_op(ui: &Ui, body: &[u8]) -> String {
         }
         Err(e) => error(format!("{e:#}")),
     }
+}
+
+/// A change made in the window, in words, for the activity log. Says what
+/// changed and never a value: env variables and headers are credentials.
+/// `None` for anything that only reads.
+fn describe_change(op: &str, name: &str, v: &Value) -> Option<String> {
+    let on = if v["on"].as_bool().unwrap_or(false) { "on" } else { "off" };
+    let server = v["server"].as_str().unwrap_or_default();
+    Some(match op {
+        "server_save" => format!("Saved the MCP server {name}"),
+        "server_delete" => format!("Removed the MCP server {name}"),
+        "server_toggle" => format!("Turned the MCP server {name} {on}"),
+        "tool_policy" => format!(
+            "Changed how the tool {} from {server} is handled",
+            v["tool"].as_str().unwrap_or_default()
+        ),
+        "env_save" => format!("Set the variable {name} for {server}"),
+        "env_delete" => format!("Removed the variable {name} from {server}"),
+        "oauth_forget" => format!("Signed out of {name}"),
+        "skill_save" => format!("Saved the skill {name}"),
+        "skill_delete" => format!("Deleted the skill {name}"),
+        "skill_toggle" => format!("Turned the skill {name} {on}"),
+        "builtin_toggle" => {
+            let label = crate::tool::BUILTIN_TOOLS
+                .iter()
+                .find(|(n, _, _)| *n == name)
+                .map_or(name, |(_, label, _)| label);
+            format!("Turned the built-in tool {label} {on}")
+        }
+        "audit_clear" => "Cleared the activity log".into(),
+        "audit_retention" => match v["days"].as_i64() {
+            Some(0) => "Set activity to be kept forever".into(),
+            Some(days) => format!("Set activity to be kept for {days} days"),
+            None => return None,
+        },
+        _ => return None,
+    })
 }
 
 /// Saves a server and connects it, so the model can use it without a restart.
@@ -1164,9 +1297,10 @@ async fn reply_json<W: tokio::io::AsyncWrite + Unpin>(write: &mut W, status: u16
 ///
 /// Values are set in a monospace face and nothing else is, because a key, a URL
 /// or a command is read character by character and that is a legibility need
-/// rather than a label style. No web fonts: IRA runs without a network and a
-/// settings page that fetched a typeface would be the only part of her that did
-/// not.
+/// rather than a label style. The body face is Inter, baked into the binary
+/// (`INTER_FONT`) and served from loopback at `/settings/inter.woff2`: IRA runs
+/// without a network, and a settings page that fetched a typeface would be the
+/// only part of her that did not.
 ///
 /// Served rather than built into the window, because the window is a webview
 /// and this is the thing it shows. Same origin as `POST /settings`, so the
@@ -1179,6 +1313,13 @@ const SETTINGS: &str = r##"<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>IRA — settings</title>
 <style>
+  /* Served from loopback, not Google Fonts -- see INTER_FONT. A single
+     variable file covers every weight this page uses, so one @font-face
+     stands in for what would otherwise be four static files. */
+  @font-face {
+    font-family:"Inter Variable"; font-style:normal; font-weight:100 900;
+    font-display:swap; src:url("/settings/inter.woff2") format("woff2-variations");
+  }
   :root {
     --ground:#eef1f5; --rail:#e3e8f0; --surface:#fff; --sunk:#f5f7fa;
     --ink:#131820; --soft:#3f4956; --muted:#78849a; --faint:#9aa5b8;
@@ -1187,8 +1328,8 @@ const SETTINGS: &str = r##"<!doctype html>
     --lift:0 6px 22px rgba(12,18,30,.12);
     /* The orb's own light, sampled from it. Used once, on the rail. */
     --thread:linear-gradient(180deg,#19a2fe,#7f9bfb,#cc9bfd,#fe84e4,#71fbf0);
-    --sans:"Segoe UI Variable Text","Segoe UI Variable","Segoe UI",system-ui,sans-serif;
-    --display:"Segoe UI Variable Display","Segoe UI Variable","Segoe UI",system-ui,sans-serif;
+    --sans:"Inter Variable","Segoe UI Variable Text","Segoe UI Variable","Segoe UI",system-ui,sans-serif;
+    --display:"Inter Variable","Segoe UI Variable Display","Segoe UI Variable","Segoe UI",system-ui,sans-serif;
     --mono:"Cascadia Mono",Consolas,ui-monospace,monospace;
   }
   @media (prefers-color-scheme: dark) {
@@ -1210,23 +1351,23 @@ const SETTINGS: &str = r##"<!doctype html>
     margin:0; background:var(--ground); color:var(--ink);
     font:400 14px/1.55 var(--sans);
     -webkit-font-smoothing:antialiased;
-    display:grid; grid-template-columns:236px minmax(0,1fr);
+    display:grid; grid-template-columns:252px minmax(0,1fr);
   }
 
   /* --- the rail ------------------------------------------------------- */
   #nav {
     background:var(--rail); border-right:1px solid var(--line);
-    padding:26px 14px 18px; overflow:auto;
-    display:flex; flex-direction:column; gap:3px;
+    padding:32px 16px 20px; overflow:auto;
+    display:flex; flex-direction:column; gap:4px;
   }
   .brand {
-    padding:2px 14px 22px; display:flex; flex-direction:column; gap:5px;
+    padding:2px 14px 28px; display:flex; flex-direction:column; gap:5px;
     font:500 11.5px/1 var(--sans); color:var(--muted);
   }
-  .brand span { font:300 20px/1 var(--display); letter-spacing:-.015em; color:var(--ink); }
+  .brand span { font:300 21px/1 var(--display); letter-spacing:-.015em; color:var(--ink); }
   .nav-item {
     position:relative; display:flex; align-items:center; gap:10px; width:100%;
-    height:auto; padding:9px 12px 9px 14px; border:0; border-radius:8px; cursor:pointer;
+    height:auto; padding:11px 14px 11px 16px; border:0; border-radius:9px; cursor:pointer;
     background:transparent; color:var(--soft);
     font:500 13.5px/1.4 var(--sans); text-align:left;
     transition:background .13s ease, color .13s ease;
@@ -1242,14 +1383,14 @@ const SETTINGS: &str = r##"<!doctype html>
   .nav-item.on .nav-count { color:var(--muted); }
 
   /* --- the pane ------------------------------------------------------- */
-  #main { overflow:auto; padding:34px 40px 60px; }
+  #main { overflow:auto; padding:44px 52px 64px; }
   .pane { max-width:880px; }
   .detail { max-width:580px; }
-  .pane-head { display:flex; align-items:flex-start; gap:24px; margin:0 0 24px; }
+  .pane-head { display:flex; align-items:flex-start; gap:24px; margin:0 0 32px; }
   .pane-title { flex:1; min-width:0; }
-  h1 { font:300 27px/1.2 var(--display); letter-spacing:-.02em; margin:0 0 7px; }
+  h1 { font:300 28px/1.2 var(--display); letter-spacing:-.02em; margin:0 0 8px; }
   .pane-title p, .detail-sub { margin:0; color:var(--muted); font-size:13.5px; max-width:58ch; }
-  .detail-sub { margin:0 0 20px; }
+  .detail-sub { margin:0 0 24px; }
   .back {
     height:auto; background:none; border:0; padding:4px 0; margin:0 0 16px;
     cursor:pointer; color:var(--muted); font:400 13px/1 var(--sans);
@@ -1259,14 +1400,14 @@ const SETTINGS: &str = r##"<!doctype html>
 
   /* --- a block -------------------------------------------------------- */
   .block {
-    background:var(--surface); border:1px solid var(--line); border-radius:12px;
-    padding:22px 24px 8px; margin:0 0 16px;
+    background:var(--surface); border:1px solid var(--line); border-radius:14px;
+    padding:26px 28px 10px; margin:0 0 20px;
   }
   .block > h2 { font:400 17px/1.3 var(--display); letter-spacing:-.01em; margin:0; }
   .block-about { margin:5px 0 0; color:var(--muted); font-size:12.5px; max-width:56ch; }
 
   /* --- a field -------------------------------------------------------- */
-  .field { padding:20px 0 18px; border-bottom:1px solid var(--line); }
+  .field { padding:22px 0 20px; border-bottom:1px solid var(--line); }
   .field:last-child { border-bottom:0; }
   .head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
   .name { font-size:14px; font-weight:600; color:var(--ink); }
@@ -1323,13 +1464,13 @@ const SETTINGS: &str = r##"<!doctype html>
 
   /* --- the grids ------------------------------------------------------ */
   .grid {
-    display:grid; grid-template-columns:repeat(auto-fill,minmax(218px,1fr));
-    gap:14px; align-items:stretch;
+    display:grid; grid-template-columns:repeat(auto-fill,minmax(224px,1fr));
+    gap:16px; align-items:stretch;
   }
   .card {
-    position:relative; display:flex; flex-direction:column; gap:7px;
-    background:var(--surface); border:1px solid var(--line); border-radius:12px;
-    padding:15px 16px 13px; min-height:134px;
+    position:relative; display:flex; flex-direction:column; gap:8px;
+    background:var(--surface); border:1px solid var(--line); border-radius:14px;
+    padding:17px 18px 15px; min-height:138px;
     transition:border-color .14s ease;
   }
   .card:hover { border-color:var(--edge); }
@@ -1347,7 +1488,7 @@ const SETTINGS: &str = r##"<!doctype html>
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
   }
   .card-open:hover { filter:none; text-decoration:underline; }
-  .card-open::after { content:""; position:absolute; inset:0; border-radius:12px; }
+  .card-open::after { content:""; position:absolute; inset:0; border-radius:14px; }
   .card .switch { position:relative; z-index:1; }
   .card-state { margin:0; font-size:12.5px; color:var(--soft); }
   .card-desc {
@@ -1415,6 +1556,60 @@ const SETTINGS: &str = r##"<!doctype html>
   }
   .result.is-bad { color:var(--bad); }
 
+  /* --- activity ------------------------------------------------------- */
+  .act-find { display:flex; flex-wrap:wrap; gap:10px; margin:0 0 30px; }
+  .act-find input { flex:1 1 260px; font-family:var(--sans); }
+  .act-find select, .act-keep select {
+    height:38px; padding:0 12px; border:1px solid var(--edge); border-radius:9px;
+    background:var(--sunk); color:var(--ink); font:400 13px/1 var(--sans); cursor:pointer;
+  }
+  .head-actions { display:flex; gap:8px; flex:none; }
+  .act-day { font:500 13px/1 var(--sans); color:var(--muted); margin:30px 0 12px; }
+  .act-day:first-child { margin-top:0; }
+  .act-group {
+    background:var(--surface); border:1px solid var(--line); border-radius:14px;
+    padding:16px 22px 12px; margin:0 0 12px;
+  }
+  .act-head { display:flex; align-items:baseline; gap:10px; margin:0 0 6px; }
+  .act-time { font:400 12px/1 var(--mono); color:var(--faint); }
+  .act-kind { font-size:12.5px; color:var(--muted); }
+  .act-took { margin-left:auto; font:400 11.5px/1 var(--mono); color:var(--faint); }
+  /* The rows of a turn happened in order, so they hang off one line. */
+  .act-steps { position:relative; }
+  .act-steps::before {
+    content:""; position:absolute; left:4px; top:14px; bottom:14px; width:1px; background:var(--line);
+  }
+  .act-row { position:relative; display:grid; grid-template-columns:72px minmax(0,1fr); gap:10px; padding:7px 0 7px 20px; }
+  .act-row::before {
+    content:""; position:absolute; left:1px; top:13px; width:7px; height:7px; border-radius:50%;
+    background:var(--surface); border:1px solid var(--edge); box-sizing:border-box;
+  }
+  .act-row.good::before { background:var(--good); border-color:var(--good); }
+  .act-row.bad::before { background:var(--bad); border-color:var(--bad); }
+  .act-who { font-size:12px; color:var(--faint); padding-top:2px; }
+  .act-body { min-width:0; overflow-wrap:anywhere; color:var(--soft); }
+  .act-said { color:var(--ink); }
+  .act-tool { font:500 12.5px/1.5 var(--mono); color:var(--ink); }
+  .act-args {
+    display:block; margin:3px 0 0; font:400 11.5px/1.5 var(--mono); color:var(--muted);
+    white-space:pre-wrap;
+  }
+  .act-result { margin:4px 0 0; font-size:13px; white-space:pre-wrap; max-height:10em; overflow:auto; }
+  .act-result.is-bad { color:var(--bad); }
+  .act-ms { margin-left:8px; font:400 11px/1 var(--mono); color:var(--faint); }
+  .chip {
+    display:inline-block; margin-left:8px; padding:1px 8px; border-radius:10px;
+    border:1px solid var(--edge); font-size:11.5px; color:var(--muted); vertical-align:1px;
+  }
+  .chip.yes { color:var(--good); border-color:var(--good); }
+  .chip.no { color:var(--bad); border-color:var(--bad); }
+  .act-more { margin:8px 0 0; }
+  .act-keep {
+    display:flex; align-items:center; flex-wrap:wrap; gap:10px 12px; margin:34px 0 0;
+    padding-top:20px; border-top:1px solid var(--line); color:var(--muted); font-size:13px;
+  }
+  button.danger { border-color:var(--bad); color:var(--bad); }
+
   /* What just happened, where it can be read from anywhere in a long pane. */
   #note {
     position:fixed; right:22px; bottom:18px; max-width:340px; margin:0;
@@ -1438,9 +1633,12 @@ const SETTINGS: &str = r##"<!doctype html>
     .brand { display:none; }
     .nav-item { width:auto; flex:none; padding:8px 12px; }
     .nav-item.on::before { top:auto; bottom:2px; left:10px; right:10px; width:auto; height:3px; }
-    #main { padding:26px 20px 52px; }
+    #main { padding:28px 20px 52px; }
     .control { flex-wrap:wrap; }
     .actions { opacity:1; pointer-events:auto; transform:none; }
+    .pane-head { flex-wrap:wrap; gap:16px; }
+    .act-row { grid-template-columns:1fr; gap:2px; }
+    .act-group { padding:14px 16px 10px; }
   }
 </style>
 </head>
@@ -1451,7 +1649,7 @@ const SETTINGS: &str = r##"<!doctype html>
 <script>
 const nav = document.getElementById('nav');
 const main = document.getElementById('main');
-let state = { groups: [], fields: [], servers: [], skills: [], live: false, whisper: { busy: false, ok: true, status: '' }, voice: { busy: false, ok: true, status: '' } };
+let state = { groups: [], fields: [], servers: [], builtins: [], skills: [], live: false, audit: { enabled: true, retention_days: 90, today: 0 }, whisper: { busy: false, ok: true, status: '' }, voice: { busy: false, ok: true, status: '' } };
 
 // Where you are. Kept outside `draw` because every save answers with the whole
 // state and redraws from it, and that must put you back where you were rather
@@ -1467,6 +1665,8 @@ const PANES = [
     tally: () => state.servers.filter(s => s.enabled && s.connected).length + ' live' },
   { id: 'skills', label: 'Skills',
     tally: () => state.skills.filter(s => s.enabled).length + ' on' },
+  { id: 'activity', label: 'Activity',
+    tally: () => state.audit.today + ' today' },
 ];
 
 function el(tag, cls, text) {
@@ -1482,6 +1682,8 @@ function go(pane, server, skill) {
     server: server === undefined ? null : server,
     skill: skill === undefined ? null : skill,
   };
+  // Opening Activity shows what has happened since it was last looked at.
+  if (pane === 'activity') activity.loaded = false;
   draw();
   main.scrollTop = 0;
 }
@@ -1707,6 +1909,19 @@ function serverCard(s) {
   return c;
 }
 
+// Ships with IRA rather than being configured, so it gets a plain on/off row
+// -- not a card of its own, and not a detail page to open -- the same shape
+// `row()` already draws for a skill switch.
+function builtinsBlock() {
+  const b = block('Built-in', 'No server or key needed; these ship with IRA.');
+  for (const t of state.builtins) {
+    b.append(row(t.label, t.about, t.enabled, () => admin(
+      { op: 'builtin_toggle', name: t.name, on: !t.enabled },
+      t.enabled ? 'Turning off…' : 'Turning on…')));
+  }
+  return b;
+}
+
 function serversPane() {
   if (view.server !== null) return serverDetail(view.server);
 
@@ -1716,6 +1931,8 @@ function serversPane() {
   pane.append(head('MCP servers',
     'Each one is a program or a URL that brings tools IRA can call. You decide which of them she may use, and which she may use without asking.',
     add));
+
+  if (state.builtins.length) pane.append(builtinsBlock());
 
   const grid = el('div', 'grid');
   for (const s of state.servers) grid.append(serverCard(s));
@@ -2147,6 +2364,296 @@ function box(label, value, placeholder) {
   return { wrap, input, area };
 }
 
+// --- activity ----------------------------------------------------------
+//
+// Not part of `state`: the log grows, and every save answers with the whole
+// state. It is read a page at a time, only while this pane is open, and only
+// the list is redrawn when a page arrives -- so typing in the search box is
+// never interrupted by its own results.
+
+let activity = { q: '', filter: '', groups: [], more: false, loaded: false, busy: false, error: '', seq: 0 };
+let searchTimer = null;
+
+const ACTIVITY_FILTERS = [
+  ['', 'Everything'],
+  ['conversations', 'Conversations'],
+  ['tools', 'Tools and skills'],
+  ['confirmations', 'Questions IRA asked'],
+  ['settings', 'Settings changes'],
+  ['reminders', 'Reminders'],
+  ['outside', 'Messages from outside'],
+];
+const KEEP_FOR = [[30, '30 days'], [90, '90 days'], [365, 'A year'], [0, 'Forever']];
+
+// A new search or filter supersedes whatever is still on its way, so every
+// request is numbered and only the newest one's answer is drawn. Dropping the
+// new request instead would leave results for a query no longer typed.
+async function loadActivity(more) {
+  if (more && activity.busy) return;
+  const seq = ++activity.seq;
+  activity.busy = true;
+  const last = activity.groups[activity.groups.length - 1];
+  let page = null, failed = '';
+  try {
+    const r = await fetch('/settings/admin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        op: 'activity', q: activity.q, filter: activity.filter,
+        before: more && last ? last.grp : null,
+      }),
+    });
+    page = await r.json();
+    if (!r.ok || page.error) throw new Error(page.error || String(r.status));
+  } catch (e) {
+    failed = 'The activity log could not be read: ' + e.message;
+  }
+  if (seq !== activity.seq) return;
+  activity.busy = false;
+  activity.loaded = true;
+  activity.error = failed;
+  if (!failed) {
+    activity.groups = more ? activity.groups.concat(page.groups) : page.groups;
+    activity.more = page.more;
+  }
+  const list = document.getElementById('activity-list');
+  if (list) fillActivity(list);
+}
+
+function clock(ms) {
+  return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function dayOf(ms) {
+  const d = new Date(ms);
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  if (d.toDateString() === today.toDateString()) return 'Today';
+  if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
+  return d.toLocaleDateString([], {
+    weekday: 'long', day: 'numeric', month: 'long',
+    year: d.getFullYear() === today.getFullYear() ? undefined : 'numeric',
+  });
+}
+
+function took(ms) {
+  return ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(1) + ' s';
+}
+
+// What a group is, named by what started it.
+function groupKind(g) {
+  const kinds = g.rows.map(r => r.kind);
+  if (kinds.includes('heard')) return 'Conversation';
+  return {
+    setting: 'Settings change', reminder: 'Reminder', say: 'Message from outside',
+    tool_try: 'Tried in settings', confirm: 'Question', failed: 'Problem', tool: 'Background job',
+  }[kinds[0]] || kinds[0];
+}
+
+function step(who, cls) {
+  const r = el('div', 'act-row' + (cls ? ' ' + cls : ''));
+  const body = el('div', 'act-body');
+  r.append(el('span', 'act-who', who), body);
+  return { r, body };
+}
+
+function activityRow(row) {
+  const text = row.detail || '';
+  switch (row.kind) {
+    case 'heard': {
+      const s = step('You');
+      s.body.append(el('span', 'act-said', text));
+      return s.r;
+    }
+    case 'reply': {
+      const s = step('IRA');
+      s.body.append(el('span', 'act-said', text));
+      return s.r;
+    }
+    case 'confirm': {
+      const answered = row.result !== null;
+      const s = step('Asked', answered ? (row.ok ? 'good' : 'bad') : '');
+      s.body.append(el('span', null, text),
+        el('span', 'chip' + (answered ? (row.ok ? ' yes' : ' no') : ''),
+          answered ? 'You said ' + row.result : 'No clear answer'));
+      return s.r;
+    }
+    case 'tool':
+    case 'tool_try': {
+      const done = row.result !== null;
+      const s = step(row.kind === 'tool_try' ? 'Tried' : 'Used', !done ? '' : row.ok ? 'good' : 'bad');
+      const name = el('span', 'act-tool', row.name || 'a tool');
+      s.body.append(name);
+      if (row.ms !== null) name.append(el('span', 'act-ms', took(row.ms)));
+      if (text && text !== '{}') s.body.append(el('code', 'act-args', text));
+      s.body.append(el('p', 'act-result' + (done && !row.ok ? ' is-bad' : ''),
+        done ? row.result : 'No result recorded — interrupted, or still running.'));
+      return s.r;
+    }
+    case 'failed': {
+      const s = step('Failed', 'bad');
+      s.body.append(el('span', null, {
+        'transcription': 'Could not make out what was said.',
+        'nothing heard': 'Nothing was heard.',
+        'the model': 'The AI model did not answer.',
+      }[text] || 'Failed: ' + text));
+      return s.r;
+    }
+    case 'setting': {
+      const s = step('Changed', row.ok === false ? 'bad' : 'good');
+      s.body.append(el('span', 'act-said', text));
+      if (row.ok === false && row.result) s.body.append(el('p', 'act-result is-bad', row.result));
+      return s.r;
+    }
+    case 'reminder':
+    case 'say': {
+      const s = step('Said', 'good');
+      s.body.append(el('span', 'act-said', text));
+      if (row.result === 'said late') s.body.append(el('span', 'chip', 'Late'));
+      return s.r;
+    }
+    default: {
+      const s = step(row.kind);
+      s.body.append(el('span', null, text));
+      return s.r;
+    }
+  }
+}
+
+function activityGroup(g) {
+  const box = el('article', 'act-group');
+  const head = el('div', 'act-head');
+  head.append(el('time', 'act-time', clock(g.at)), el('span', 'act-kind', groupKind(g)));
+  const heard = g.rows.find(r => r.kind === 'heard');
+  if (heard && heard.ms !== null) head.append(el('span', 'act-took', took(heard.ms)));
+  const steps = el('div', 'act-steps');
+  for (const row of g.rows) steps.append(activityRow(row));
+  box.append(head, steps);
+  return box;
+}
+
+function fillActivity(list) {
+  list.replaceChildren();
+  if (activity.error) {
+    list.append(el('p', 'warn', activity.error));
+    return;
+  }
+  if (!activity.loaded) {
+    list.append(el('p', 'empty', 'Reading the log…'));
+    return;
+  }
+  if (!activity.groups.length) {
+    list.append(el('p', 'empty', activity.q || activity.filter
+      ? 'Nothing matches.'
+      : 'Nothing recorded yet. Ask IRA something and it appears here.'));
+    return;
+  }
+  let day = null;
+  for (const g of activity.groups) {
+    const d = dayOf(g.at);
+    if (d !== day) {
+      list.append(el('h2', 'act-day', d));
+      day = d;
+    }
+    list.append(activityGroup(g));
+  }
+  if (activity.more) {
+    const older = el('button', 'ghost act-more', activity.busy ? 'Loading…' : 'Show older');
+    older.onclick = () => { older.textContent = 'Loading…'; loadActivity(true); };
+    list.append(older);
+  }
+}
+
+function activityPane() {
+  const pane = el('div', 'pane');
+
+  const refresh = el('button', 'ghost', 'Refresh');
+  refresh.onclick = () => loadActivity(false);
+  // Two presses, not a dialog: this cannot be undone, and a dialog is easy to
+  // wave through without reading.
+  const clear = el('button', 'ghost', 'Clear all');
+  let armed = null;
+  clear.onclick = async () => {
+    if (!armed) {
+      clear.textContent = 'Press again to clear';
+      clear.classList.add('danger');
+      armed = setTimeout(() => {
+        armed = null;
+        clear.textContent = 'Clear all';
+        clear.classList.remove('danger');
+      }, 4000);
+      return;
+    }
+    clearTimeout(armed);
+    if (await admin({ op: 'audit_clear' }, 'Clearing…')) loadActivity(false);
+  };
+  const actions = el('div', 'head-actions');
+  actions.append(refresh, clear);
+  pane.append(head('Activity',
+    'Everything IRA was asked, and what she did about it: the tools and skills she used, the questions she asked first, and changes made in this window.',
+    actions));
+
+  if (!state.audit.enabled) {
+    pane.append(el('p', 'warn',
+      'Recording is off (IRA_AUDIT=off). What was recorded before is still here.'));
+  }
+
+  const find = el('div', 'act-find');
+  const search = el('input');
+  search.type = 'search';
+  search.placeholder = 'Search what was said and done';
+  search.setAttribute('aria-label', 'Search activity');
+  search.value = activity.q;
+  search.oninput = () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      activity.q = search.value.trim();
+      loadActivity(false);
+    }, 250);
+  };
+  const filter = el('select');
+  filter.setAttribute('aria-label', 'Show');
+  for (const [value, label] of ACTIVITY_FILTERS) {
+    const o = el('option', null, label);
+    o.value = value;
+    o.selected = value === activity.filter;
+    filter.append(o);
+  }
+  filter.onchange = () => {
+    activity.filter = filter.value;
+    loadActivity(false);
+  };
+  find.append(search, filter);
+  pane.append(find);
+
+  const list = el('div');
+  list.id = 'activity-list';
+  fillActivity(list);
+  pane.append(list);
+
+  const keep = el('div', 'act-keep');
+  const label = el('label', null, 'Keep activity for');
+  const days = el('select');
+  days.id = 'keep-for';
+  label.htmlFor = 'keep-for';
+  for (const [value, text] of KEEP_FOR) {
+    const o = el('option', null, text);
+    o.value = String(value);
+    o.selected = value === state.audit.retention_days;
+    days.append(o);
+  }
+  days.onchange = async () => {
+    if (await admin({ op: 'audit_retention', days: Number(days.value) }, 'Saving…')) loadActivity(false);
+  };
+  keep.append(label, days,
+    el('span', null, 'Older activity is deleted automatically. Keys and tokens are masked before anything is saved.'));
+  pane.append(keep);
+
+  if (!activity.loaded && !activity.busy) loadActivity(false);
+  return pane;
+}
+
 // --- drawing -----------------------------------------------------------
 
 function draw() {
@@ -2165,6 +2672,7 @@ function draw() {
   main.replaceChildren(
     view.pane === 'servers' ? serversPane()
       : view.pane === 'skills' ? skillsPane()
+      : view.pane === 'activity' ? activityPane()
       : keysPane());
 }
 
@@ -2539,18 +3047,26 @@ mod tests {
     /// Spawning a command someone typed into a web page is a write, and the
     /// gate is the same one a mutating tool goes through. Nothing may be stored
     /// before the answer comes back, and no answer at all is a no.
-    #[tokio::test]
-    async fn a_stdio_server_is_not_saved_without_a_spoken_yes() {
+    /// Refused changes are still recorded in the activity log, so this runs
+    /// against a database of its own -- otherwise it writes the developer's.
+    #[test]
+    fn a_stdio_server_is_not_saved_without_a_spoken_yes() {
+        let _guard = crate::db::cwd_lock();
+        let dir = std::env::temp_dir().join("ira-ui-refusal-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("IRA_DATA", &dir);
+        let _ = std::fs::remove_file(crate::db::path());
+
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let ui = Ui::disabled();
         // No admin handle: nothing is listening to ask, which must read as a
         // refusal rather than as consent.
-        assert!(!ui.ask("anything?".into()).await);
+        assert!(!rt.block_on(ui.ask("anything?".into())));
 
-        let answer = admin_op(
+        let answer = rt.block_on(admin_op(
             &ui,
             br#"{"op":"server_save","name":"x","transport":"stdio","command":"evil.exe"}"#,
-        )
-        .await;
+        ));
         assert!(answer.starts_with("{\"error"), "got {answer}");
 
         // The shapes that are refused before anyone is even asked.
@@ -2561,13 +3077,20 @@ mod tests {
             br#"{"op":"server_save","name":"x","transport":"telnet","url":"http://a"}"#.as_slice(),
             br#"{"op":"nonsense"}"#.as_slice(),
         ] {
-            let answer = admin_op(&ui, bad).await;
+            let answer = rt.block_on(admin_op(&ui, bad));
             assert!(
                 answer.starts_with("{\"error"),
                 "{} was accepted",
                 String::from_utf8_lossy(bad)
             );
         }
+
+        // Every refused save is on record as refused; the unknown op is not a
+        // change at all.
+        let rows = crate::db::audit_groups(&crate::db::AuditQuery { limit: 50, ..Default::default() }).unwrap();
+        std::env::remove_var("IRA_DATA");
+        assert_eq!(rows.len(), 5, "{rows:?}");
+        assert!(rows.iter().all(|r| r.kind == "setting" && r.ok == Some(false)));
     }
 
     #[test]

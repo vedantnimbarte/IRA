@@ -190,6 +190,7 @@ IRA. An absolute path in any of the variables below still wins over all of it.
 | `IRA_UI` | `8180` | Screen port. `off` disables it entirely |
 | `IRA_ORB` | *unset* | `off` disables the overlay. Windows only ([0013](decisions/0013-the-orb-is-an-overlay-on-the-same-stream.md)) |
 | `IRA_TRANSCRIPT` | `transcript.jsonl` | Where the conversation is recorded. `off` disables it |
+| `IRA_AUDIT` | *unset* | `off` stops recording the activity log (tools, questions, settings changes) in `ira.local.db`. What is already recorded stays readable |
 | `IRA_PTT` | *unset* | Set to disarm voice barge-in. Interrupting becomes the talk control, which is what makes speakers usable without echo cancellation |
 | `IRA_SPECULATE_MS` | `200` | Silence after which transcription starts. Above `ENDPOINT_MS` disables speculation, which is how the two are compared on one machine |
 | `IRA_TAIL_MS` | `3000` | Silence appended after a replayed file. The model's round trip happens inside this window, so a benchmark wanting the whole reply needs more |

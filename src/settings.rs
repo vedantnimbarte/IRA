@@ -222,7 +222,7 @@ impl Field {
     }
 }
 
-fn field(name: &str) -> Option<&'static Field> {
+pub fn field(name: &str) -> Option<&'static Field> {
     FIELDS.iter().find(|f| f.name == name)
 }
 
