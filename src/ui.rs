@@ -28,11 +28,14 @@ const DEFAULT_PORT: u16 = 8180;
 /// shows what just happened rather than an empty screen.
 const BACKLOG: usize = 200;
 
-/// The settings page's typeface, baked into the binary. IRA runs without a
+/// Archivo, the website's typeface, baked into the binary. IRA runs without a
 /// network, so this is served from loopback rather than fetched from Google
 /// Fonts -- the same reasoning as the icon, just at runtime instead of build
-/// time.
-const ARCHIVO_FONT: &[u8] = include_bytes!("../assets/Archivo.woff2");
+/// time. The settings page loads it from `/settings/archivo.ttf`, and the
+/// corner widgets in `hud.rs` draw with the same bytes. TrueType rather than
+/// WOFF2 because the widgets' text library reads TrueType and not the
+/// compressed web format, and one file beats the same face twice.
+pub(crate) const ARCHIVO_FONT: &[u8] = include_bytes!("../assets/Archivo.ttf");
 
 #[derive(Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -189,8 +192,9 @@ impl Ui {
     ///
     /// `None` before `set_admin`, and `None` if the registry has been dropped
     /// -- which only happens as the process ends. Every caller treats it as
-    /// "IRA is not running to change", not as an error.
-    fn host(&self) -> Option<Arc<crate::tool::Host>> {
+    /// "IRA is not running to change", not as an error. The corner widget reads
+    /// it too, to count the servers that are live.
+    pub(crate) fn host(&self) -> Option<Arc<crate::tool::Host>> {
         self.admin.get().and_then(|a| a.host.upgrade())
     }
 
@@ -521,9 +525,9 @@ Connection: close
         return;
     }
 
-    if line.starts_with("GET /settings/archivo.woff2") {
+    if line.starts_with("GET /settings/archivo.ttf") {
         let head = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: font/woff2\r\n\
+            "HTTP/1.1 200 OK\r\nContent-Type: font/ttf\r\n\
              Cache-Control: max-age=31536000, immutable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             ARCHIVO_FONT.len()
         );
@@ -1303,10 +1307,9 @@ async fn reply_json<W: tokio::io::AsyncWrite + Unpin>(write: &mut W, status: u16
 /// label style. Everything else is Archivo, the website's face: its width axis
 /// carries the voice, expanded for headings and readouts and normal for
 /// reading. It is baked into the binary (`ARCHIVO_FONT`) and served from
-/// loopback at `/settings/archivo.woff2`: IRA runs without a network, and a
+/// loopback at `/settings/archivo.ttf`: IRA runs without a network, and a
 /// settings page that fetched a typeface would be the only part of her that
-/// did not. Latin only, a quarter of the size of the face it replaced; anything
-/// outside it falls back to the system face.
+/// did not. The corner widgets draw with the same file.
 ///
 /// Served rather than built into the window, because the window is a webview
 /// and this is the thing it shows. Same origin as `POST /settings`, so the
@@ -1323,7 +1326,7 @@ const SETTINGS: &str = r##"<!doctype html>
      file covers every weight and every width this page uses. */
   @font-face {
     font-family:"Archivo"; font-style:normal; font-weight:100 900; font-stretch:62% 125%;
-    font-display:swap; src:url("/settings/archivo.woff2") format("woff2-variations");
+    font-display:swap; src:url("/settings/archivo.ttf") format("truetype");
   }
   /* The website's palette. Light is the same instrument in daylight: the
      accent darkens to a teal, because the website's cyan on white is
@@ -1702,7 +1705,8 @@ let view = { pane: 'keys', server: null, skill: null };
 // answer to the question you opened settings to ask.
 const PANES = [
   { id: 'keys', label: 'AI keys',
-    tally: () => state.fields.filter(f => f.set).length + ' set' },
+    // Hiding the corner widgets is not a key being set.
+    tally: () => state.fields.filter(f => f.set && f.group !== 'screen').length + ' set' },
   { id: 'servers', label: 'MCP servers',
     tally: () => state.servers.filter(s => s.enabled && s.connected).length + ' live' },
   { id: 'skills', label: 'Skills',

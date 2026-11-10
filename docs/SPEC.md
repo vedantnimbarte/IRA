@@ -221,6 +221,7 @@ echoed the step that set it ([0014](decisions/0014-settings-are-editable-while-s
 | `IRA_LLM_MODEL` | `ira.local.db` | `claude-sonnet-5` | Required with `IRA_LLM_URL` — gateways name models differently |
 | `IRA_TTS_ENGINE` | `ira.local.db` | `kokoro` | `kokoro` → the natural voice, with Piper saying anything it cannot; `piper` → Piper only ([0021](decisions/0021-kokoro-is-the-voice.md)) |
 | `IRA_KOKORO_VOICE` | `ira.local.db` | `af_heart` | One of `af_heart` `af_bella` `af_nicole` `af_sarah` `am_michael` `am_fenrir` `bf_emma` `bm_george`. Heard from the next sentence |
+| `IRA_WIDGETS` | `ira.local.db` | *unset* (shown) | `off` hides the corner widgets at once; anything else shows them ([0023](decisions/0023-the-corners-show-what-she-is-doing.md)) |
 
 The keyring is the platform's own: Windows Credential Manager, macOS Keychain,
 or the freedesktop Secret Service. `ira.local.db` is SQLite beside IRA, holding

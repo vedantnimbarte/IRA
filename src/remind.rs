@@ -89,8 +89,9 @@ fn civil(secs: i64) -> (i64, u32, u32, u32, u32, usize) {
     (year, month, day, (sod / 3600) as u32, (sod % 3600 / 60) as u32, weekday)
 }
 
-const WEEKDAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-const MONTHS: [&str; 12] = [
+pub(crate) const WEEKDAYS: [&str; 7] =
+    ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+pub(crate) const MONTHS: [&str; 12] = [
     "January", "February", "March", "April", "May", "June", "July", "August", "September",
     "October", "November", "December",
 ];
@@ -98,8 +99,15 @@ const MONTHS: [&str; 12] = [
 /// "Monday 14 September 2026, 15:42" for a Unix-milliseconds moment, in local
 /// time.
 pub fn describe_local(unix_ms: i64) -> String {
-    let (y, m, d, h, min, wd) = civil(unix_ms.div_euclid(1000) + local_offset_secs());
+    let (y, m, d, h, min, wd) = local_parts(unix_ms);
     format!("{} {d} {} {y}, {h:02}:{min:02}", WEEKDAYS[wd], MONTHS[m as usize - 1])
+}
+
+/// (year, month, day, hour, minute, weekday with Monday = 0) for a
+/// Unix-milliseconds moment, in local time. The corner widget's clock and its
+/// reminder times, as well as `describe_local`.
+pub(crate) fn local_parts(unix_ms: i64) -> (i64, u32, u32, u32, u32, usize) {
+    civil(unix_ms.div_euclid(1000) + local_offset_secs())
 }
 
 /// Local midnight at the start of today, as Unix milliseconds.

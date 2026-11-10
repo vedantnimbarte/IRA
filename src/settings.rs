@@ -150,12 +150,24 @@ pub const FIELDS: &[Field] = &[
             ("bm_george", "George · British, male"),
         ],
     },
+    Field {
+        name: "IRA_WIDGETS",
+        label: "Corner widgets",
+        group: SCREEN,
+        about: "What she is doing at the top left, and this machine at the top right. Clicks go straight through them.",
+        empty: "",
+        secret: false,
+        // Read by `hud.rs` on every frame, so hiding them takes effect at once.
+        choices: &[("", "Shown"), ("off", "Hidden")],
+    },
 ];
 
-/// The stages of a turn, in the order they happen.
+/// The stages of a turn, in the order they happen, and then what is on screen.
 ///
 /// Not a category scheme invented for the window: hearing and answering are the
 /// two that can leave this machine, and speaking is the one that never does.
+/// The last group is not a stage; it is the one thing in the window that is not
+/// about what she hears or says.
 pub const GROUPS: &[Group] = &[
     Group {
         id: HEARING,
@@ -172,11 +184,17 @@ pub const GROUPS: &[Group] = &[
         title: "Speaking",
         about: "Text becomes her voice. Always on this machine.",
     },
+    Group {
+        id: SCREEN,
+        title: "On screen",
+        about: "Beside the orb, over whatever you are doing.",
+    },
 ];
 
 const HEARING: &str = "hearing";
 const ANSWERING: &str = "answering";
 const SPEAKING: &str = "speaking";
+const SCREEN: &str = "screen";
 
 pub struct Group {
     pub id: &'static str,

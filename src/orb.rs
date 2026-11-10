@@ -918,13 +918,16 @@ fn settle(hwnd: windows_sys::Win32::Foundation::HWND, side: u32, scale: f32) {
 ///
 /// Made once and reused: the orb repaints thirty times a second, and allocating
 /// a bitmap for each of those would be the most expensive thing in the process.
-struct Canvas {
+///
+/// Shared with the corner widgets in `hud.rs`, which are the same kind of
+/// window: draw into `pixmap`, then [`Canvas::present`].
+pub(crate) struct Canvas {
     hwnd: windows_sys::Win32::Foundation::HWND,
     dc: windows_sys::Win32::Graphics::Gdi::HDC,
     bitmap: windows_sys::Win32::Graphics::Gdi::HBITMAP,
     /// The DIB's own pixels, which `CreateDIBSection` hands back to write into.
     bits: *mut u8,
-    pixmap: tiny_skia::Pixmap,
+    pub(crate) pixmap: tiny_skia::Pixmap,
     width: u32,
     height: u32,
     /// So a failing paint is reported once rather than thirty times a second.
@@ -932,7 +935,7 @@ struct Canvas {
 }
 
 impl Canvas {
-    fn new(
+    pub(crate) fn new(
         hwnd: windows_sys::Win32::Foundation::HWND,
         width: u32,
         height: u32,
@@ -990,11 +993,15 @@ impl Canvas {
 
     /// Draws one frame and pushes it to the window.
     fn draw(&mut self, frame: &Frame, scale: f32, reveal: f32) {
+        paint(&mut self.pixmap, frame, scale, reveal);
+        self.present();
+    }
+
+    /// Pushes whatever is in `pixmap` to the window.
+    pub(crate) fn present(&mut self) {
         use windows_sys::Win32::Foundation::POINT;
         use windows_sys::Win32::Graphics::Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION};
         use windows_sys::Win32::UI::WindowsAndMessaging::{UpdateLayeredWindow, ULW_ALPHA};
-
-        paint(&mut self.pixmap, frame, scale, reveal);
 
         // tiny-skia is premultiplied RGBA; a DIB is premultiplied BGRA. The same
         // bytes, two of them the other way round.

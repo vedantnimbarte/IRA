@@ -154,6 +154,7 @@ around: [decisions/0001](docs/decisions/0001-audio-path-stays-in-one-process.md)
 | `wingman.rs` | Wingman's own HTTP API adapted to that trait |
 | `ui.rs` | The screen and its event stream |
 | `orb.rs` | The overlay: the website's orb, drawn on a layered window, same stream |
+| `hud.rs` | The corner widgets: what she is doing, top left; this machine, top right |
 | `main.rs` | The state machine |
 | `skills.rs` | `skills/*.md`: user-written instructions, loaded on demand |
 | `cli.rs` · `oauth.rs` | The window from a terminal; signing in to a hosted server |
@@ -356,7 +357,7 @@ thing IRA says — nothing restarts:
 | | |
 |---|---|
 | `ANTHROPIC_API_KEY` · `GROQ_API_KEY` · `IRA_LLM_KEY` | the OS keyring |
-| `IRA_STT_ENGINE` · `IRA_WHISPER_MODEL` · `IRA_STT_URL` · `IRA_LLM_URL` · `IRA_LLM_MODEL` · `IRA_TTS_ENGINE` · `IRA_KOKORO_VOICE` | `ira.local.db`, gitignored |
+| `IRA_STT_ENGINE` · `IRA_WHISPER_MODEL` · `IRA_STT_URL` · `IRA_LLM_URL` · `IRA_LLM_MODEL` · `IRA_TTS_ENGINE` · `IRA_KOKORO_VOICE` · `IRA_WIDGETS` | `ira.local.db`, gitignored |
 
 Those two stores are the only places IRA looks. **The environment is not read** —
 it used to be the fallback under both, and a key on a command line ends up in
@@ -400,6 +401,25 @@ transcript, and IRA must not claim to have put anything on it. `IRA_ORB=off`
 disables it. Windows only for now, and every way it can fail — no display, a
 window that will not open, a bitmap that will not allocate — is a missing light
 and never a broken IRA.
+
+### The corner widgets
+
+Two panels open with the orb, in the website's dark-glass style with its corner
+brackets. They say in words what the orb says as a light, and add the machine
+she runs on:
+
+| | |
+|---|---|
+| top left | her state; what she last heard and said, or the question she is asking you; the last turn's time split into hearing, thinking and her voice, marked if you cut in; the last tool she used and whether it worked; the model, where hearing happens, her voice, and how many MCP servers are live |
+| top right | the time and date; CPU and memory; battery (laptops only) and whether you are online; the next two reminders with a countdown |
+
+Clicks go straight through them to the window underneath. They read the same
+events as the orb and, like it, do not count as a screen: IRA never tells you she
+has put something on them. Hide them under **On screen** in the settings
+window, or with `ira set IRA_WIDGETS off`. They are drawn the same way as the
+orb, with Archivo set by a small text library, since a webview cannot be
+transparent
+([decisions/0023](docs/decisions/0023-the-corners-show-what-she-is-doing.md)).
 
 ## Swapping the brain
 

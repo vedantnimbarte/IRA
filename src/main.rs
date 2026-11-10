@@ -25,6 +25,8 @@ mod fetch;
 mod kokoro;
 #[cfg(windows)]
 mod launch;
+#[cfg(windows)]
+mod hud;
 mod llm;
 mod mcp;
 mod metrics;
@@ -488,6 +490,10 @@ async fn run(hide_console: bool) -> Result<()> {
     // doing. It reads the broadcast directly rather than the served page.
     #[cfg(windows)]
     orb::spawn(&ui);
+    // The corner widgets: the same events again, in words this time, with the
+    // machine she runs on beside them. Hidden from the settings window.
+    #[cfg(windows)]
+    hud::spawn(&ui);
 
     // Everything that could refuse to start has started: the models loaded,
     // piper is running, the microphone is open and the orb is on screen. Only

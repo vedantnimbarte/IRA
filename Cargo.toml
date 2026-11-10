@@ -54,6 +54,11 @@ libc = "0.2"
 # these two are a far smaller tree than the webview stack they replace -- the
 # window itself is ~120 lines of Win32 rather than a windowing crate.
 tiny-skia = "0.11"
+# Text for the corner widgets, which tiny-skia does not draw. Pure Rust, no
+# build step, and it reads variable fonts -- which is the point: the widgets
+# are set in Archivo at the website's widths, not at one fixed instance.
+# decisions/0023.
+swash = "0.2"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -67,6 +72,12 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_LibraryLoader",
     # The local UTC offset, for reminders set "at 3pm" and the clock. See remind.rs.
     "Win32_System_Time",
+    # The system widget: memory, CPU time, battery and whether she is online.
+    # See hud.rs.
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_Power",
+    "Win32_Networking_WinInet",
     "Win32_UI_HiDpi",
     "Win32_UI_Controls",
     "Win32_UI_Input_KeyboardAndMouse",
