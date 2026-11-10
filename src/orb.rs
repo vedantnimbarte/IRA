@@ -51,18 +51,19 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
-/// Logical size of the window, and so of the orb.
-const SIZE: f64 = 128.0;
+/// Logical size of the window: the orb, and the dial around it.
+const SIZE: f64 = 160.0;
 /// Gap from the corner of the work area, so it clears a taskbar.
 const MARGIN: f64 = 24.0;
-/// Redraws a second. The orb is 128 px of gradient; this is not the expensive
+/// Redraws a second. The orb is 160 px of gradient; this is not the expensive
 /// part of a process that runs a neural VAD on every 32 ms of audio.
 const FPS: u64 = 30;
 /// Where the gear sits, in logical pixels from the centre of the window, and
 /// how big it is. Up and to the right: the orb lives in the bottom-left corner
 /// of the screen, so that is the side with room and the side your pointer
-/// arrives from.
-const GEAR_AT: (f32, f32) = (37.0, -37.0);
+/// arrives from. On the dial's rim rather than the orb, so it covers a tick
+/// mark and not her.
+const GEAR_AT: (f32, f32) = (52.0, -52.0);
 const GEAR_R: f32 = 12.0;
 
 /// What the orb is showing. Not `main::State`: the loop's `Holding` covers
@@ -93,66 +94,169 @@ impl Look {
         })
     }
 
-    /// The colours moving inside the sphere. A palette rather than one hue,
-    /// because an iridescent orb has nothing else to say a state with -- these
-    /// and how fast they move is the entire vocabulary.
-    ///
-    /// Sampled from the reference: cyan #00e6fc, blue #19a2fe, magenta #e559fd,
-    /// aqua #71fbf0, pink #fe84e4, lilac #cc9bfd. Cool for waiting, cyan for
-    /// listening, the full spread while she talks, warm when she is asking.
-    fn palette(self) -> [(u8, u8, u8); 4] {
+    /// Where this state pulls the drawing. Every value eases toward its row
+    /// rather than snapping. The same table as `TARGETS` in the website's
+    /// `Orb.tsx`, which this orb is drawn to match: cyan throughout, with state
+    /// carried by how the surface moves, amber when she is asking you something
+    /// and grey when she has stopped.
+    fn target(self) -> Target {
         match self {
-            Look::Idle => [
-                (0x51, 0xc8, 0xff),
-                (0x78, 0x98, 0xf9),
-                (0xcc, 0x9b, 0xfd),
-                (0x71, 0xfb, 0xf0),
-            ],
-            Look::Listening => [
-                (0x00, 0xe6, 0xfc),
-                (0x71, 0xfb, 0xf0),
-                (0x4e, 0xd8, 0xae),
-                (0x19, 0xa2, 0xfe),
-            ],
-            Look::Thinking => [
-                (0x78, 0x98, 0xf9),
-                (0xcc, 0x9b, 0xfd),
-                (0xe5, 0x59, 0xfd),
-                (0x19, 0xa2, 0xfe),
-            ],
-            Look::Speaking => [
-                (0x00, 0xe6, 0xfc),
-                (0xe5, 0x59, 0xfd),
-                (0xfe, 0x84, 0xe4),
-                (0x71, 0xfb, 0xf0),
-            ],
-            Look::Confirming => [
-                (0xff, 0x7a, 0x8a),
-                (0xfe, 0x84, 0xe4),
-                (0xff, 0xb3, 0x6b),
-                (0xe5, 0x59, 0xfd),
-            ],
-            // Not black: a dead orb should look switched off, not broken.
-            Look::Dead => [
-                (0x9a, 0xa1, 0xac),
-                (0x8a, 0x90, 0x9a),
-                (0xa6, 0xac, 0xb6),
-                (0x92, 0x99, 0xa4),
-            ],
+            //                      amp,  speed, wave, glow, size, busy, accent
+            Look::Idle => Target::new(0.10, 0.16, 0.0, 0.78, 1.0, 0.0, CYAN),
+            Look::Listening => Target::new(0.15, 0.34, 0.03, 0.95, 1.05, 0.07, CYAN),
+            Look::Thinking => Target::new(0.23, 1.6, 0.0, 1.15, 1.0, 0.24, CYAN),
+            // The website's ripple is 0.3 on a sphere shaded in 3D. On a flat
+            // outline every ripple is a spike, and at that size she becomes a
+            // starburst, so it is a quarter of that.
+            Look::Speaking => Target::new(0.16, 0.5, 0.08, 1.35, 1.06, 0.0, CYAN),
+            Look::Confirming => Target::new(0.08, 0.2, 0.0, 1.0, 1.0, 0.0, AMBER),
+            Look::Dead => Target::new(0.0, 0.0, 0.0, 0.3, 0.9, 0.0, GREY),
+        }
+    }
+}
+
+/// The website's accent, `--cyan`.
+const CYAN: [f32; 3] = [47.0, 224.0, 208.0];
+/// `--ice`: the working arc and the wake shock, a paler cyan.
+const ICE: [f32; 3] = [159.0, 243.0, 234.0];
+/// `--amber`, the "you took control" colour: asking to confirm, and a cut.
+const AMBER: [f32; 3] = [232.0, 180.0, 85.0];
+/// Switched off, not broken.
+const GREY: [f32; 3] = [138.0, 150.0, 156.0];
+/// The core of the sphere and the lens behind the dial: the website's page.
+const CORE: [f32; 3] = [2.0, 9.0, 11.0];
+const VOID: [f32; 3] = [5.0, 8.0, 10.0];
+
+/// One row of the state table.
+#[derive(Clone, Copy)]
+struct Target {
+    /// How far the surface heaves, as a fraction of the radius.
+    amp: f32,
+    /// How fast it heaves.
+    speed: f32,
+    /// The ripples that run across it while she talks.
+    wave: f32,
+    /// Brightness of the rim, the dust and the bloom.
+    glow: f32,
+    size: f32,
+    /// The working arc's length, as a fraction of the dial. Zero is none.
+    busy: f32,
+    accent: [f32; 3],
+}
+
+impl Target {
+    const fn new(amp: f32, speed: f32, wave: f32, glow: f32, size: f32, busy: f32, accent: [f32; 3]) -> Self {
+        Self { amp, speed, wave, glow, size, busy, accent }
+    }
+}
+
+/// How long the speaking arc takes to sweep most of the dial. It is time spent
+/// talking, not words left: the reply streams, so its length is not known until
+/// she has finished saying it.
+const SAID_FILL: f32 = 6.0;
+/// How long the arc lingers once she stops, so a cut stays on screen long
+/// enough to be seen and a pause between sentences does not blink it.
+const SAID_FADE: f32 = 2.5;
+
+/// Everything one frame is drawn from, eased toward the current look's
+/// [`Target`] a step at a time.
+#[derive(Clone, Copy, Debug)]
+struct Frame {
+    look: Look,
+    /// Seconds since the orb opened: what the dial, the dust and the working
+    /// arc turn by.
+    t: f32,
+    /// The surface's own clock, advanced at the state's speed. Integrated
+    /// rather than `t * speed`, so a change of speed changes the pace and not
+    /// the position -- which would otherwise jump on every state change.
+    phase: f32,
+    amp: f32,
+    speed: f32,
+    wave: f32,
+    glow: f32,
+    size: f32,
+    busy: f32,
+    accent: [f32; 3],
+    /// How much of the dial the speaking arc has swept, 0 to 1.
+    said: f32,
+    said_alpha: f32,
+    /// She was interrupted: the arc stops where she did, in amber.
+    cut: bool,
+    /// The ring fired on waking and on a cut, 0 to 1; above 1 is none.
+    shock: f32,
+}
+
+impl Frame {
+    /// A look fully arrived, with nothing in flight. What the tests and the
+    /// icon draw.
+    fn at_rest(look: Look, t: f32) -> Self {
+        let g = look.target();
+        Self {
+            look,
+            t,
+            phase: t * g.speed,
+            amp: g.amp,
+            speed: g.speed,
+            wave: g.wave,
+            glow: g.glow,
+            size: g.size,
+            busy: g.busy,
+            accent: g.accent,
+            said: 0.0,
+            said_alpha: 0.0,
+            cut: false,
+            shock: 2.0,
         }
     }
 
-    /// How much the light moves, how slowly the colours wander, and how fast
-    /// the ribbons flow. One row per state, so the drawing never forks.
-    fn motion(self) -> (f32, f32, f32) {
-        match self {
-            //           energy, seconds per wander, seconds per ribbon
-            Look::Idle => (0.45, 26.0, 9.0),
-            Look::Listening => (1.0, 13.0, 4.2),
-            Look::Thinking => (0.72, 10.0, 5.5),
-            Look::Speaking => (1.3, 7.5, 2.4),
-            Look::Confirming => (0.35, 18.0, 7.5),
-            Look::Dead => (0.0, 90.0, 40.0),
+    /// Advances `dt` seconds toward `look`. `barged` is whether a turn has just
+    /// ended with her interrupted.
+    fn step(&mut self, look: Look, dt: f32, barged: bool) {
+        if look != self.look {
+            // Idle to listening is the wake word firing, or a press of the orb.
+            if self.look == Look::Idle && look == Look::Listening {
+                self.shock = 0.0;
+            }
+            // A new reply starts a new arc -- but a pause between two
+            // sentences of the same one, with the arc still showing, does not.
+            if look == Look::Speaking && self.said_alpha < 0.05 {
+                self.said = 0.0;
+                self.cut = false;
+            }
+            self.look = look;
+        }
+        if barged {
+            self.cut = true;
+            self.shock = 0.0;
+        }
+
+        // The website's easing: quick enough to read as a change of state,
+        // slow enough that nothing snaps.
+        let g = look.target();
+        let k = 1.0 - (-dt * 7.0).exp();
+        let ease = |v: &mut f32, to: f32| *v += (to - *v) * k;
+        ease(&mut self.amp, g.amp);
+        ease(&mut self.speed, g.speed);
+        ease(&mut self.wave, g.wave);
+        ease(&mut self.glow, g.glow);
+        ease(&mut self.size, g.size);
+        ease(&mut self.busy, g.busy);
+        for (c, to) in self.accent.iter_mut().zip(g.accent) {
+            ease(c, to);
+        }
+
+        self.t += dt;
+        self.phase += dt * self.speed;
+        if look == Look::Speaking {
+            // Fast at first and never lapping, so a long answer closes the
+            // circle rather than starting it again.
+            self.said += (1.0 - self.said) * dt / SAID_FILL;
+            self.said_alpha = (self.said_alpha + dt * 4.0).min(1.0);
+        } else {
+            self.said_alpha = (self.said_alpha - dt / SAID_FADE).max(0.0);
+        }
+        if self.shock <= 1.0 {
+            self.shock += dt * 1.6;
         }
     }
 }
@@ -167,6 +271,9 @@ struct Shared {
     state: AtomicU8,
     speaking: AtomicBool,
     live: AtomicBool,
+    /// A turn just ended with her interrupted. Set by the feed, taken -- read
+    /// and cleared -- by the painter, so each cut is drawn once.
+    barged: AtomicBool,
 }
 
 impl Shared {
@@ -227,6 +334,9 @@ pub fn spawn(ui: &crate::ui::Ui) {
                     Some("speaking") => {
                         feed.speaking.store(v["on"].as_bool().unwrap_or(false), Ordering::Relaxed);
                     }
+                    Some("turn") if v["barged"].as_bool() == Some(true) => {
+                        feed.barged.store(true, Ordering::Relaxed);
+                    }
                     _ => {}
                 },
                 Err(e) => tracing::debug!("orb could not read an event: {e}"),
@@ -256,7 +366,11 @@ struct Orb {
     canvas: Canvas,
     shared: Arc<Shared>,
     ui: crate::ui::Ui,
-    started: std::time::Instant,
+    /// What is on screen, eased a step toward the current look each frame.
+    frame: Frame,
+    /// When the last frame was drawn. Timer messages arrive late under load,
+    /// and easing by the time that actually passed keeps the motion steady.
+    last: std::time::Instant,
     scale: f32,
     /// Whether the pointer is over the orb. The gear only exists while it is:
     /// a lamp with a permanent button on it is a widget, and this is meant to
@@ -354,7 +468,8 @@ fn run(shared: Arc<Shared>, ui: crate::ui::Ui) -> anyhow::Result<()> {
                 canvas,
                 shared,
                 ui,
-                started: std::time::Instant::now(),
+                frame: Frame::at_rest(Look::Idle, 0.0),
+                last: std::time::Instant::now(),
                 scale,
                 hovered: false,
                 reveal: 0.0,
@@ -383,7 +498,13 @@ fn frame() {
     ORB.with(|cell| {
         if let Some(orb) = cell.borrow_mut().as_mut() {
             let look = orb.shared.look();
-            let t = orb.started.elapsed().as_secs_f32();
+            let barged = orb.shared.barged.swap(false, Ordering::Relaxed);
+            let now = std::time::Instant::now();
+            // Capped, so a frame after the machine wakes from sleep eases
+            // rather than teleporting.
+            let dt = now.duration_since(orb.last).as_secs_f32().min(0.1);
+            orb.last = now;
+            orb.frame.step(look, dt, barged);
             // A frame's worth of fade, toward wherever the pointer is.
             let step = 1.0 / (FPS as f32 * GEAR_FADE);
             let target = if orb.hovered { 1.0 } else { 0.0 };
@@ -392,7 +513,7 @@ fn frame() {
             } else {
                 (orb.reveal - step).max(target)
             };
-            orb.canvas.draw(look, t, orb.scale, orb.reveal);
+            orb.canvas.draw(&orb.frame, orb.scale, orb.reveal);
         }
     });
 }
@@ -868,12 +989,12 @@ impl Canvas {
     }
 
     /// Draws one frame and pushes it to the window.
-    fn draw(&mut self, look: Look, t: f32, scale: f32, reveal: f32) {
+    fn draw(&mut self, frame: &Frame, scale: f32, reveal: f32) {
         use windows_sys::Win32::Foundation::POINT;
         use windows_sys::Win32::Graphics::Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION};
         use windows_sys::Win32::UI::WindowsAndMessaging::{UpdateLayeredWindow, ULW_ALPHA};
 
-        paint(&mut self.pixmap, look, t, scale, reveal);
+        paint(&mut self.pixmap, frame, scale, reveal);
 
         // tiny-skia is premultiplied RGBA; a DIB is premultiplied BGRA. The same
         // bytes, two of them the other way round.
@@ -939,172 +1060,285 @@ impl Drop for Canvas {
     }
 }
 
-/// Draws the orb: a pearl sphere with iridescent light moving inside it.
+/// Draws the orb: the website's, a dark core with a lit rim, inside a dial.
 ///
-/// The look is Siri's, and it is built the way that look is built rather than
-/// by drawing anything sphere-shaped. Three layers:
+/// Drawn to match the landing page's WebGL orb -- the same state table, the
+/// same cyan, the same dial -- with a 2D rasteriser, because a window that is
+/// transparent cannot host the webview that would run it
+/// ([0013](../docs/decisions/0013-the-orb-is-an-overlay-on-the-same-stream.md)).
+/// From the back:
 ///
-/// 1. a soft bloom, which is what makes it read as lit rather than pasted on,
-/// 2. a near-white pearl body,
-/// 3. an inner layer -- drifting colour blobs and pale ribbons flowing across
-///    them -- blurred, then clipped to the sphere so nothing escapes the edge.
+/// 1. a dark lens, so it reads the same over a white document as over a dark
+///    wallpaper, fading to nothing well inside the window;
+/// 2. the dial: ticks, a ring of arc segments, and the arcs that say what she
+///    is doing -- working, or how long she has been talking;
+/// 3. the orb: a noisy outline filled dark with its rim lit, a shell of dust
+///    and two tilted rings passing behind and in front of it;
+/// 4. bloom, and the shock ring fired when she wakes or is cut off.
 ///
-/// There is no wireframe and there are no bars. State is carried by which
-/// colours are in the palette and how fast everything moves, which is the whole
-/// vocabulary this kind of orb has.
-fn paint(pixmap: &mut tiny_skia::Pixmap, look: Look, t: f32, scale: f32, reveal: f32) {
+/// Every size is in logical pixels of the 160 px window, times `scale`.
+fn paint(pixmap: &mut tiny_skia::Pixmap, f: &Frame, scale: f32, reveal: f32) {
+    use std::f32::consts::{PI, TAU};
     use tiny_skia::{
-        Color, FillRule, FilterQuality, GradientStop, Mask, Paint, PathBuilder, PixmapPaint, Point,
-        RadialGradient, Shader, SpreadMode, Stroke, Transform,
+        BlendMode, Color, FillRule, FilterQuality, GradientStop, Paint, PathBuilder, PixmapPaint,
+        Point, RadialGradient, Shader, SpreadMode, Transform,
     };
 
     pixmap.fill(Color::TRANSPARENT);
 
     let (w, h) = (pixmap.width(), pixmap.height());
-    let cx = w as f32 / 2.0;
-    let cy = h as f32 / 2.0;
-    let (amp, drift, flow) = look.motion();
-    let palette = look.palette();
+    let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+    let u = scale;
+    let lit = lit(f.accent, f.glow);
+    // How strongly the dial shows: dimmer when she is off, never brighter than
+    // its own colours when she is lit up.
+    let dial = 0.6 + 0.4 * f.glow.min(1.0);
 
-    // The sphere breathes with whatever energy the state has. Barely: this is
-    // the difference between alive and animated.
-    let r = 44.0 * scale * (1.0 + 0.018 * amp * (t * 0.9).sin());
-
-    let mut paint = Paint {
-        anti_alias: true,
-        ..Default::default()
+    let fill = |pixmap: &mut tiny_skia::Pixmap, path: &tiny_skia::Path, shader: Shader| {
+        let paint = Paint {
+            shader,
+            anti_alias: true,
+            ..Default::default()
+        };
+        pixmap.fill_path(path, &paint, FillRule::Winding, Transform::identity(), None);
     };
-
-    // --- the bloom -------------------------------------------------------
-    // Fades to fully transparent well inside the window, which is what keeps
-    // the corners clear and the window invisible.
-    let bloom = r * 1.34;
-    let (br, bg, bb) = palette[0];
-    if let Some(shader) = RadialGradient::new(
-        Point::from_xy(cx, cy),
-        Point::from_xy(cx, cy),
-        bloom,
-        vec![
-            GradientStop::new(0.0, Color::from_rgba8(255, 255, 255, 46)),
-            GradientStop::new(0.70, Color::from_rgba8(br, bg, bb, (16.0 + 20.0 * amp) as u8)),
-            GradientStop::new(1.0, Color::from_rgba8(br, bg, bb, 0)),
-        ],
-        SpreadMode::Pad,
-        Transform::identity(),
-    ) {
-        paint.shader = shader;
-        if let Some(path) = PathBuilder::from_circle(cx, cy, bloom) {
-            pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
-        }
-    }
-
-    // --- the pearl body --------------------------------------------------
-    // Near-white, brightest up and left, with the edge falling away rather than
-    // stopping. A hard rim would make it a disc.
-    if let Some(shader) = RadialGradient::new(
-        Point::from_xy(cx - r * 0.22, cy - r * 0.28),
-        Point::from_xy(cx - r * 0.22, cy - r * 0.28),
-        r * 1.32,
-        vec![
-            GradientStop::new(0.0, Color::from_rgba8(255, 255, 255, 250)),
-            GradientStop::new(0.62, Color::from_rgba8(250, 252, 255, 240)),
-            GradientStop::new(0.90, Color::from_rgba8(240, 246, 255, 205)),
-            GradientStop::new(1.0, Color::from_rgba8(232, 240, 252, 120)),
-        ],
-        SpreadMode::Pad,
-        Transform::identity(),
-    ) {
-        paint.shader = shader;
-        if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
-            pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
-        }
-    }
-
-    // --- the light inside ------------------------------------------------
-    // Drawn at half size and scaled back up: the blur costs a quarter as much,
-    // and the bilinear stretch is free softness on top of it. Nothing here is
-    // meant to have an edge.
-    let (iw, ih) = (w.div_ceil(2), h.div_ceil(2));
-    let Some(mut inner) = tiny_skia::Pixmap::new(iw, ih) else {
-        return;
-    };
-    let s = 0.5;
-    let (icx, icy, ir) = (cx * s, cy * s, r * s);
-
-    let mut ink = Paint {
-        anti_alias: true,
-        ..Default::default()
-    };
-
-    // Colour blobs, each wandering its own slow circle. Four is enough for the
-    // shifting-oil-slick effect and few enough that they never mush to grey.
-    for (i, &(cr, cg, cb)) in palette.iter().enumerate() {
-        let phase = i as f32 * std::f32::consts::TAU / palette.len() as f32;
-        let wander = t / drift * std::f32::consts::TAU;
-        let reach = ir * (0.34 + 0.18 * (wander * 0.7 + phase * 1.7).sin());
-        let bx = icx + reach * (wander + phase).cos();
-        let by = icy + reach * 0.72 * (wander * 1.3 + phase).sin();
-        let blob = ir * (0.92 + 0.12 * (wander * 1.1 + phase).cos());
-        let strength = (206.0 + 40.0 * amp).min(255.0) as u8;
-        if let Some(shader) = RadialGradient::new(
-            Point::from_xy(bx, by),
-            Point::from_xy(bx, by),
-            blob,
-            vec![
-                GradientStop::new(0.0, Color::from_rgba8(cr, cg, cb, strength)),
-                GradientStop::new(0.52, Color::from_rgba8(cr, cg, cb, strength / 2)),
-                GradientStop::new(1.0, Color::from_rgba8(cr, cg, cb, 0)),
-            ],
+    let radial = |r: f32, stops: Vec<GradientStop>| {
+        RadialGradient::new(
+            Point::from_xy(cx, cy),
+            Point::from_xy(cx, cy),
+            r,
+            stops,
             SpreadMode::Pad,
             Transform::identity(),
-        ) {
-            ink.shader = shader;
-            if let Some(path) = PathBuilder::from_circle(bx, by, blob) {
-                inner.fill_path(&path, &ink, FillRule::Winding, Transform::identity(), None);
+        )
+    };
+
+    // --- the lens -------------------------------------------------------
+    // Gone by 79 px from the centre, and the corners are 113 away: that is the
+    // window's transparency, and what the corner test checks.
+    let lens = 79.0 * u;
+    if let (Some(shader), Some(path)) = (
+        radial(
+            lens,
+            vec![
+                // A short fall-off at the very edge: a long one is a grey
+                // smudge on a white page, and buries the outer ring in it.
+                GradientStop::new(0.0, rgba(VOID, 0.92)),
+                GradientStop::new(0.965, rgba(VOID, 0.88)),
+                GradientStop::new(1.0, rgba(VOID, 0.0)),
+            ],
+        ),
+        PathBuilder::from_circle(cx, cy, lens),
+    ) {
+        fill(pixmap, &path, shader);
+    }
+
+    // The orb's light on the lens around it. Never past the lens: out there it
+    // has nothing dark under it and shows as a cyan fringe round the window.
+    let r = 30.0 * u * f.size;
+    let light = (r * 2.1).min(lens * 0.95);
+    if let (Some(shader), Some(path)) = (
+        radial(
+            light,
+            vec![
+                GradientStop::new(0.0, rgba(f.accent, 0.20 * f.glow)),
+                GradientStop::new(1.0, rgba(f.accent, 0.0)),
+            ],
+        ),
+        PathBuilder::from_circle(cx, cy, light),
+    ) {
+        fill(pixmap, &path, shader);
+    }
+
+    // --- the dial -------------------------------------------------------
+    // Sixty ticks with every fifth long, turning once every 160 s.
+    let turn = f.t / 160.0 * TAU;
+    let mut minor = PathBuilder::new();
+    let mut major = PathBuilder::new();
+    for i in 0..60 {
+        let a = turn + i as f32 / 60.0 * TAU;
+        let (pb, inner) = if i % 5 == 0 {
+            (&mut major, 65.5)
+        } else {
+            (&mut minor, 68.0)
+        };
+        pb.move_to(cx + inner * u * a.cos(), cy + inner * u * a.sin());
+        pb.line_to(cx + 71.0 * u * a.cos(), cy + 71.0 * u * a.sin());
+    }
+    if let Some(path) = minor.finish() {
+        stroke(pixmap, &path, f.accent, 0.30 * dial, 0.7 * u);
+    }
+    if let Some(path) = major.finish() {
+        stroke(pixmap, &path, f.accent, 0.65 * dial, 1.0 * u);
+    }
+
+    // The outer ring of segments, turning the other way, once every 90 s.
+    let back = -f.t / 90.0;
+    for (from, len) in [
+        (0.0, 0.22),
+        (0.26, 0.01),
+        (0.31, 0.14),
+        (0.54, 0.26),
+        (0.86, 0.01),
+        (0.91, 0.05),
+    ] {
+        if let Some(path) = arc(cx, cy, 76.0 * u, back + from, len) {
+            stroke(pixmap, &path, f.accent, 0.38 * dial, 0.7 * u);
+        }
+    }
+
+    // The track the working and speaking arcs run on.
+    let track = 61.0 * u;
+    if let Some(path) = PathBuilder::from_circle(cx, cy, track) {
+        stroke(pixmap, &path, f.accent, 0.16 * dial, 1.0 * u);
+    }
+
+    // How long she has been talking, from twelve o'clock, clockwise. Amber if
+    // she was cut off, stopped where she stopped.
+    if f.said_alpha > 0.01 && f.said > 0.002 {
+        if let Some(path) = arc(cx, cy, track, -0.25, f.said) {
+            let colour = if f.cut { AMBER } else { lit };
+            stroke(pixmap, &path, colour, f.said_alpha, 1.8 * u);
+        }
+    }
+
+    // Working: a short arc chasing round, longer while she thinks.
+    let busy = (f.busy / 0.07).min(1.0);
+    if busy > 0.01 {
+        if let Some(path) = arc(cx, cy, track, f.t / 1.6, f.busy) {
+            stroke(pixmap, &path, ICE, 0.9 * busy, 1.8 * u);
+        }
+    }
+
+    // --- the orb --------------------------------------------------------
+    // The outline: heaving noise, plus ripples running down it as she talks.
+    let edge = |a: f32| {
+        let ripple = f.wave * (a.sin() * 14.0 - f.t * 9.0).sin();
+        r * (1.0 + f.amp * heave(a, f.phase) + ripple)
+    };
+
+    // Two rings, tilted almost edge-on and swaying a little. The back half of
+    // each is drawn before the orb and the front half after, so they pass
+    // round it rather than across it.
+    let rings = [(1.56f32, 0.25f32, -0.30f32), (1.86, 0.30, 0.40)];
+    let ring = |pixmap: &mut tiny_skia::Pixmap, front: bool| {
+        for (i, &(size, flat, tilt)) in rings.iter().enumerate() {
+            let tilt = tilt + 0.08 * (f.t * 0.3 + i as f32).sin();
+            let (rx, ry) = (r * size, r * size * flat);
+            let start = if front { 0.0 } else { PI };
+            let mut pb = PathBuilder::new();
+            for s in 0..=48 {
+                let a = start + s as f32 / 48.0 * PI;
+                let (x, y) = (rx * a.cos(), ry * a.sin());
+                let (x, y) = (
+                    cx + x * tilt.cos() - y * tilt.sin(),
+                    cy + x * tilt.sin() + y * tilt.cos(),
+                );
+                if s == 0 {
+                    pb.move_to(x, y);
+                } else {
+                    pb.line_to(x, y);
+                }
+            }
+            if let Some(path) = pb.finish() {
+                stroke(pixmap, &path, f.accent, 0.28 * f.glow.min(1.2), 0.6 * u);
             }
         }
-    }
+    };
 
-    // The ribbons: pale, almost white, sweeping across the middle and crossing
-    // each other. They are what stops the blobs looking like a lava lamp.
-    // Three of them, and the point is that they cross. Given the same tilt and
-    // the same wavelength they stack into one broad band instead, which reads
-    // as a smear rather than as light folding over itself.
-    for i in 0..3 {
-        let k = i as f32;
-        let phase = k * 2.1;
-        let sway = t / flow * std::f32::consts::TAU + phase;
-        let seat = (k - 1.0) * ir * 0.20;
-        let rise = seat + ir * (0.08 + 0.11 * amp) * (sway * 0.5).sin();
-        let thick = ir * (0.13 + 0.06 * (sway * 0.8).cos());
-        let alpha = 226 - i * 26;
-        ink.shader = Shader::SolidColor(Color::from_rgba8(255, 255, 255, alpha as u8));
-        if let Some(path) = ribbon(icx, icy + rise, ir, sway, thick, 1.3 + k * 0.55, (k - 1.0) * 0.26)
-        {
-            inner.fill_path(&path, &ink, FillRule::Winding, Transform::identity(), None);
+    // A shell of dust a third again as wide as the orb, heaving with it and
+    // turning slowly, brighter on the near side.
+    let dust = |pixmap: &mut tiny_skia::Pixmap, front: bool| {
+        const N: usize = 140;
+        let (spin, lean) = (f.t * 0.09, 0.3f32);
+        for i in 0..N {
+            // A Fibonacci sphere: evenly spread, with no clumps at the poles.
+            let y = 1.0 - 2.0 * (i as f32 + 0.5) / N as f32;
+            let band = (1.0 - y * y).sqrt();
+            let around = i as f32 * 2.399_963;
+            let (x, z) = (band * around.cos(), band * around.sin());
+            let (x, z) = (x * spin.cos() + z * spin.sin(), z * spin.cos() - x * spin.sin());
+            let (y, z) = (y * lean.cos() - z * lean.sin(), y * lean.sin() + z * lean.cos());
+            if (z >= 0.0) != front {
+                continue;
+            }
+            let reach = r * 1.3 * (1.0 + 1.25 * f.amp * heave(y.atan2(x), f.phase));
+            let near = (z + 1.0) / 2.0;
+            if let Some(path) = PathBuilder::from_circle(cx + x * reach, cy + y * reach, 0.75 * u) {
+                let alpha = f.glow.min(1.0) * (0.2 + 0.6 * near);
+                fill(pixmap, &path, Shader::SolidColor(rgba(lit, alpha)));
+            }
+        }
+    };
+
+    ring(pixmap, false);
+    dust(pixmap, false);
+
+    let mut outline = PathBuilder::new();
+    for s in 0..=96 {
+        let a = s as f32 / 96.0 * TAU;
+        let (x, y) = (cx + edge(a) * a.cos(), cy + edge(a) * a.sin());
+        if s == 0 {
+            outline.move_to(x, y);
+        } else {
+            outline.line_to(x, y);
         }
     }
+    outline.close();
+    let Some(outline) = outline.finish() else {
+        return;
+    };
 
-    // Small, because this layer is half size: a radius here is worth double at
-    // full resolution, and the blobs are gradients that arrive soft already.
-    // The blur is for the ribbons.
-    blur(&mut inner, (2.0 * scale).round().max(1.0) as usize);
+    // Dark through the middle and lit at the rim: the website's fresnel, flat.
+    // Measured from the furthest the outline can reach, so where it heaves out
+    // it is brightest and where it sinks it dims -- the crests the shader draws.
+    let reach = r * (1.0 + f.amp + f.wave);
+    if let Some(shader) = radial(
+        reach,
+        vec![
+            GradientStop::new(0.0, rgba(CORE, 1.0)),
+            GradientStop::new(0.62, rgba(CORE, 1.0)),
+            GradientStop::new(0.86, rgba(mix(CORE, lit, 0.4), 1.0)),
+            GradientStop::new(1.0, rgba(lit, 1.0)),
+        ],
+    ) {
+        fill(pixmap, &outline, shader);
+    }
+    stroke(pixmap, &outline, lit, 0.9, 1.2 * u);
 
-    // Clipped to the sphere, so the light stays inside the glass.
-    if let Some(mut mask) = Mask::new(w, h) {
-        if let Some(path) = PathBuilder::from_circle(cx, cy, r * 0.995) {
-            mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
-            pixmap.draw_pixmap(
-                0,
-                0,
-                inner.as_ref(),
-                &PixmapPaint {
-                    quality: FilterQuality::Bilinear,
-                    ..Default::default()
-                },
-                Transform::from_scale(w as f32 / iw as f32, h as f32 / ih as f32),
-                Some(&mask),
-            );
+    dust(pixmap, true);
+    ring(pixmap, true);
+
+    // --- bloom ----------------------------------------------------------
+    // The rim again, thick, at half size, blurred and added on top. Half size
+    // for the same reason the pearl orb drew its light that way: a quarter of
+    // the blur's cost, and the stretch back up is free softness.
+    let (bw, bh) = (w.div_ceil(2), h.div_ceil(2));
+    if let Some(mut bloom) = tiny_skia::Pixmap::new(bw, bh) {
+        if let Some(rim) = outline.clone().transform(Transform::from_scale(0.5, 0.5)) {
+            stroke(&mut bloom, &rim, lit, (0.30 + 0.25 * f.glow).min(1.0), 3.0 * u);
+        }
+        blur(&mut bloom, (3.0 * u).round().max(1.0) as usize);
+        pixmap.draw_pixmap(
+            0,
+            0,
+            bloom.as_ref(),
+            &PixmapPaint {
+                blend_mode: BlendMode::Plus,
+                quality: FilterQuality::Bilinear,
+                ..Default::default()
+            },
+            Transform::from_scale(w as f32 / bw as f32, h as f32 / bh as f32),
+            None,
+        );
+    }
+
+    // The shock ring: out from the rim and gone, ice on waking, amber on a cut.
+    if f.shock <= 1.0 {
+        let e = 1.0 - (1.0 - f.shock).powi(3);
+        if let Some(path) = PathBuilder::from_circle(cx, cy, r * (1.0 + e)) {
+            let colour = if f.cut { AMBER } else { ICE };
+            stroke(pixmap, &path, colour, (1.0 - e) * 0.7, 1.2 * u);
         }
     }
 
@@ -1115,30 +1349,70 @@ fn paint(pixmap: &mut tiny_skia::Pixmap, look: Look, t: f32, scale: f32, reveal:
     if reveal > 0.01 {
         gear(pixmap, cx + GEAR_AT.0 * scale, cy + GEAR_AT.1 * scale, scale, reveal);
     }
+}
 
-    // --- the rim ---------------------------------------------------------
-    // A bright hairline, brightest where the light is coming from. It is what
-    // tells you the thing is a sphere and not a hole.
-    if let Some(shader) = RadialGradient::new(
-        Point::from_xy(cx - r * 0.35, cy - r * 0.45),
-        Point::from_xy(cx - r * 0.35, cy - r * 0.45),
-        r * 2.1,
-        vec![
-            GradientStop::new(0.0, Color::from_rgba8(255, 255, 255, 235)),
-            GradientStop::new(1.0, Color::from_rgba8(255, 255, 255, 90)),
-        ],
-        SpreadMode::Pad,
-        Transform::identity(),
-    ) {
-        paint.shader = shader;
-        let stroke = Stroke {
-            width: 1.1 * scale,
-            ..Default::default()
-        };
-        if let Some(path) = PathBuilder::from_circle(cx, cy, r - 0.5 * scale) {
-            pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+/// How far the surface stands out at angle `a`, roughly -1 to 1.
+///
+/// The website displaces a sphere with simplex noise. Seen as an outline that
+/// is a wobble round a circle, and three sines at unrelated frequencies,
+/// drifting against each other, are a wobble round a circle. Every frequency
+/// is a whole number so the outline closes.
+fn heave(a: f32, phase: f32) -> f32 {
+    0.62 * (2.0 * a + phase * 1.7).sin() * (3.0 * a - phase * 1.1).cos()
+        + 0.28 * (5.0 * a + phase * 2.3).sin()
+        + 0.10 * (9.0 * a - phase * 3.1).sin()
+}
+
+/// An arc as a path: `from` and `sweep` in turns, clockwise from three o'clock.
+/// Sampled, because tiny-skia has no arc command; a point every 3° is smooth at
+/// this size.
+fn arc(cx: f32, cy: f32, r: f32, from: f32, sweep: f32) -> Option<tiny_skia::Path> {
+    let steps = ((sweep.abs() * 120.0).ceil() as usize).max(2);
+    let mut pb = tiny_skia::PathBuilder::new();
+    for i in 0..=steps {
+        let a = (from + sweep * i as f32 / steps as f32) * std::f32::consts::TAU;
+        let (x, y) = (cx + r * a.cos(), cy + r * a.sin());
+        if i == 0 {
+            pb.move_to(x, y);
+        } else {
+            pb.line_to(x, y);
         }
     }
+    pb.finish()
+}
+
+fn stroke(
+    pixmap: &mut tiny_skia::Pixmap,
+    path: &tiny_skia::Path,
+    colour: [f32; 3],
+    alpha: f32,
+    width: f32,
+) {
+    let paint = tiny_skia::Paint {
+        shader: tiny_skia::Shader::SolidColor(rgba(colour, alpha)),
+        anti_alias: true,
+        ..Default::default()
+    };
+    let stroke = tiny_skia::Stroke {
+        width,
+        ..Default::default()
+    };
+    pixmap.stroke_path(path, &paint, &stroke, tiny_skia::Transform::identity(), None);
+}
+
+fn rgba(c: [f32; 3], alpha: f32) -> tiny_skia::Color {
+    let ch = |v: f32| v.clamp(0.0, 255.0) as u8;
+    tiny_skia::Color::from_rgba8(ch(c[0]), ch(c[1]), ch(c[2]), (alpha.clamp(0.0, 1.0) * 255.0) as u8)
+}
+
+/// A colour brightened by a glow, which may go past 1 -- clamped when it is
+/// turned into a pixel, so a bright state whitens rather than wraps.
+fn lit(c: [f32; 3], glow: f32) -> [f32; 3] {
+    c.map(|v| v * glow)
+}
+
+fn mix(a: [f32; 3], b: [f32; 3], k: f32) -> [f32; 3] {
+    [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k]
 }
 
 /// The settings gear, at the top-right of the orb.
@@ -1201,48 +1475,6 @@ fn gear(pixmap: &mut tiny_skia::Pixmap, cx: f32, cy: f32, scale: f32, reveal: f3
     if let Some(path) = PathBuilder::from_circle(cx, cy, r * 0.27) {
         pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
     }
-}
-
-/// One ribbon: a long lens shape crossing the sphere, its centreline waved and
-/// its thickness tapering to nothing at both ends.
-///
-/// Sampled rather than drawn as curves. Twenty-four points is smooth enough at
-/// this size, and the blur that follows would hide worse than that anyway.
-fn ribbon(
-    cx: f32,
-    cy: f32,
-    r: f32,
-    sway: f32,
-    thick: f32,
-    freq: f32,
-    tilt: f32,
-) -> Option<tiny_skia::Path> {
-    use tiny_skia::PathBuilder;
-
-    const STEPS: usize = 24;
-    let (x0, x1) = (cx - r * 1.02, cx + r * 1.02);
-    let centre = |f: f32| {
-        cy + (f * std::f32::consts::PI * freq + sway).sin() * r * 0.16 + tilt * (f - 0.5) * r
-    };
-    let half = |f: f32| thick * (f * std::f32::consts::PI).sin().max(0.0);
-
-    let mut pb = PathBuilder::new();
-    for i in 0..=STEPS {
-        let f = i as f32 / STEPS as f32;
-        let x = x0 + (x1 - x0) * f;
-        let y = centre(f) - half(f);
-        if i == 0 {
-            pb.move_to(x, y);
-        } else {
-            pb.line_to(x, y);
-        }
-    }
-    for i in (0..=STEPS).rev() {
-        let f = i as f32 / STEPS as f32;
-        pb.line_to(x0 + (x1 - x0) * f, centre(f) + half(f));
-    }
-    pb.close();
-    pb.finish()
 }
 
 /// A box blur, twice, which is close enough to a gaussian that nobody could
@@ -1364,29 +1596,60 @@ mod tests {
             Look::Confirming,
             Look::Dead,
         ] {
-            let mut pixmap = tiny_skia::Pixmap::new(128, 128).unwrap();
-            // A time that is not zero, so nothing is caught at rest.
-            paint(&mut pixmap, look, 3.7, 1.0, 0.0);
+            let side = SIZE as u32;
+            let mut pixmap = tiny_skia::Pixmap::new(side, side).unwrap();
+            // A time that is not zero, so nothing is caught at rest, with the
+            // gear out and a shock ring mid-flight: the widest it ever draws.
+            let mut frame = Frame::at_rest(look, 3.7);
+            frame.shock = 0.3;
+            paint(&mut pixmap, &frame, 1.0, 1.0);
 
             let at = |x: u32, y: u32| pixmap.pixel(x, y).unwrap().alpha();
-            for (x, y) in [(0, 0), (127, 0), (0, 127), (127, 127)] {
+            let end = side - 1;
+            for (x, y) in [(0, 0), (end, 0), (0, end), (end, end)] {
                 assert_eq!(at(x, y), 0, "{look:?}: corner {x},{y} must be clear");
             }
-            assert!(at(64, 64) > 200, "{look:?}: the sphere must be solid");
+            assert!(at(side / 2, side / 2) > 200, "{look:?}: the sphere must be solid");
         }
     }
 
-    /// The light inside has to actually be coloured. A blur bug, a mask that
-    /// clips everything, or a palette left grey would all still paint a sphere
-    /// -- a white one, which looks deliberate and is not.
+    /// The arc is the website's argument drawn on a lamp: it grows while she
+    /// talks, stops where she was cut off and turns amber, and the next reply
+    /// starts a clean one.
+    #[test]
+    fn an_interruption_stops_the_arc_in_amber() {
+        let dt = 1.0 / FPS as f32;
+        let mut f = Frame::at_rest(Look::Listening, 0.0);
+        for _ in 0..FPS {
+            f.step(Look::Speaking, dt, false);
+        }
+        assert!(f.said > 0.1 && f.said_alpha > 0.9 && !f.cut, "{f:?}");
+
+        let said = f.said;
+        f.step(Look::Listening, dt, true);
+        assert!(f.cut, "a barged turn must mark the arc");
+        assert_eq!(f.said, said, "the arc stops where she did");
+
+        // Long enough for it to fade, then she answers something else.
+        for _ in 0..FPS * 5 {
+            f.step(Look::Listening, dt, false);
+        }
+        f.step(Look::Speaking, dt, false);
+        assert!(!f.cut && f.said < 0.05, "a new reply starts a new arc: {f:?}");
+    }
+
+    /// The rim has to actually be lit. A bloom that washes everything out, an
+    /// accent that eases to grey, or a glow stuck at zero would all still paint
+    /// a convincing dark disc -- which looks deliberate and is not.
     #[test]
     fn the_sphere_has_colour_in_it() {
-        let mut pixmap = tiny_skia::Pixmap::new(128, 128).unwrap();
-        paint(&mut pixmap, Look::Speaking, 3.7, 1.0, 0.0);
+        let side = SIZE as u32;
+        let mut pixmap = tiny_skia::Pixmap::new(side, side).unwrap();
+        paint(&mut pixmap, &Frame::at_rest(Look::Speaking, 3.7), 1.0, 0.0);
 
         let mut widest = 0i32;
-        for y in 40..88 {
-            for x in 40..88 {
+        for y in side / 4..side * 3 / 4 {
+            for x in side / 4..side * 3 / 4 {
                 let p = pixmap.pixel(x, y).unwrap();
                 let (r, g, b) = (p.red() as i32, p.green() as i32, p.blue() as i32);
                 widest = widest.max(r.max(g).max(b) - r.min(g).min(b));
@@ -1414,6 +1677,13 @@ mod tests {
     #[test]
     #[ignore = "writes assets/ira.ico; run it when the orb changes"]
     fn render_the_icon() {
+        // Idle, but with the orb larger in its dial than on screen: an icon is
+        // read at 16 px, where the orb at its window size is a speck in a dark
+        // disc.
+        let icon = Frame {
+            size: 1.4,
+            ..Frame::at_rest(Look::Idle, 0.0)
+        };
         // 256 is what Explorer shows at its largest; the smaller ones stop
         // Windows downscaling that one badly in the Start menu and the taskbar.
         let sizes = [16u32, 32, 48, 64, 128, 256];
@@ -1422,8 +1692,8 @@ mod tests {
             .map(|&side| {
                 let mut pixmap = tiny_skia::Pixmap::new(side, side).unwrap();
                 // `paint` sizes everything off the pixmap, so the scale is the
-                // ratio to the 128 px window the orb was drawn for.
-                paint(&mut pixmap, Look::Idle, 0.0, side as f32 / 128.0, 0.0);
+                // ratio to the window the orb was drawn for.
+                paint(&mut pixmap, &icon, side as f32 / SIZE as f32, 0.0);
                 pixmap.encode_png().expect("encode png")
             })
             .collect();
@@ -1460,7 +1730,7 @@ mod tests {
         // from the 256 above, since the orb costs nothing to draw again and an
         // upscaled sphere is a blurry one on every Retina display.
         let mut big = tiny_skia::Pixmap::new(1024, 1024).unwrap();
-        paint(&mut big, Look::Idle, 0.0, 8.0, 0.0);
+        paint(&mut big, &icon, 1024.0 / SIZE as f32, 0.0);
         let png = big.encode_png().expect("encode png");
         std::fs::write("assets/ira.png", &png).expect("write assets/ira.png");
         eprintln!("wrote assets/ira.png ({} bytes)", png.len());

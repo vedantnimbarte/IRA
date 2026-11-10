@@ -1,6 +1,6 @@
 # 0013 — The orb is an overlay on the same event stream
 
-**Status:** accepted
+**Status:** accepted — what it looks like amended by [0022](0022-the-orb-is-the-websites.md)
 **Date:** 2026-09-10
 
 ## Context

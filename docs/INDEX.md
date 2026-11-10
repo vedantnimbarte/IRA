@@ -59,7 +59,7 @@ context, the decision, its consequences, and what would change it.
 | [0010](decisions/0010-press-to-talk-before-echo-cancellation.md) | Press-to-talk ships before echo cancellation | accepted |
 | [0011](decisions/0011-a-tone-now-and-words-when-idle.md) | A tone now, and words when IRA next has the floor | accepted |
 | [0012](decisions/0012-wingman-is-a-built-in-not-an-mcp-shim.md) | Wingman is a built-in, not an MCP shim | accepted |
-| [0013](decisions/0013-the-orb-is-an-overlay-on-the-same-stream.md) | The orb is an overlay on the same stream | accepted |
+| [0013](decisions/0013-the-orb-is-an-overlay-on-the-same-stream.md) | The orb is an overlay on the same stream | accepted, look amended by 0022 |
 | [0014](decisions/0014-settings-are-editable-while-she-runs.md) | Settings are editable while she runs | accepted, amended by 0015 |
 | [0015](decisions/0015-settings-come-from-the-keyring-not-the-environment.md) | Settings come from the OS keyring and a database, never the environment | accepted |
 | [0016](decisions/0016-skills-are-markdown-loaded-by-a-tool-call.md) | Skills are Markdown files, loaded by a tool call | accepted |
@@ -68,6 +68,7 @@ context, the decision, its consequences, and what would change it.
 | [0019](decisions/0019-installed-rather-than-cloned.md) | Installed rather than cloned: per-user data, a first-run download, real installers | accepted |
 | [0020](decisions/0020-she-runs-whisper-herself.md) | She runs whisper herself, and local is the default | accepted |
 | [0021](decisions/0021-kokoro-is-the-voice.md) | Kokoro is the voice, and Piper is what she falls back to | accepted |
+| [0022](decisions/0022-the-orb-is-the-websites.md) | The orb is the website's | accepted |
 
 ## Looking for something specific?
 

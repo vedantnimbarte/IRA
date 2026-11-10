@@ -153,7 +153,7 @@ around: [decisions/0001](docs/decisions/0001-audio-path-stays-in-one-process.md)
 | `mcp.rs` | MCP servers adapted to that trait |
 | `wingman.rs` | Wingman's own HTTP API adapted to that trait |
 | `ui.rs` | The screen and its event stream |
-| `orb.rs` | The overlay: a drawn globe on a layered window, same stream |
+| `orb.rs` | The overlay: the website's orb, drawn on a layered window, same stream |
 | `main.rs` | The state machine |
 | `skills.rs` | `skills/*.md`: user-written instructions, loaded on demand |
 | `cli.rs` · `oauth.rs` | The window from a terminal; signing in to a hosted server |
@@ -327,16 +327,18 @@ IRA only tells the model it has a screen while a page is actually open.
 ### The orb
 
 A tab does not tell you IRA is running while you are working in something else.
-So there is also a small always-on-top globe in the bottom-left corner, over
-whatever you are doing:
+So there is also a small always-on-top orb in the bottom-left corner, over
+whatever you are doing — the same one as on the website, a dark core with a lit
+rim inside a dial:
 
 | | |
 |---|---|
-| pale blue and lilac, barely moving | idle — running, waiting for the wake word |
-| cyan and aqua, quickening | listening |
-| violet and blue, folding over | thinking |
-| cyan and magenta, moving fast | speaking — interrupt her |
-| warm pink and amber, almost still | asking whether to do something |
+| cyan, dim and barely moving | idle — running, waiting for the wake word |
+| a ring flashes out, a short arc chases round the dial | listening |
+| the surface churns, the arc lengthens | thinking |
+| bright and rippling, an arc fills round the dial | speaking — interrupt her |
+| the arc stops where she did and turns amber | you interrupted her |
+| amber, almost still | asking whether to do something |
 | grey, nothing moving | IRA is not running, or has stopped |
 
 Click it to take the floor, click again to interrupt: it is the talk control,
@@ -378,10 +380,13 @@ stays drawn because the orb needs alpha, and a form does not
 The same page is at <http://127.0.0.1:8180/settings> in a tab, which is how to
 look at it if the window will not open.
 
-A pearl sphere with iridescent light moving inside it: colour drifting under
-the surface, pale ribbons flowing across and folding over each other. There is
-no text and no meter, so state is carried by which colours are in it and how
-fast they move — which is the whole vocabulary this kind of orb has.
+The website's orb, drawn: a dark core with a cyan rim that heaves and ripples,
+a shell of dust, two tilted rings, and a dial around it with no text on it.
+State is carried by how the surface moves and by two arcs on the dial — one
+chasing round while she works, one filling while she talks. It fills with how
+long she has been talking rather than how much is left, because the reply
+streams and its length is not known until she has said it
+([decisions/0022](docs/decisions/0022-the-orb-is-the-websites.md)).
 
 It reads the same events the page reads, straight off the broadcast. It is
 **drawn** rather than rendered: a webview window cannot be made transparent on
@@ -538,8 +543,8 @@ ones that survive a code review:
 - The orb losing its transparency and becoming a square on top of your work.
   `the_corners_are_clear_in_every_state` rasterises a frame and reads the alpha
   back, which is the whole claim without needing a window.
-- The orb going white. A broken blur, a mask that clips everything and a grey
-  palette all still paint a perfectly convincing sphere.
+- The orb going dark. A glow stuck at zero or an accent that eases to grey
+  still paints a perfectly convincing disc.
 - A setting still being read from the environment after the environment stopped
   being a place IRA reads from, or a cleared one that does not stay cleared.
 
