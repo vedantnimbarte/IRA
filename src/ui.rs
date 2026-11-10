@@ -2815,6 +2815,9 @@ load().catch(() => {
 </html>
 "##;
 
+/// The screen: a live transcript of what she hears, says and does, at
+/// `http://127.0.0.1:8180`. Drawn in the website's design, like the settings
+/// window, and set in the same Archivo from the same loopback route.
 const PAGE: &str = r##"<!doctype html>
 <html lang="en">
 <head>
@@ -2822,82 +2825,149 @@ const PAGE: &str = r##"<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>IRA</title>
 <style>
+  /* The website's design, as in the settings window: the same palette, light
+     and dark, and Archivo from the same loopback route. */
+  @font-face {
+    font-family:"Archivo"; font-style:normal; font-weight:100 900; font-stretch:62% 125%;
+    font-display:swap; src:url("/settings/archivo.ttf") format("truetype");
+  }
   :root {
-    --bg:#f4f6f8; --panel:#fff; --line:#d9dee5; --ink:#191c22;
-    --soft:#3e454f; --muted:#626c7a; --accent:#9e540c;
-    --you:#1d6b50; --warn:#9e2c2c;
+    --ground:#eef3f4; --surface:#f8fbfb; --sunk:#e8eff0;
+    --ink:#0b1a1f; --soft:#33484f; --muted:#5b7078; --faint:#879aa1;
+    --line:#d3dfe2; --edge:#b2c7cc;
+    --accent:#08877c; --on-accent:#ffffff; --said:#0b6f66;
+    --amber:#a86a00; --bad:#b4323f;
+    --glow:none;
+    --sans:"Archivo","Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+    --mono:"Cascadia Mono",Consolas,ui-monospace,monospace;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg:#131519; --panel:#1a1d23; --line:#2c313a; --ink:#e7eaee;
-      --soft:#c3c9d2; --muted:#949daa; --accent:#de9b48;
-      --you:#4eae87; --warn:#e07373;
+      --ground:#05080a; --surface:#0a1114; --sunk:#070c0f;
+      --ink:#e3eef0; --soft:#b3c5ca; --muted:#86a0a8; --faint:#5a717a;
+      --line:#15232a; --edge:#22414b;
+      --accent:#2fe0d0; --on-accent:#05080a; --said:#9ff3ea;
+      --amber:#e8b455; --bad:#f08a94;
+      --glow:0 0 12px color-mix(in srgb, #2fe0d0 55%, transparent);
     }
   }
   * { box-sizing:border-box; }
   body {
-    margin:0; background:var(--bg); color:var(--ink);
-    font:15px/1.6 "Segoe UI",system-ui,sans-serif;
+    margin:0; background:var(--ground); color:var(--ink);
+    font:400 16px/1.6 var(--sans); font-variant-numeric:tabular-nums;
+    -webkit-font-smoothing:antialiased;
   }
+  ::selection { background:var(--accent); color:var(--on-accent); }
+
+  /* Readouts, as on the website: expanded and tracked. */
+  #state, #live, .who, .turn {
+    font:500 11.5px/1.4 var(--sans); font-stretch:125%; letter-spacing:.06em;
+  }
+
   header {
-    position:sticky; top:0; display:flex; align-items:center; gap:12px;
-    padding:12px 20px; background:var(--panel); border-bottom:1px solid var(--line);
+    position:sticky; top:0; z-index:1; display:flex; align-items:center; gap:22px;
+    padding:18px clamp(20px, 5vw, 56px);
+    background:color-mix(in srgb, var(--ground) 88%, transparent);
+    backdrop-filter:blur(14px); border-bottom:1px solid var(--line);
   }
-  h1 { margin:0; font-size:15px; letter-spacing:.16em; text-transform:uppercase; }
-  #state {
-    font:12px ui-monospace,Consolas,monospace; letter-spacing:.08em;
-    text-transform:uppercase; color:var(--accent);
-    border:1px solid var(--accent); border-radius:3px; padding:2px 8px;
+  h1 {
+    margin:0; font:600 13px/1 var(--sans); font-stretch:125%; letter-spacing:.18em;
   }
-  #live { margin-left:auto; font-size:12px; color:var(--muted); }
+  #state { display:flex; align-items:center; gap:8px; color:var(--accent); }
+  #state::before {
+    content:""; width:6px; height:6px; border-radius:50%; background:currentColor;
+    box-shadow:var(--glow);
+  }
+  #state[data-state="idle"] { color:var(--muted); }
+  #state[data-state="idle"]::before { box-shadow:none; }
+  #state[data-state="confirming"] { color:var(--amber); }
+  #live { margin-left:auto; color:var(--faint); }
+  #live.on { color:var(--muted); }
   #talk {
-    font:12px ui-monospace,Consolas,monospace; letter-spacing:.08em;
-    text-transform:uppercase; cursor:pointer; color:var(--panel);
-    background:var(--accent); border:1px solid var(--accent);
-    border-radius:3px; padding:4px 12px;
+    height:36px; padding:0 20px; border-radius:999px; cursor:pointer;
+    font:600 13px/1 var(--sans); font-stretch:112%;
+    border:1px solid var(--accent); background:var(--accent); color:var(--on-accent);
+    transition:filter .15s ease;
   }
-  #talk:active { filter:brightness(.85); }
-  #talk:focus-visible { outline:2px solid var(--ink); outline-offset:2px; }
-  main { max-width:820px; margin:0 auto; padding:20px; }
-  .row { margin-bottom:14px; }
-  .who {
-    font:11px ui-monospace,Consolas,monospace; letter-spacing:.1em;
-    text-transform:uppercase; color:var(--muted); margin-bottom:3px;
+  #talk:hover { filter:brightness(1.1); }
+  #talk:active { filter:brightness(.9); }
+  #talk:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+
+  main { max-width:760px; margin:0 auto; padding:48px clamp(20px, 5vw, 56px) 96px; }
+  .row {
+    display:grid; grid-template-columns:7.5rem minmax(0,1fr); gap:6px 20px;
+    align-items:baseline; margin-bottom:22px;
   }
-  .what {
-    background:var(--panel); border:1px solid var(--line); border-radius:5px;
-    padding:10px 14px; white-space:pre-wrap; overflow-wrap:anywhere;
-  }
-  .you .who { color:var(--you); }
-  .you .what { border-left:3px solid var(--you); }
-  .ira .what { border-left:3px solid var(--accent); }
+  .who { color:var(--faint); padding-top:2px; }
+  .what { white-space:pre-wrap; overflow-wrap:anywhere; }
+  .you .what { color:var(--ink); font-size:17px; }
+  .ira .what { color:var(--said); font-size:17px; }
+  /* A tool's arguments and its answer: read character by character, and
+     framed with the website's corner brackets rather than boxed. */
   .tool .what, .result .what {
-    font:13px/1.55 ui-monospace,Consolas,monospace; color:var(--soft);
+    --corner:var(--edge); --k:12px;
+    padding:12px 16px; color:var(--soft);
+    font:400 13px/1.6 var(--mono);
+    background:
+      linear-gradient(var(--corner) 0 0) 0 0 / var(--k) 1px,
+      linear-gradient(var(--corner) 0 0) 0 0 / 1px var(--k),
+      linear-gradient(var(--corner) 0 0) 100% 0 / var(--k) 1px,
+      linear-gradient(var(--corner) 0 0) 100% 0 / 1px var(--k),
+      linear-gradient(var(--corner) 0 0) 0 100% / var(--k) 1px,
+      linear-gradient(var(--corner) 0 0) 0 100% / 1px var(--k),
+      linear-gradient(var(--corner) 0 0) 100% 100% / var(--k) 1px,
+      linear-gradient(var(--corner) 0 0) 100% 100% / 1px var(--k),
+      var(--surface);
+    background-repeat:no-repeat;
   }
-  .ask .what { border-left:3px solid var(--warn); font-weight:600; }
-  .bad .what { border-left:3px solid var(--warn); color:var(--warn); }
+  .tool .who { color:var(--muted); }
+  /* Asking, and your answer to it: the website's "you took control" amber. */
+  .ask .who, .ask .what { color:var(--amber); }
+  .bad .who, .bad .what { color:var(--bad); }
   .turn {
-    display:flex; flex-wrap:wrap; gap:6px 14px;
-    font:11px ui-monospace,Consolas,monospace; color:var(--muted);
-    border-top:1px dashed var(--line); padding-top:8px; margin:18px 0 22px;
+    display:flex; flex-wrap:wrap; gap:6px 22px; color:var(--faint);
+    border-top:1px solid var(--line); padding-top:12px; margin:30px 0 38px;
   }
-  .turn b { color:var(--soft); font-weight:600; }
-  .empty { color:var(--muted); text-align:center; padding:60px 0; }
+  .turn b { color:var(--muted); font-weight:500; margin-right:6px; }
+  .turn .cut { color:var(--amber); }
+  .empty { color:var(--muted); text-align:center; padding:96px 0; }
+  @media (max-width:600px) {
+    .row { grid-template-columns:1fr; gap:2px; margin-bottom:20px; }
+    header { gap:14px; }
+  }
+  @media (prefers-reduced-motion:reduce) {
+    * { transition:none !important; }
+  }
 </style>
 </head>
 <body>
 <header>
   <h1>IRA</h1>
-  <span id="state">idle</span>
-  <button id="talk" title="Open the floor, or interrupt">talk</button>
-  <span id="live">connecting…</span>
+  <span id="state" data-state="idle">Idle</span>
+  <span id="live">Connecting</span>
+  <button id="talk" title="Open the floor, or interrupt">Talk</button>
 </header>
-<main id="log"><div class="empty">Waiting for the wake word.</div></main>
+<main id="log"><div class="empty">Say &ldquo;hey Jarvis&rdquo;, or press Talk.</div></main>
 <script>
 const log = document.getElementById('log');
 const stateEl = document.getElementById('state');
 const liveEl = document.getElementById('live');
 let empty = true;
+
+// The loop's state names, said the way the orb and the widgets say them.
+const STATES = { idle: 'Idle', listening: 'Listening', holding: 'Thinking', confirming: 'Asking you' };
+let state = 'idle';
+let speaking = false;
+function showState() {
+  stateEl.dataset.state = speaking ? 'speaking' : state;
+  stateEl.textContent = speaking ? 'Speaking' : (STATES[state] || state);
+}
+
+function follow() {
+  // Only follow if already at the bottom, so reading scrollback is not fought.
+  const near = window.innerHeight + window.scrollY >= document.body.offsetHeight - 160;
+  if (near) window.scrollTo(0, document.body.scrollHeight);
+}
 
 function row(cls, who, what) {
   if (empty) { log.innerHTML = ''; empty = false; }
@@ -2909,42 +2979,50 @@ function row(cls, who, what) {
   b.className = 'what'; b.textContent = what;
   d.append(w, b);
   log.append(d);
-  // Only follow if already at the bottom, so reading scrollback is not fought.
-  const near = window.innerHeight + window.scrollY >= document.body.offsetHeight - 120;
-  if (near) window.scrollTo(0, document.body.scrollHeight);
+  follow();
 }
 
 document.getElementById('talk').onclick = () =>
   fetch('/talk', { method: 'POST' });
 
 const src = new EventSource('/events');
-src.onopen = () => liveEl.textContent = 'live';
-src.onerror = () => liveEl.textContent = 'disconnected';
+src.onopen = () => { liveEl.textContent = 'Live'; liveEl.className = 'on'; };
+src.onerror = () => { liveEl.textContent = 'Disconnected'; liveEl.className = ''; };
 src.onmessage = (e) => {
   const m = JSON.parse(e.data);
   switch (m.kind) {
-    case 'state':    stateEl.textContent = m.name; break;
-    case 'heard':    row('you', 'you', m.text); break;
-    case 'reply':    row('ira', 'ira', m.text); break;
-    case 'tool':     row('tool', 'calling ' + m.name, m.args); break;
-    case 'result':   row('result', m.ok ? 'result' : 'tool failed', m.text); break;
-    case 'confirm':  row('ask', 'asking', m.question); break;
-    case 'answered': row('ask', 'you', m.yes ? 'yes' : 'no'); break;
-    case 'failed':   row('bad', 'failed', m.what); break;
+    case 'state':    state = m.name; showState(); break;
+    case 'speaking': speaking = m.on; showState(); break;
+    case 'heard':    row('you', 'You', m.text); break;
+    case 'reply':    row('ira', 'IRA', m.text); break;
+    case 'tool':     row('tool', 'Calling ' + m.name, m.args); break;
+    case 'result':   row(m.ok ? 'result' : 'result bad', m.ok ? 'Result' : 'Tool failed', m.text); break;
+    case 'confirm':  row('ask', 'Asking', m.question); break;
+    case 'answered': row('ask', 'You', m.yes ? 'Yes' : 'No'); break;
+    case 'failed':   row('bad', 'Failed', m.what); break;
     case 'turn': {
       if (empty) { log.innerHTML = ''; empty = false; }
       const d = document.createElement('div');
       d.className = 'turn';
       const parts = [
-        ['turn', m.id], ['total', m.total_ms + ' ms'], ['stt', m.stt_ms + ' ms'],
-        ['ttft', m.ttft_ms + ' ms'], ['tts', m.tts_ms + ' ms'],
+        ['Turn', m.id], ['Total', m.total_ms + ' ms'], ['Hearing', m.stt_ms + ' ms'],
+        ['Thinking', m.ttft_ms + ' ms'], ['Voice', m.tts_ms + ' ms'],
       ];
-      if (m.tools) parts.push(['tools', m.tools], ['tool time', m.tool_ms + ' ms']);
-      if (m.barged) parts.push(['', 'interrupted']);
-      d.innerHTML = parts.map(([k, v]) => k ? `<span><b>${k}</b> ${v}</span>` : `<span>${v}</span>`).join('');
+      if (m.tools) parts.push(['Tools', m.tools], ['Tool time', m.tool_ms + ' ms']);
+      for (const [k, v] of parts) {
+        const s = document.createElement('span');
+        const b = document.createElement('b');
+        b.textContent = k;
+        s.append(b, String(v));
+        d.append(s);
+      }
+      if (m.barged) {
+        const s = document.createElement('span');
+        s.className = 'cut'; s.textContent = 'Interrupted';
+        d.append(s);
+      }
       log.append(d);
-      const near = window.innerHeight + window.scrollY >= document.body.offsetHeight - 120;
-      if (near) window.scrollTo(0, document.body.scrollHeight);
+      follow();
       break;
     }
   }
