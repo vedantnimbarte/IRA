@@ -607,7 +607,15 @@ fn piper_rendered(stderr: impl std::io::BufRead, pending: &AtomicUsize, mut rend
         let _ = writeln!(std::io::stderr(), "{}", line.trim_end());
         if line.contains("Real-time factor") {
             // Saturating: a line counted nowhere must not wrap to "forever busy".
-            let _ = pending.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+            // A compare-and-swap loop rather than `fetch_update`, which newer
+            // Rust deprecates under another name.
+            let mut n = pending.load(Ordering::Relaxed);
+            while n > 0 {
+                match pending.compare_exchange_weak(n, n - 1, Ordering::Relaxed, Ordering::Relaxed) {
+                    Ok(_) => break,
+                    Err(seen) => n = seen,
+                }
+            }
             rendered();
         }
     }

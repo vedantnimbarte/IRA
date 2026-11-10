@@ -57,10 +57,16 @@ pub fn now_ms() -> i64 {
 fn next_grp() -> i64 {
     static LAST: AtomicI64 = AtomicI64::new(0);
     let now = now_ms();
-    let prev = LAST
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |last| Some(now.max(last + 1)))
-        .unwrap_or_else(|p| p);
-    now.max(prev + 1)
+    // A compare-and-swap loop rather than `fetch_update`, which newer Rust
+    // deprecates under another name: this compiles warning-free on both.
+    let mut last = LAST.load(Ordering::SeqCst);
+    loop {
+        let next = now.max(last + 1);
+        match LAST.compare_exchange_weak(last, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return next,
+            Err(seen) => last = seen,
+        }
+    }
 }
 
 /// Days to keep, or 0 for forever.
