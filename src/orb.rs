@@ -48,7 +48,7 @@
 //! logged and swallowed: no display, a window that will not open, a bitmap that
 //! will not allocate. IRA still answers questions.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 
 /// Logical size of the window: the orb, and the dial around it.
@@ -150,10 +150,6 @@ impl Target {
     }
 }
 
-/// How long the speaking arc takes to sweep most of the dial. It is time spent
-/// talking, not words left: the reply streams, so its length is not known until
-/// she has finished saying it.
-const SAID_FILL: f32 = 6.0;
 /// How long the arc lingers once she stops, so a cut stays on screen long
 /// enough to be seen and a pause between sentences does not blink it.
 const SAID_FADE: f32 = 2.5;
@@ -210,8 +206,9 @@ impl Frame {
     }
 
     /// Advances `dt` seconds toward `look`. `barged` is whether a turn has just
-    /// ended with her interrupted.
-    fn step(&mut self, look: Look, dt: f32, barged: bool) {
+    /// ended with her interrupted; `heard` is how much of the reply in progress
+    /// has been played, over how much both engines have made so far.
+    fn step(&mut self, look: Look, dt: f32, barged: bool, heard: f32) {
         if look != self.look {
             // Idle to listening is the wake word firing, or a press of the orb.
             if self.look == Look::Idle && look == Look::Listening {
@@ -247,10 +244,14 @@ impl Frame {
 
         self.t += dt;
         self.phase += dt * self.speed;
+        // How much of the reply she has said. It can step back when a sentence
+        // lands faster than she speaks it -- with the total unknown until she
+        // has finished, that is the honest picture -- and the easing turns the
+        // step into a glide. A cut freezes it where she stopped.
+        if !self.cut {
+            ease(&mut self.said, heard.clamp(0.0, 1.0));
+        }
         if look == Look::Speaking {
-            // Fast at first and never lapping, so a long answer closes the
-            // circle rather than starting it again.
-            self.said += (1.0 - self.said) * dt / SAID_FILL;
             self.said_alpha = (self.said_alpha + dt * 4.0).min(1.0);
         } else {
             self.said_alpha = (self.said_alpha - dt / SAID_FADE).max(0.0);
@@ -274,6 +275,8 @@ struct Shared {
     /// A turn just ended with her interrupted. Set by the feed, taken -- read
     /// and cleared -- by the painter, so each cut is drawn once.
     barged: AtomicBool,
+    /// The last `said` event as a fraction heard, 0 to 1, in an `f32`'s bits.
+    heard: AtomicU32,
 }
 
 impl Shared {
@@ -323,7 +326,17 @@ pub fn spawn(ui: &crate::ui::Ui) {
     let mut events = ui.subscribe();
     let feed = shared.clone();
     tokio::spawn(async move {
-        while let Ok(json) = events.recv().await {
+        use tokio::sync::broadcast::error::RecvError;
+        loop {
+            let json = match events.recv().await {
+                Ok(json) => json,
+                // Fell behind and missed some events. That is a reason to read
+                // on, not to go grey: IRA is still running, and the next state
+                // event puts the orb right. Treating it as the end, as this
+                // loop once did, left a running IRA looking stopped for good.
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
+            };
             match serde_json::from_str::<serde_json::Value>(&json) {
                 Ok(v) => match v["kind"].as_str() {
                     Some("state") => {
@@ -333,6 +346,11 @@ pub fn spawn(ui: &crate::ui::Ui) {
                     }
                     Some("speaking") => {
                         feed.speaking.store(v["on"].as_bool().unwrap_or(false), Ordering::Relaxed);
+                    }
+                    Some("said") => {
+                        let n = |k: &str| v[k].as_u64().unwrap_or(0) as f32;
+                        let heard = if n("voiced_ms") > 0.0 { n("played_ms") / n("voiced_ms") } else { 0.0 };
+                        feed.heard.store(heard.min(1.0).to_bits(), Ordering::Relaxed);
                     }
                     Some("turn") if v["barged"].as_bool() == Some(true) => {
                         feed.barged.store(true, Ordering::Relaxed);
@@ -382,6 +400,10 @@ struct Orb {
     /// The settings window, kept alive as long as it is open. Dropping it
     /// closes the webview, so this is also how "already open" is answered.
     settings: Option<Settings>,
+    /// A full-screen app or a presentation has the screen, so the orb is out
+    /// of its way; see `hud::screen_taken`. Checked about once a second.
+    hidden: bool,
+    frames: u32,
 }
 
 /// The window class name, UTF-16 because that is what `RegisterClassW` reads.
@@ -415,6 +437,11 @@ fn run(shared: Arc<Shared>, ui: crate::ui::Ui) -> anyhow::Result<()> {
     // SAFETY: a class registered with a static name and a window procedure of
     // the required signature, then a window created from it. Every handle is
     // checked before it is used.
+    //
+    // Per-monitor DPI aware first, so the orb is drawn at the display's real
+    // resolution and told when its scale changes -- and so is the settings
+    // window, which this thread also opens.
+    crate::hud::per_monitor_dpi();
     unsafe {
         let instance = GetModuleHandleW(std::ptr::null());
         let class = WNDCLASSW {
@@ -474,6 +501,8 @@ fn run(shared: Arc<Shared>, ui: crate::ui::Ui) -> anyhow::Result<()> {
                 hovered: false,
                 reveal: 0.0,
                 settings: None,
+                hidden: false,
+                frames: 0,
             });
         });
 
@@ -493,10 +522,26 @@ fn run(shared: Arc<Shared>, ui: crate::ui::Ui) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Draws one frame, if there is an orb on this thread to draw.
+/// Draws one frame, if there is an orb on this thread to draw -- or hides it
+/// while something has the whole screen, and brings it back after.
 fn frame() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE};
     ORB.with(|cell| {
         if let Some(orb) = cell.borrow_mut().as_mut() {
+            orb.frames = orb.frames.wrapping_add(1);
+            if orb.frames.is_multiple_of(FPS as u32) {
+                let taken = crate::hud::screen_taken();
+                if taken != orb.hidden {
+                    orb.hidden = taken;
+                    // SAFETY: the window this thread created.
+                    unsafe { ShowWindow(orb.canvas.hwnd, if taken { SW_HIDE } else { SW_SHOWNOACTIVATE }) };
+                }
+            }
+            if orb.hidden {
+                // Nobody can see it, so it costs nothing either.
+                orb.last = std::time::Instant::now();
+                return;
+            }
             let look = orb.shared.look();
             let barged = orb.shared.barged.swap(false, Ordering::Relaxed);
             let now = std::time::Instant::now();
@@ -504,7 +549,8 @@ fn frame() {
             // rather than teleporting.
             let dt = now.duration_since(orb.last).as_secs_f32().min(0.1);
             orb.last = now;
-            orb.frame.step(look, dt, barged);
+            let heard = f32::from_bits(orb.shared.heard.load(Ordering::Relaxed));
+            orb.frame.step(look, dt, barged, heard);
             // A frame's worth of fade, toward wherever the pointer is.
             let step = 1.0 / (FPS as f32 * GEAR_FADE);
             let target = if orb.hovered { 1.0 } else { 0.0 };
@@ -546,9 +592,48 @@ unsafe extern "system" fn wndproc(
     // which is where TrackMouseEvent's documentation would have you look.
     use windows_sys::Win32::UI::Controls::WM_MOUSELEAVE;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DefWindowProcW, PostQuitMessage, WM_DESTROY, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_TIMER,
+        DefWindowProcW, PostQuitMessage, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN,
+        WM_MOUSEMOVE, WM_SETTINGCHANGE, WM_TIMER,
     };
     match msg {
+        // The display's scale changed: a new canvas at the new size, then the
+        // corner again, since the margin scales too. Settled outside the
+        // borrow, because moving a window sends messages back here.
+        WM_DPICHANGED => {
+            let scale = (wparam & 0xffff) as f32 / 96.0;
+            let side = (SIZE as f32 * scale) as u32;
+            let rebuilt = ORB.with(|cell| {
+                let mut cell = cell.try_borrow_mut().ok()?;
+                let orb = cell.as_mut()?;
+                match Canvas::new(hwnd, side, side) {
+                    Ok(canvas) => {
+                        orb.canvas = canvas;
+                        orb.scale = scale;
+                        Some(())
+                    }
+                    Err(e) => {
+                        tracing::error!("orb could not follow the new scale: {e}");
+                        None
+                    }
+                }
+            });
+            if rebuilt.is_some() {
+                settle(hwnd, side, scale);
+                frame();
+            }
+            0
+        }
+        // A resolution change, or the taskbar moving: the corner moved too.
+        WM_DISPLAYCHANGE | WM_SETTINGCHANGE => {
+            let placed = ORB.with(|cell| {
+                cell.try_borrow().ok().and_then(|c| c.as_ref().map(|o| (o.canvas.width, o.scale)))
+            });
+            if let Some((side, scale)) = placed {
+                settle(hwnd, side, scale);
+            }
+            // SAFETY: forwarding the message exactly as it arrived.
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
         WM_TIMER => {
             frame();
             0
@@ -713,7 +798,10 @@ fn open_settings(port: u16) {
         drop(stale);
     }
 
-    match build_settings(port) {
+    // The orb's own scale: the settings window opens on the same thread, so it
+    // is per-monitor aware too, and its size is in real pixels.
+    let scale = ORB.with(|cell| cell.borrow().as_ref().map(|o| o.scale)).unwrap_or(1.0);
+    match build_settings(port, scale) {
         // Stored after it is built, so nothing is borrowed while the window
         // being created is sending messages back here.
         Ok(settings) => ORB.with(|cell| {
@@ -731,7 +819,7 @@ enum Press {
     Settings(u16),
 }
 
-fn build_settings(port: u16) -> anyhow::Result<Settings> {
+fn build_settings(port: u16, scale: f32) -> anyhow::Result<Settings> {
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -769,8 +857,8 @@ fn build_settings(port: u16) -> anyhow::Result<Settings> {
             WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            SETTINGS_SIZE.0,
-            SETTINGS_SIZE.1,
+            (SETTINGS_SIZE.0 as f32 * scale) as i32,
+            (SETTINGS_SIZE.1 as f32 * scale) as i32,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             instance as _,
@@ -823,9 +911,30 @@ unsafe extern "system" fn settings_proc(
     lparam: windows_sys::Win32::Foundation::LPARAM,
 ) -> windows_sys::Win32::Foundation::LRESULT {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DefWindowProcW, GetClientRect, WM_DESTROY, WM_SIZE,
+        DefWindowProcW, GetClientRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER, WM_DESTROY,
+        WM_DPICHANGED, WM_SIZE,
     };
     match msg {
+        // Dragged to a monitor with another scale, or the scale changed: take
+        // the size Windows suggests, which keeps the window the same physical
+        // size. The webview follows through WM_SIZE below.
+        WM_DPICHANGED => {
+            // SAFETY: for this message `lparam` is a RECT Windows owns for the
+            // duration of the call.
+            unsafe {
+                let r = &*(lparam as *const windows_sys::Win32::Foundation::RECT);
+                SetWindowPos(
+                    hwnd,
+                    std::ptr::null_mut(),
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            0
+        }
         // The webview is a child window and does not resize itself.
         //
         // Deliberately reads nothing shared: this arrives during
@@ -1620,28 +1729,31 @@ mod tests {
         }
     }
 
-    /// The arc is the website's argument drawn on a lamp: it grows while she
-    /// talks, stops where she was cut off and turns amber, and the next reply
-    /// starts a clean one.
+    /// The arc is the website's argument drawn on a lamp: it follows how much
+    /// of the reply she has said, stops where she was cut off and turns amber,
+    /// and the next reply starts a clean one.
     #[test]
     fn an_interruption_stops_the_arc_in_amber() {
         let dt = 1.0 / FPS as f32;
         let mut f = Frame::at_rest(Look::Listening, 0.0);
+        // A second of her saying 40% of what she has so far.
         for _ in 0..FPS {
-            f.step(Look::Speaking, dt, false);
+            f.step(Look::Speaking, dt, false, 0.4);
         }
-        assert!(f.said > 0.1 && f.said_alpha > 0.9 && !f.cut, "{f:?}");
+        assert!((f.said - 0.4).abs() < 0.01 && f.said_alpha > 0.9 && !f.cut, "{f:?}");
 
         let said = f.said;
-        f.step(Look::Listening, dt, true);
+        f.step(Look::Listening, dt, true, 0.4);
         assert!(f.cut, "a barged turn must mark the arc");
+        // Even if a late reading arrives, the cut holds the arc where it was.
+        f.step(Look::Listening, dt, false, 0.9);
         assert_eq!(f.said, said, "the arc stops where she did");
 
         // Long enough for it to fade, then she answers something else.
         for _ in 0..FPS * 5 {
-            f.step(Look::Listening, dt, false);
+            f.step(Look::Listening, dt, false, 0.4);
         }
-        f.step(Look::Speaking, dt, false);
+        f.step(Look::Speaking, dt, false, 0.0);
         assert!(!f.cut && f.said < 0.05, "a new reply starts a new arc: {f:?}");
     }
 

@@ -61,6 +61,18 @@ The ripple is a quarter of the website's. On a sphere shaded in 3D, it reads as
 waves; on a flat outline every ripple is a spike, and at full strength she
 becomes a starburst while she talks.
 
+## Amended: the arc is what she has said
+
+The first version filled the arc with time spent talking, because the reply's
+length is not known while it streams. A truer measure was there all along:
+how much audio the two engines have handed the speaker since the reply began,
+and how long sound has been playing since then -- playback runs in real time,
+so that is how much has been heard. The loop sends both as a `said` event a
+few times a second, kept out of the page's backlog, and the arc eases toward
+the one over the other. It can step back when a sentence lands faster than she
+speaks it; with the total unknown, that is the honest picture, and the easing
+makes it a glide. A cut still freezes it, in amber.
+
 ## What would change this
 
 The website's orb changing again. Its targets live in `TARGETS` in the

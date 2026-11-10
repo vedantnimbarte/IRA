@@ -269,6 +269,60 @@ fn go(state: &mut State, next: State, ui: &ui::Ui) {
     *state = next;
 }
 
+/// How much of the reply in progress has been heard, for the orb's arc.
+///
+/// The reply streams, so its length is not known until she has finished
+/// making it. What is known, a frame at a time, is how much audio both engines
+/// have handed the speaker since the reply began, and how long sound has been
+/// playing since then -- playback runs in real time, so that is how much of it
+/// has been heard. The one over the other is the arc.
+#[derive(Default)]
+struct Said {
+    open: bool,
+    /// `Tts::voiced_ms` when the reply opened.
+    base: u64,
+    played: u64,
+    frames: u32,
+    /// What was last sent, so a still reply sends nothing.
+    sent: (u64, u64),
+}
+
+impl Said {
+    /// One audio frame. An event when there is something to say: at once when
+    /// a reply opens, so the orb starts from nothing, and then every fourth
+    /// frame -- about eight a second -- while it is moving.
+    fn frame(&mut self, speaking: bool, idle: bool, voiced: u64, frame_ms: u64) -> Option<ui::Event> {
+        let event = |(played_ms, voiced_ms)| ui::Event::Said { played_ms, voiced_ms };
+        if !self.open {
+            if !speaking {
+                // Nothing is playing, so everything voiced so far was heard,
+                // and the next reply starts from here.
+                self.base = voiced;
+                return None;
+            }
+            *self = Said { open: true, base: self.base, ..Said::default() };
+            self.sent = (0, voiced.saturating_sub(self.base));
+            return Some(event(self.sent));
+        }
+        if speaking {
+            self.played += frame_ms;
+        }
+        let now = (self.played, voiced.saturating_sub(self.base));
+        // Closed when she is idle, not at a gap between two sentences: the
+        // arc is the whole reply's.
+        if !speaking && idle {
+            self.open = false;
+            self.base = voiced;
+        }
+        self.frames += 1;
+        let due = !self.open || self.frames.is_multiple_of(4);
+        (due && now != self.sent).then(|| {
+            self.sent = now;
+            event(now)
+        })
+    }
+}
+
 /// The name the screen and the orb know a state by. Split out of `go` so a
 /// test can walk every variant: an unstyled state is a silent failure out at
 /// the orb, which keeps whatever colour it had and reports nothing.
@@ -609,6 +663,12 @@ async fn run(hide_console: bool) -> Result<()> {
     let mut ducked = false;
     // Last reported state of the speaker, so the orb hears about changes only.
     let mut was_speaking = false;
+    // How much of the reply in progress has been heard, for the orb's arc. A
+    // reply opens when she starts making sound and closes when she is idle --
+    // not at every gap between two sentences. Played time is counted a frame
+    // at a time, since playback runs in real time; voiced time is everything
+    // either engine has handed the speaker since the reply opened.
+    let mut said = Said::default();
     // Finished jobs waiting for IRA to have the floor legitimately. The tone
     // fires the instant one lands; the words wait.
     let mut reports: VecDeque<String> = VecDeque::new();
@@ -667,6 +727,9 @@ async fn run(hide_console: bool) -> Result<()> {
                 if is_speaking != was_speaking {
                     was_speaking = is_speaking;
                     ui.send(ui::Event::Speaking { on: is_speaking });
+                }
+                if let Some(event) = said.frame(is_speaking, tts.idle(), tts.voiced_ms(), frame_ms) {
+                    ui.send(event);
                 }
 
                 pre_roll.extend(frame.iter().copied());
@@ -1348,6 +1411,39 @@ fn spawn_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reply opens at its first sound, counts played time only while sound is
+    /// playing, survives a gap between sentences, and closes when she is idle.
+    #[test]
+    fn said_follows_one_reply_across_its_sentences() {
+        let said_of = |e: Option<ui::Event>| match e {
+            Some(ui::Event::Said { played_ms, voiced_ms }) => Some((played_ms, voiced_ms)),
+            _ => None,
+        };
+        let mut s = Said::default();
+        // 5 s of earlier speech, all heard: the base.
+        assert_eq!(said_of(s.frame(false, true, 5_000, 32)), None);
+        // The first sentence lands: 2 s of it, nothing played yet.
+        assert_eq!(said_of(s.frame(true, false, 7_000, 32)), Some((0, 2_000)));
+        // Three more frames playing; the fourth sends.
+        for _ in 0..2 {
+            assert_eq!(said_of(s.frame(true, false, 7_000, 32)), None);
+        }
+        assert_eq!(said_of(s.frame(true, false, 9_000, 32)), None);
+        assert_eq!(said_of(s.frame(true, false, 9_000, 32)), Some((128, 4_000)));
+        // A gap between sentences: not idle, so the reply stays open and the
+        // played time does not move.
+        for _ in 0..4 {
+            s.frame(false, false, 9_000, 32);
+        }
+        assert!(s.open, "a gap between sentences is not the end of the reply");
+        assert_eq!(s.played, 128);
+        // Idle: closed, with the final numbers sent.
+        s.frame(false, true, 9_000, 32);
+        assert!(!s.open);
+        // The next reply starts from zero.
+        assert_eq!(said_of(s.frame(true, false, 10_000, 32)), Some((0, 1_000)));
+    }
 
     /// The race this exists for: a busy machine took 28 s to load whisper, and
     /// the first question, asked 11 s in, timed out at 15 s. A start in progress

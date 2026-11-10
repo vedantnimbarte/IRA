@@ -67,6 +67,11 @@ swash and its dependencies on Windows only. The binary grows by the TTF, about
 The panels are a fixed size, which suits a fixed layout. A long reply is cut to
 two lines with an ellipsis, and the page still has all of it.
 
+They step out of the way, with the orb, while something has the whole screen
+-- a full-screen app or game, or presentation mode -- using the same signal
+Windows uses to hold back notifications. Screen sharing has no such signal, so
+it is not covered; hiding them before sharing is on the user.
+
 Every failure is a missing panel and never a broken IRA, on the same terms as
 the orb: a font that will not load, a window that will not open, a reading that
 fails (which shows as zero).

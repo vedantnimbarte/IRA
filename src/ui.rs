@@ -46,6 +46,11 @@ pub enum Event {
     /// both, and splitting it would put that guarantee at risk to light a lamp.
     /// This rides alongside instead, and only the orb listens to it.
     Speaking { on: bool },
+    /// How much of the reply has been heard: audio played over audio made so
+    /// far, in milliseconds, a few times a second while she has a reply open.
+    /// What the orb's arc fills with. Not kept in the backlog: it is only ever
+    /// about now, and at that rate it would push the transcript out of it.
+    Said { played_ms: u64, voiced_ms: u64 },
     Heard { text: String },
     Reply { text: String },
     Tool { name: String, args: String },
@@ -307,6 +312,10 @@ impl Ui {
         let Ok(json) = serde_json::to_string(&event) else {
             return;
         };
+        if matches!(event, Event::Said { .. }) {
+            let _ = self.tx.send(json);
+            return;
+        }
         if let Ok(mut b) = self.backlog.lock() {
             if b.len() == BACKLOG {
                 b.pop_front();

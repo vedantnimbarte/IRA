@@ -384,10 +384,17 @@ look at it if the window will not open.
 The website's orb, drawn: a dark core with a cyan rim that heaves and ripples,
 a shell of dust, two tilted rings, and a dial around it with no text on it.
 State is carried by how the surface moves and by two arcs on the dial — one
-chasing round while she works, one filling while she talks. It fills with how
-long she has been talking rather than how much is left, because the reply
-streams and its length is not known until she has said it
+chasing round while she works, one filling with how much of her reply she has
+said. That is the audio she has played over the audio made so far: the reply
+streams, so its full length is not known until she has finished it, and the
+arc can step back a little when a sentence lands faster than she speaks it
 ([decisions/0022](docs/decisions/0022-the-orb-is-the-websites.md)).
+
+The orb and the corner widgets are drawn at the display's own resolution and
+redrawn when its scale changes, and both step out of the way while a
+full-screen app, a game or a presentation has the screen. Screen sharing cannot
+be detected — a meeting app does not tell anyone it is sharing — so hide the
+widgets before sharing if what she said should stay private.
 
 It reads the same events the page reads, straight off the broadcast. It is
 **drawn** rather than rendered: a webview window cannot be made transparent on

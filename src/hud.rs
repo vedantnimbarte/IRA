@@ -783,7 +783,54 @@ struct Hud {
     machine: Machine,
     scale: f32,
     shown: bool,
+    /// Something has the whole screen; see [`screen_taken`]. Checked once a
+    /// second rather than every frame.
+    taken: bool,
     ticks: u32,
+}
+
+/// Whether something has the whole screen: a full-screen app or game, or
+/// Windows' presentation mode. The orb and the widgets both get out of its way,
+/// and come back when it is gone.
+///
+/// This is what Windows itself uses to hold back notifications. There is no
+/// equivalent for screen sharing: a meeting app sharing the screen does not
+/// tell anyone else it is doing it.
+pub(crate) fn screen_taken() -> bool {
+    use windows_sys::Win32::UI::Shell::{
+        SHQueryUserNotificationState, QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
+    };
+    let mut state = 0;
+    // SAFETY: an out-parameter that outlives the call.
+    let hr = unsafe { SHQueryUserNotificationState(&mut state) };
+    hr >= 0 && matches!(state, QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE)
+}
+
+/// Makes the windows this thread creates per-monitor DPI aware, so they are
+/// drawn at the display's real resolution -- not drawn at 96 DPI and blown up
+/// by Windows, which is blurry -- and are told when the scale changes.
+///
+/// Per thread rather than per process: the orb's thread and this one want it,
+/// and nothing else in IRA has a window to change.
+pub(crate) fn per_monitor_dpi() {
+    use windows_sys::Win32::UI::HiDpi::{SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+    // SAFETY: a documented constant; a failure leaves the thread as it was,
+    // which is DPI-unaware and stretched -- the old behaviour, not a crash.
+    unsafe {
+        SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+
+/// A canvas per panel at `scale`.
+fn canvases(
+    left: windows_sys::Win32::Foundation::HWND,
+    right: windows_sys::Win32::Foundation::HWND,
+    scale: f32,
+) -> anyhow::Result<(Canvas, Canvas)> {
+    let px = |(w, h): (f32, f32)| ((w * scale).round() as u32, (h * scale).round() as u32);
+    let (aw, ah) = px(AI_SIZE);
+    let (sw, sh) = px(SYS_SIZE);
+    Ok((Canvas::new(left, aw, ah)?, Canvas::new(right, sw, sh)?))
 }
 
 thread_local! {
@@ -804,6 +851,7 @@ fn run(ai: Arc<Mutex<Ai>>, ui: crate::ui::Ui) -> anyhow::Result<()> {
     };
 
     let text = Text::new().ok_or_else(|| anyhow::anyhow!("the widgets' font would not load"))?;
+    per_monitor_dpi();
 
     // SAFETY: a class registered with a static name and a window procedure of
     // the required signature, then two windows created from it. Every handle
@@ -850,11 +898,7 @@ fn run(ai: Arc<Mutex<Ai>>, ui: crate::ui::Ui) -> anyhow::Result<()> {
 
         let dpi = GetDpiForWindow(left);
         let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
-        let px = |(w, h): (f32, f32)| ((w * scale).round() as u32, (h * scale).round() as u32);
-        let (aw, ah) = px(AI_SIZE);
-        let (sw, sh) = px(SYS_SIZE);
-        let ai_canvas = Canvas::new(left, aw, ah)?;
-        let sys_canvas = Canvas::new(right, sw, sh)?;
+        let (ai_canvas, sys_canvas) = canvases(left, right, scale)?;
         settle(left, right, scale);
 
         HUD.with(|cell| {
@@ -869,6 +913,7 @@ fn run(ai: Arc<Mutex<Ai>>, ui: crate::ui::Ui) -> anyhow::Result<()> {
                 machine: Machine::default(),
                 scale,
                 shown: false,
+                taken: screen_taken(),
                 ticks: 0,
             });
         });
@@ -887,7 +932,8 @@ fn run(ai: Arc<Mutex<Ai>>, ui: crate::ui::Ui) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Draws a frame of both panels, or hides them if the setting says so.
+/// Draws a frame of both panels, or hides them if the setting says so or
+/// something has the whole screen.
 fn tick() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE};
     HUD.with(|cell| {
@@ -895,7 +941,11 @@ fn tick() {
         let Some(hud) = cell.as_mut() else {
             return;
         };
-        let wanted = crate::settings::get("IRA_WIDGETS").as_deref() != Some("off");
+        hud.ticks = hud.ticks.wrapping_add(1);
+        if hud.ticks.is_multiple_of(FPS) {
+            hud.taken = screen_taken();
+        }
+        let wanted = crate::settings::get("IRA_WIDGETS").as_deref() != Some("off") && !hud.taken;
         if !wanted {
             if hud.shown {
                 // SAFETY: windows this thread created.
@@ -911,7 +961,6 @@ fn tick() {
         if hud.ticks.is_multiple_of(FPS) {
             hud.info = Info::read(&hud.ui);
         }
-        hud.ticks = hud.ticks.wrapping_add(1);
         let ai = hud.ai.lock().map(|a| a.clone()).unwrap_or_default();
         let now = crate::audit::now_ms();
 
@@ -960,11 +1009,41 @@ unsafe extern "system" fn wndproc(
     lparam: windows_sys::Win32::Foundation::LPARAM,
 ) -> windows_sys::Win32::Foundation::LRESULT {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DefWindowProcW, PostQuitMessage, WM_DESTROY, WM_DISPLAYCHANGE, WM_SETTINGCHANGE, WM_TIMER,
+        DefWindowProcW, PostQuitMessage, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_SETTINGCHANGE,
+        WM_TIMER,
     };
     match msg {
         WM_TIMER => {
             tick();
+            0
+        }
+        // The display's scale changed: new canvases at the new size, then the
+        // corners again, since the margins scale too. Only the first window
+        // acts, so the pair is rebuilt once. Settled outside the borrow,
+        // because moving a window sends messages back to this procedure.
+        WM_DPICHANGED => {
+            let scale = (wparam & 0xffff) as f32 / 96.0;
+            let pair = HUD.with(|cell| {
+                let mut cell = cell.try_borrow_mut().ok()?;
+                let hud = cell.as_mut().filter(|h| h.windows[0] == hwnd)?;
+                let [left, right] = hud.windows;
+                match canvases(left, right, scale) {
+                    Ok((a, s)) => {
+                        hud.ai_canvas = a;
+                        hud.sys_canvas = s;
+                        hud.scale = scale;
+                        Some((left, right))
+                    }
+                    Err(e) => {
+                        tracing::error!("widgets could not follow the new scale: {e}");
+                        None
+                    }
+                }
+            });
+            if let Some((left, right)) = pair {
+                settle(left, right, scale);
+                tick();
+            }
             0
         }
         // A resolution change, or the taskbar moving: the corners moved too.

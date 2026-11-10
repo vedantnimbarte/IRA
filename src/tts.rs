@@ -130,6 +130,15 @@ pub struct Tts {
     /// Bumped by barge-in. A sentence Kokoro was given under an older number is
     /// thrown away, even one it has already finished synthesising.
     generation: Arc<AtomicU64>,
+    /// Microseconds of speech handed to the speaker since start-up, from either
+    /// engine. Only ever grows; the loop reads the difference across a reply
+    /// to say how much of it has been heard. See [`Tts::voiced_ms`].
+    voiced_us: Arc<AtomicU64>,
+}
+
+/// Microseconds of audio in `samples` mono samples at `rate`.
+fn duration_us(samples: usize, rate: SampleRate) -> u64 {
+    samples as u64 * 1_000_000 / u64::from(rate.get())
 }
 
 /// Kokoro's thread, and how to reach it.
@@ -181,6 +190,7 @@ impl Tts {
             elided: AtomicBool::new(false),
             kokoro: None,
             generation: Arc::new(AtomicU64::new(0)),
+            voiced_us: Arc::new(AtomicU64::new(0)),
             started: Instant::now(),
             piper: piper.to_path_buf(),
             voice: voice.to_path_buf(),
@@ -222,13 +232,14 @@ impl Tts {
         let (tx, rx) = std::sync::mpsc::channel::<(u64, String)>();
         let state = Arc::new(std::sync::atomic::AtomicU8::new(LOADING));
         let st = state.clone();
-        let (sink, last, pend, first, generation, stdin) = (
+        let (sink, last, pend, first, generation, stdin, voiced) = (
             self.sink.clone(),
             self.last_audio.clone(),
             self.kokoro_pending.clone(),
             self.first_audio.clone(),
             self.generation.clone(),
             self.stdin.clone(),
+            self.voiced_us.clone(),
         );
         let (piper, started) = (self.piper.clone(), self.started);
         let rate = NonZero::new(crate::kokoro::SAMPLE_RATE).expect("nonzero");
@@ -272,7 +283,9 @@ impl Tts {
                             let now = started.elapsed().as_millis() as u64;
                             last.store(now, Ordering::Relaxed);
                             let _ = first.compare_exchange(0, now.max(1), Ordering::Relaxed, Ordering::Relaxed);
+                            let us = duration_us(samples.len(), rate);
                             sink.append(SamplesBuffer::new(mono(), rate, samples));
+                            voiced.fetch_add(us, Ordering::Relaxed);
                         }
                         Some(Ok(_)) => {}
                         // Not loaded, or this sentence failed: Piper says it.
@@ -318,6 +331,7 @@ impl Tts {
         let sink = self.sink.clone();
         let last = self.last_audio.clone();
         let first = self.first_audio.clone();
+        let voiced = self.voiced_us.clone();
         let started = self.started;
         let sr = self.sample_rate;
 
@@ -366,7 +380,9 @@ impl Tts {
                                 Ordering::Relaxed,
                                 Ordering::Relaxed,
                             );
+                            let us = duration_us(samples.len(), sr);
                             sink.append(SamplesBuffer::new(mono(), sr, samples));
+                            voiced.fetch_add(us, Ordering::Relaxed);
                         }
                     }
                 }
@@ -410,6 +426,13 @@ impl Tts {
             self.kokoro_pending.fetch_sub(1, Ordering::Relaxed);
         }
         to_piper(&self.stdin, &line)
+    }
+
+    /// Milliseconds of speech handed to the speaker since start-up, including
+    /// any a barge-in then cleared. Counted after the audio is queued, never
+    /// before, so it can lag the queue by one chunk but never lead it.
+    pub fn voiced_ms(&self) -> u64 {
+        self.voiced_us.load(Ordering::Relaxed) / 1000
     }
 
     /// Millis since this `Tts` was created. The clock the other timings share.
