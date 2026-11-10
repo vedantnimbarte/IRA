@@ -32,7 +32,7 @@ const BACKLOG: usize = 200;
 /// network, so this is served from loopback rather than fetched from Google
 /// Fonts -- the same reasoning as the icon, just at runtime instead of build
 /// time.
-const INTER_FONT: &[u8] = include_bytes!("../assets/Inter.woff2");
+const ARCHIVO_FONT: &[u8] = include_bytes!("../assets/Archivo.woff2");
 
 #[derive(Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -521,14 +521,14 @@ Connection: close
         return;
     }
 
-    if line.starts_with("GET /settings/inter.woff2") {
+    if line.starts_with("GET /settings/archivo.woff2") {
         let head = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: font/woff2\r\n\
              Cache-Control: max-age=31536000, immutable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            INTER_FONT.len()
+            ARCHIVO_FONT.len()
         );
         let _ = write.write_all(head.as_bytes()).await;
-        let _ = write.write_all(INTER_FONT).await;
+        let _ = write.write_all(ARCHIVO_FONT).await;
         return;
     }
 
@@ -1291,16 +1291,22 @@ async fn reply_json<W: tokio::io::AsyncWrite + Unpin>(write: &mut W, status: u16
 /// and a block per tool. That is far too much to unfold inside a grid cell
 /// without shoving every other card down the page.
 ///
-/// The orb's own light is used exactly once, on the rail beside the section you
-/// are in. It used to run down the side of every stage; one ornament that says
-/// where you are is worth more than four that say nothing.
+/// It is drawn in the website's design, so the page she is described on, the
+/// orb and this window read as one thing: the website's palette, cyan on the
+/// dark ground (a deeper teal in light mode, where cyan on white cannot be
+/// read), HUD corner brackets instead of rounded boxes, and pill buttons. The
+/// accent marks where you are on the rail, and what is on or live -- nothing
+/// decorative.
 ///
-/// Values are set in a monospace face and nothing else is, because a key, a URL
-/// or a command is read character by character and that is a legibility need
-/// rather than a label style. The body face is Inter, baked into the binary
-/// (`INTER_FONT`) and served from loopback at `/settings/inter.woff2`: IRA runs
-/// without a network, and a settings page that fetched a typeface would be the
-/// only part of her that did not.
+/// Values are set in a monospace face, because a key, a URL or a command is
+/// read character by character and that is a legibility need rather than a
+/// label style. Everything else is Archivo, the website's face: its width axis
+/// carries the voice, expanded for headings and readouts and normal for
+/// reading. It is baked into the binary (`ARCHIVO_FONT`) and served from
+/// loopback at `/settings/archivo.woff2`: IRA runs without a network, and a
+/// settings page that fetched a typeface would be the only part of her that
+/// did not. Latin only, a quarter of the size of the face it replaced; anything
+/// outside it falls back to the system face.
 ///
 /// Served rather than built into the window, because the window is a webview
 /// and this is the thing it shows. Same origin as `POST /settings`, so the
@@ -1313,32 +1319,35 @@ const SETTINGS: &str = r##"<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>IRA — settings</title>
 <style>
-  /* Served from loopback, not Google Fonts -- see INTER_FONT. A single
-     variable file covers every weight this page uses, so one @font-face
-     stands in for what would otherwise be four static files. */
+  /* Served from loopback, not Google Fonts -- see ARCHIVO_FONT. One variable
+     file covers every weight and every width this page uses. */
   @font-face {
-    font-family:"Inter Variable"; font-style:normal; font-weight:100 900;
-    font-display:swap; src:url("/settings/inter.woff2") format("woff2-variations");
+    font-family:"Archivo"; font-style:normal; font-weight:100 900; font-stretch:62% 125%;
+    font-display:swap; src:url("/settings/archivo.woff2") format("woff2-variations");
   }
+  /* The website's palette. Light is the same instrument in daylight: the
+     accent darkens to a teal, because the website's cyan on white is
+     unreadable. */
   :root {
-    --ground:#eef1f5; --rail:#e3e8f0; --surface:#fff; --sunk:#f5f7fa;
-    --ink:#131820; --soft:#3f4956; --muted:#78849a; --faint:#9aa5b8;
-    --line:#dfe4ec; --edge:#cdd5e2;
-    --good:#0d7a68; --bad:#a72f3c; --focus:#2a6df4;
-    --lift:0 6px 22px rgba(12,18,30,.12);
-    /* The orb's own light, sampled from it. Used once, on the rail. */
-    --thread:linear-gradient(180deg,#19a2fe,#7f9bfb,#cc9bfd,#fe84e4,#71fbf0);
-    --sans:"Inter Variable","Segoe UI Variable Text","Segoe UI Variable","Segoe UI",system-ui,sans-serif;
-    --display:"Inter Variable","Segoe UI Variable Display","Segoe UI Variable","Segoe UI",system-ui,sans-serif;
+    --ground:#eef3f4; --rail:#e4ecee; --surface:#f8fbfb; --sunk:#e8eff0;
+    --ink:#0b1a1f; --soft:#33484f; --muted:#5b7078; --faint:#879aa1;
+    --line:#d3dfe2; --edge:#b2c7cc;
+    --accent:#08877c; --on-accent:#ffffff;
+    --good:#08877c; --bad:#b4323f;
+    --glow:none;
+    --lift:0 8px 24px rgba(11,26,31,.12);
+    --sans:"Archivo","Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
     --mono:"Cascadia Mono",Consolas,ui-monospace,monospace;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --ground:#0c1017; --rail:#080b11; --surface:#141a23; --sunk:#10151d;
-      --ink:#e8ecf2; --soft:#b6c0cf; --muted:#7d8899; --faint:#5f6a7a;
-      --line:#222a35; --edge:#2d3745;
-      --good:#4fd6c4; --bad:#f08a94; --focus:#6ba2ff;
-      --lift:0 8px 26px rgba(0,0,0,.45);
+      --ground:#05080a; --rail:#030506; --surface:#0a1114; --sunk:#070c0f;
+      --ink:#e3eef0; --soft:#b3c5ca; --muted:#86a0a8; --faint:#5a717a;
+      --line:#15232a; --edge:#22414b;
+      --accent:#2fe0d0; --on-accent:#05080a;
+      --good:#2fe0d0; --bad:#f08a94;
+      --glow:0 0 12px color-mix(in srgb, #2fe0d0 55%, transparent);
+      --lift:0 10px 30px rgba(0,0,0,.5);
     }
   }
   * { box-sizing:border-box; }
@@ -1349,83 +1358,114 @@ const SETTINGS: &str = r##"<!doctype html>
   html, body { height:100%; }
   body {
     margin:0; background:var(--ground); color:var(--ink);
-    font:400 14px/1.55 var(--sans);
+    font:400 14px/1.6 var(--sans); font-variant-numeric:tabular-nums;
     -webkit-font-smoothing:antialiased;
-    display:grid; grid-template-columns:252px minmax(0,1fr);
+    display:grid; grid-template-columns:248px minmax(0,1fr);
+  }
+  ::selection { background:var(--accent); color:var(--on-accent); }
+
+  /* Instrument readouts, as on the website: expanded and tracked. */
+  .nav-count, .act-day, .act-time, .act-took, .act-ms, .act-who {
+    font-family:var(--sans); font-stretch:125%; font-weight:500;
+    letter-spacing:.05em; font-variant-numeric:tabular-nums;
+  }
+
+  /* HUD corner brackets rather than boxes: the website's framed surfaces. */
+  .block, .card, .act-group {
+    --corner:var(--edge); --k:14px;
+    border:0; border-radius:0;
+    background:
+      linear-gradient(var(--corner) 0 0) 0 0 / var(--k) 1px,
+      linear-gradient(var(--corner) 0 0) 0 0 / 1px var(--k),
+      linear-gradient(var(--corner) 0 0) 100% 0 / var(--k) 1px,
+      linear-gradient(var(--corner) 0 0) 100% 0 / 1px var(--k),
+      linear-gradient(var(--corner) 0 0) 0 100% / var(--k) 1px,
+      linear-gradient(var(--corner) 0 0) 0 100% / 1px var(--k),
+      linear-gradient(var(--corner) 0 0) 100% 100% / var(--k) 1px,
+      linear-gradient(var(--corner) 0 0) 100% 100% / 1px var(--k),
+      var(--surface);
+    background-repeat:no-repeat;
   }
 
   /* --- the rail ------------------------------------------------------- */
   #nav {
     background:var(--rail); border-right:1px solid var(--line);
-    padding:32px 16px 20px; overflow:auto;
+    padding:34px 16px 20px; overflow:auto;
     display:flex; flex-direction:column; gap:4px;
   }
   .brand {
-    padding:2px 14px 28px; display:flex; flex-direction:column; gap:5px;
-    font:500 11.5px/1 var(--sans); color:var(--muted);
+    padding:2px 14px 32px; display:flex; flex-direction:column; gap:10px;
+    font:600 12px/1 var(--sans); font-stretch:125%; letter-spacing:.18em; color:var(--ink);
   }
-  .brand span { font:300 21px/1 var(--display); letter-spacing:-.015em; color:var(--ink); }
+  .brand span {
+    font:300 22px/1 var(--sans); font-stretch:125%; letter-spacing:-.02em; color:var(--ink);
+  }
   .nav-item {
     position:relative; display:flex; align-items:center; gap:10px; width:100%;
-    height:auto; padding:11px 14px 11px 16px; border:0; border-radius:9px; cursor:pointer;
+    height:auto; padding:11px 14px 11px 18px; border:0; border-radius:6px; cursor:pointer;
     background:transparent; color:var(--soft);
     font:500 13.5px/1.4 var(--sans); text-align:left;
-    transition:background .13s ease, color .13s ease;
+    transition:background .15s ease, color .15s ease;
   }
   .nav-item:hover { background:var(--sunk); color:var(--ink); filter:none; }
   .nav-item.on { background:var(--surface); color:var(--ink); }
-  /* The one ornament, and it is carrying where you are. */
+  /* The one lit thing on the rail, and it is carrying where you are. */
   .nav-item.on::before {
-    content:""; position:absolute; left:0; top:8px; bottom:8px; width:3px;
-    border-radius:3px; background:var(--thread);
+    content:""; position:absolute; left:0; top:9px; bottom:9px; width:2px;
+    background:var(--accent); box-shadow:var(--glow);
   }
-  .nav-count { margin-left:auto; font:400 11.5px/1 var(--mono); color:var(--faint); }
-  .nav-item.on .nav-count { color:var(--muted); }
+  .nav-count { margin-left:auto; font-size:11px; color:var(--faint); }
+  .nav-item.on .nav-count { color:var(--accent); }
 
   /* --- the pane ------------------------------------------------------- */
-  #main { overflow:auto; padding:44px 52px 64px; }
+  #main { overflow:auto; padding:56px 64px 80px; }
   .pane { max-width:880px; }
-  .detail { max-width:580px; }
-  .pane-head { display:flex; align-items:flex-start; gap:24px; margin:0 0 32px; }
+  .detail { max-width:600px; }
+  .pane-head { display:flex; align-items:flex-start; gap:24px; margin:0 0 44px; }
   .pane-title { flex:1; min-width:0; }
-  h1 { font:300 28px/1.2 var(--display); letter-spacing:-.02em; margin:0 0 8px; }
-  .pane-title p, .detail-sub { margin:0; color:var(--muted); font-size:13.5px; max-width:58ch; }
-  .detail-sub { margin:0 0 24px; }
-  .back {
-    height:auto; background:none; border:0; padding:4px 0; margin:0 0 16px;
-    cursor:pointer; color:var(--muted); font:400 13px/1 var(--sans);
+  h1 {
+    font:300 32px/1.1 var(--sans); font-stretch:125%; letter-spacing:-.025em;
+    margin:0 0 12px; text-wrap:balance;
   }
-  .back:hover { color:var(--ink); filter:none; }
-  .empty { margin:18px 0 0; color:var(--muted); font-size:13px; max-width:52ch; }
+  .pane-title p, .detail-sub { margin:0; color:var(--muted); font-size:14px; max-width:58ch; }
+  .detail-sub { margin:0 0 28px; }
+  .back {
+    height:auto; background:none; border:0; padding:4px 0; margin:0 0 20px;
+    cursor:pointer; color:var(--muted); font:500 13px/1 var(--sans);
+  }
+  .back:hover { color:var(--accent); filter:none; }
+  .empty { margin:18px 0 0; color:var(--muted); font-size:13.5px; max-width:52ch; }
 
   /* --- a block -------------------------------------------------------- */
-  .block {
-    background:var(--surface); border:1px solid var(--line); border-radius:14px;
-    padding:26px 28px 10px; margin:0 0 20px;
+  .block { padding:30px 32px 12px; margin:0 0 24px; }
+  .block > h2 {
+    font:400 17px/1.3 var(--sans); font-stretch:125%; letter-spacing:-.015em; margin:0;
   }
-  .block > h2 { font:400 17px/1.3 var(--display); letter-spacing:-.01em; margin:0; }
-  .block-about { margin:5px 0 0; color:var(--muted); font-size:12.5px; max-width:56ch; }
+  .block-about { margin:6px 0 0; color:var(--muted); font-size:13px; max-width:56ch; }
 
   /* --- a field -------------------------------------------------------- */
-  .field { padding:22px 0 20px; border-bottom:1px solid var(--line); }
+  .field { padding:24px 0 22px; border-bottom:1px solid var(--line); }
   .field:last-child { border-bottom:0; }
   .head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
-  .name { font-size:14px; font-weight:600; color:var(--ink); }
+  .name { font-size:14px; font-weight:500; font-stretch:112%; color:var(--ink); }
   /* The variable name, because this is what `doctor` and the docs call it. */
   .var { font:400 11.5px/1 var(--mono); color:var(--faint); }
-  .about { margin:3px 0 0; color:var(--muted); font-size:12.5px; line-height:1.45; max-width:54ch; }
+  .about { margin:4px 0 0; color:var(--muted); font-size:13px; line-height:1.5; max-width:54ch; }
 
-  .control { display:flex; gap:8px; margin-top:11px; align-items:stretch; }
+  .control { display:flex; gap:8px; margin-top:12px; align-items:stretch; }
   input, .control select {
-    flex:1 1 auto; min-width:0; height:38px; padding:0 12px;
-    border:1px solid var(--edge); border-radius:9px;
+    flex:1 1 auto; min-width:0; height:40px; padding:0 13px;
+    border:1px solid var(--edge); border-radius:6px;
     background:var(--sunk); color:var(--ink);
     font:400 13px/1 var(--mono);
-    transition:border-color .15s ease, background .15s ease;
+    transition:border-color .15s ease, background .15s ease, box-shadow .15s ease;
   }
   input::placeholder { color:var(--faint); font-family:var(--sans); font-size:13px; }
   input:hover, .control select:hover { border-color:var(--muted); }
-  input:focus, .control select:focus { outline:none; border-color:var(--focus); background:var(--ground); }
+  input:focus, .control select:focus {
+    outline:none; border-color:var(--accent); background:var(--ground);
+    box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
   input.saved, select.saved { border-color:var(--good); }
   /* A list says words, not a value, so it reads in the text face. */
   .control select { flex:0 1 320px; font-family:var(--sans); cursor:pointer; }
@@ -1434,65 +1474,64 @@ const SETTINGS: &str = r##"<!doctype html>
      competing for attention while you read. A reserved column, so every box is
      the same width whether or not its field has something to clear. */
   .actions {
-    display:flex; gap:8px; flex:0 0 152px; opacity:0; pointer-events:none;
+    display:flex; gap:8px; flex:0 0 160px; opacity:0; pointer-events:none;
     transform:translateX(-4px);
     transition:opacity .16s ease, transform .16s ease;
   }
   .field.busy .actions { opacity:1; pointer-events:auto; transform:none; }
+  /* Pills, as on the website: filled for the thing you came to do. */
   button {
-    height:38px; padding:0 16px; border-radius:9px; cursor:pointer;
-    font:600 13px/1 var(--sans);
-    border:1px solid var(--ink); background:var(--ink); color:var(--ground);
-    transition:filter .12s ease;
+    height:40px; padding:0 18px; border-radius:999px; cursor:pointer;
+    font:600 13px/1 var(--sans); font-stretch:112%;
+    border:1px solid var(--accent); background:var(--accent); color:var(--on-accent);
+    transition:filter .15s ease, border-color .15s ease, color .15s ease, background .15s ease;
   }
-  button.ghost { background:transparent; color:var(--muted); border-color:var(--edge); font-weight:400; }
-  button:hover { filter:brightness(1.12); }
-  button.ghost:hover { color:var(--ink); border-color:var(--muted); }
+  button.ghost { background:transparent; color:var(--soft); border-color:var(--edge); font-weight:500; }
+  button:hover { filter:brightness(1.1); }
+  button.ghost:hover { color:var(--accent); border-color:var(--accent); filter:none; }
   button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
-    outline:2px solid var(--focus); outline-offset:2px;
+    outline:2px solid var(--accent); outline-offset:3px;
   }
 
-  .status { margin:8px 0 0; font-size:12.5px; color:var(--muted); min-height:1.3em; }
+  .status { margin:9px 0 0; font-size:13px; color:var(--muted); min-height:1.3em; }
   .status.is-set { color:var(--good); }
   .status.is-bad { color:var(--bad); }
 
   .foot {
-    margin:22px 0 0; color:var(--faint); font-size:12.5px; line-height:1.55;
+    margin:26px 0 0; color:var(--faint); font-size:13px; line-height:1.6;
     max-width:60ch;
   }
   .foot code { font:400 12px/1 var(--mono); color:var(--muted); }
 
   /* --- the grids ------------------------------------------------------ */
   .grid {
-    display:grid; grid-template-columns:repeat(auto-fill,minmax(224px,1fr));
-    gap:16px; align-items:stretch;
+    display:grid; grid-template-columns:repeat(auto-fill,minmax(232px,1fr));
+    gap:18px; align-items:stretch;
   }
   .card {
-    position:relative; display:flex; flex-direction:column; gap:8px;
-    background:var(--surface); border:1px solid var(--line); border-radius:14px;
-    padding:17px 18px 15px; min-height:138px;
-    transition:border-color .14s ease;
+    position:relative; display:flex; flex-direction:column; gap:9px;
+    padding:19px 20px 16px; min-height:142px;
   }
-  .card:hover { border-color:var(--edge); }
-  .card:focus-within { border-color:var(--focus); }
-  .card-top { display:flex; align-items:center; gap:9px; }
+  .card:hover { --corner:var(--muted); }
+  .card:focus-within { --corner:var(--accent); }
+  .card-top { display:flex; align-items:center; gap:10px; }
   .dot { flex:none; width:7px; height:7px; border-radius:50%; background:var(--faint); }
-  .dot.live { background:var(--good); }
+  .dot.live { background:var(--good); box-shadow:var(--glow); }
   .dot.down { background:var(--bad); }
   /* The name opens the card, stretched over the whole tile -- so the switch is
      the only thing in it that does something else. */
   .card-open {
     flex:1; min-width:0; height:auto; padding:0; border:0; border-radius:0;
     background:none; color:var(--ink); cursor:pointer; text-align:left;
-    font:600 14px/1.35 var(--sans);
+    font:500 14px/1.35 var(--sans); font-stretch:112%;
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
   }
-  .card-open:hover { filter:none; text-decoration:underline; }
-  .card-open::after { content:""; position:absolute; inset:0; border-radius:14px; }
+  .card-open:hover { filter:none; color:var(--accent); }
+  .card-open::after { content:""; position:absolute; inset:0; }
   .card .switch { position:relative; z-index:1; }
-  .card-state { margin:0; font-size:12.5px; color:var(--soft); }
+  .card-state { margin:0; font-size:13px; color:var(--soft); }
   .card-desc {
-    margin:0; font-size:12.5px; color:var(--muted);
+    margin:0; font-size:13px; color:var(--muted);
     display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;
   }
   .card-where {
@@ -1500,93 +1539,93 @@ const SETTINGS: &str = r##"<!doctype html>
     display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
   }
   .card-foot {
-    margin:auto 0 0; padding-top:11px; border-top:1px solid var(--line);
-    font-size:11.5px; color:var(--muted); overflow-wrap:anywhere;
+    margin:auto 0 0; padding-top:12px; border-top:1px solid var(--line);
+    font-size:12px; color:var(--muted); overflow-wrap:anywhere;
   }
   .card-foot.path { font:400 11px/1.4 var(--mono); color:var(--faint); }
 
   /* --- rows, forms and switches --------------------------------------- */
   .row {
     display:flex; align-items:flex-start; gap:12px;
-    padding:11px 0; border-bottom:1px solid var(--line);
+    padding:12px 0; border-bottom:1px solid var(--line);
   }
   .row-text { flex:1; min-width:0; display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 10px; }
-  .row-name { font:500 13.5px/1.4 var(--sans); }
-  .row-sub { flex-basis:100%; color:var(--muted); font-size:12.5px; overflow-wrap:anywhere; }
+  .row-name { font:500 13.5px/1.4 var(--sans); font-stretch:112%; }
+  .row-sub { flex-basis:100%; color:var(--muted); font-size:13px; overflow-wrap:anywhere; }
   .link {
     height:auto; background:none; border:0; padding:0; cursor:pointer;
-    color:var(--focus); font:400 12.5px/1.4 var(--sans);
+    color:var(--accent); font:500 13px/1.4 var(--sans);
   }
   .link:hover { text-decoration:underline; filter:none; }
   /* A switch, not a checkbox: this is on/off for a whole capability, and it
      is the control that decides whether a program runs at all. */
   .switch {
-    flex:none; width:34px; height:20px; padding:0; border-radius:10px; cursor:pointer;
+    flex:none; width:36px; height:20px; padding:0; border-radius:10px; cursor:pointer;
     border:1px solid var(--edge); background:var(--sunk); position:relative;
-    transition:background .15s, border-color .15s;
+    transition:background .15s, border-color .15s, box-shadow .15s;
   }
   .switch:hover { filter:none; border-color:var(--muted); }
   .switch::after {
     content:""; position:absolute; top:2px; left:2px; width:14px; height:14px;
     border-radius:50%; background:var(--muted); transition:transform .15s, background .15s;
   }
-  .switch.on { background:var(--good); border-color:var(--good); }
-  .switch.on::after { transform:translateX(14px); background:#fff; }
+  /* No glow: a list of seven lit switches is noise, and the glow is kept for
+     the few things that are live. */
+  .switch.on { background:var(--accent); border-color:var(--accent); }
+  .switch.on::after { transform:translateX(16px); background:var(--on-accent); }
 
-  .form { display:flex; flex-direction:column; gap:11px; padding:14px 0 16px; }
-  .labelled { display:flex; flex-direction:column; gap:5px; }
-  .small { color:var(--muted); font-size:12px; }
+  .form { display:flex; flex-direction:column; gap:12px; padding:16px 0 18px; }
+  .labelled { display:flex; flex-direction:column; gap:6px; }
+  .small { color:var(--muted); font-size:12.5px; }
   .labelled input, .labelled textarea, .form select {
-    width:100%; height:auto; padding:8px 10px; border:1px solid var(--edge); border-radius:8px;
+    width:100%; height:auto; padding:9px 11px; border:1px solid var(--edge); border-radius:6px;
     background:var(--ground); color:var(--ink); font:400 12.5px/1.5 var(--mono);
   }
-  .labelled textarea { resize:vertical; min-height:72px; }
+  .labelled textarea { resize:vertical; min-height:76px; }
   .labelled input:disabled { color:var(--muted); background:var(--sunk); }
-  .form-actions { display:flex; gap:8px; padding-top:2px; }
-  .check { display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--soft); }
-  .check input { flex:none; width:auto; height:auto; margin:0; }
-  .tool { padding:12px 0 12px 14px; border-left:2px solid var(--line); margin:8px 0; }
-  .warn { margin:4px 0 0; color:var(--bad); font-size:12.5px; max-width:52ch; }
+  .form-actions { display:flex; gap:8px; padding-top:4px; }
+  .check { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--soft); }
+  .check input { flex:none; width:auto; height:auto; margin:0; accent-color:var(--accent); }
+  .tool { padding:12px 0 12px 16px; border-left:1px solid var(--edge); margin:8px 0; }
+  .warn { margin:4px 0 0; color:var(--bad); font-size:13px; max-width:52ch; }
   /* A tool's raw answer. Monospace and scrollable because it is JSON as often
      as it is prose, and wrapping it would make a one-line result three. */
   .result {
-    margin:10px 0 0; padding:9px 11px; max-height:14em; overflow:auto;
-    background:var(--sunk); border:1px solid var(--line); border-radius:8px;
-    font:400 12px/1.5 var(--mono); white-space:pre-wrap; overflow-wrap:anywhere;
+    margin:10px 0 0; padding:10px 12px; max-height:14em; overflow:auto;
+    background:var(--sunk); border:1px solid var(--line); border-radius:6px;
+    font:400 12px/1.55 var(--mono); white-space:pre-wrap; overflow-wrap:anywhere;
   }
   .result.is-bad { color:var(--bad); }
 
   /* --- activity ------------------------------------------------------- */
-  .act-find { display:flex; flex-wrap:wrap; gap:10px; margin:0 0 30px; }
+  .act-find { display:flex; flex-wrap:wrap; gap:10px; margin:0 0 34px; }
   .act-find input { flex:1 1 260px; font-family:var(--sans); }
   .act-find select, .act-keep select {
-    height:38px; padding:0 12px; border:1px solid var(--edge); border-radius:9px;
+    height:40px; padding:0 13px; border:1px solid var(--edge); border-radius:6px;
     background:var(--sunk); color:var(--ink); font:400 13px/1 var(--sans); cursor:pointer;
   }
   .head-actions { display:flex; gap:8px; flex:none; }
-  .act-day { font:500 13px/1 var(--sans); color:var(--muted); margin:30px 0 12px; }
+  .act-day { font-size:12px; color:var(--muted); margin:34px 0 14px; }
   .act-day:first-child { margin-top:0; }
-  .act-group {
-    background:var(--surface); border:1px solid var(--line); border-radius:14px;
-    padding:16px 22px 12px; margin:0 0 12px;
-  }
+  .act-group { padding:18px 24px 14px; margin:0 0 14px; }
   .act-head { display:flex; align-items:baseline; gap:10px; margin:0 0 6px; }
-  .act-time { font:400 12px/1 var(--mono); color:var(--faint); }
-  .act-kind { font-size:12.5px; color:var(--muted); }
-  .act-took { margin-left:auto; font:400 11.5px/1 var(--mono); color:var(--faint); }
-  /* The rows of a turn happened in order, so they hang off one line. */
+  .act-time { font-size:11.5px; color:var(--accent); }
+  .act-kind { font-size:13px; color:var(--muted); }
+  .act-took { margin-left:auto; font-size:11px; color:var(--faint); }
+  /* The rows of a turn happened in order, so they hang off one line: the
+     website's time axis, small. */
   .act-steps { position:relative; }
   .act-steps::before {
-    content:""; position:absolute; left:4px; top:14px; bottom:14px; width:1px; background:var(--line);
+    content:""; position:absolute; left:4px; top:14px; bottom:14px; width:1px; background:var(--edge);
   }
   .act-row { position:relative; display:grid; grid-template-columns:72px minmax(0,1fr); gap:10px; padding:7px 0 7px 20px; }
   .act-row::before {
     content:""; position:absolute; left:1px; top:13px; width:7px; height:7px; border-radius:50%;
-    background:var(--surface); border:1px solid var(--edge); box-sizing:border-box;
+    background:var(--ground); border:1px solid var(--edge); box-sizing:border-box;
   }
-  .act-row.good::before { background:var(--good); border-color:var(--good); }
+  .act-row.good::before { background:var(--good); border-color:var(--good); box-shadow:var(--glow); }
   .act-row.bad::before { background:var(--bad); border-color:var(--bad); }
-  .act-who { font-size:12px; color:var(--faint); padding-top:2px; }
+  .act-who { font-size:11px; color:var(--faint); padding-top:3px; }
   .act-body { min-width:0; overflow-wrap:anywhere; color:var(--soft); }
   .act-said { color:var(--ink); }
   .act-tool { font:500 12.5px/1.5 var(--mono); color:var(--ink); }
@@ -1596,26 +1635,27 @@ const SETTINGS: &str = r##"<!doctype html>
   }
   .act-result { margin:4px 0 0; font-size:13px; white-space:pre-wrap; max-height:10em; overflow:auto; }
   .act-result.is-bad { color:var(--bad); }
-  .act-ms { margin-left:8px; font:400 11px/1 var(--mono); color:var(--faint); }
+  .act-ms { margin-left:8px; font-size:10.5px; color:var(--faint); }
   .chip {
-    display:inline-block; margin-left:8px; padding:1px 8px; border-radius:10px;
+    display:inline-block; margin-left:8px; padding:1px 9px; border-radius:999px;
     border:1px solid var(--edge); font-size:11.5px; color:var(--muted); vertical-align:1px;
   }
   .chip.yes { color:var(--good); border-color:var(--good); }
   .chip.no { color:var(--bad); border-color:var(--bad); }
   .act-more { margin:8px 0 0; }
   .act-keep {
-    display:flex; align-items:center; flex-wrap:wrap; gap:10px 12px; margin:34px 0 0;
-    padding-top:20px; border-top:1px solid var(--line); color:var(--muted); font-size:13px;
+    display:flex; align-items:center; flex-wrap:wrap; gap:10px 12px; margin:38px 0 0;
+    padding-top:22px; border-top:1px solid var(--line); color:var(--muted); font-size:13px;
   }
-  button.danger { border-color:var(--bad); color:var(--bad); }
+  button.danger { background:transparent; border-color:var(--bad); color:var(--bad); }
+  button.danger:hover { background:var(--bad); color:var(--ground); filter:none; }
 
   /* What just happened, where it can be read from anywhere in a long pane. */
   #note {
-    position:fixed; right:22px; bottom:18px; max-width:340px; margin:0;
-    padding:10px 14px; border-radius:10px;
-    border:1px solid var(--line); background:var(--surface); box-shadow:var(--lift);
-    color:var(--soft); font-size:12.5px;
+    position:fixed; right:24px; bottom:20px; max-width:340px; margin:0;
+    padding:11px 15px; border-radius:6px;
+    border:1px solid var(--edge); background:var(--surface); box-shadow:var(--lift);
+    color:var(--soft); font-size:13px;
   }
   #note:empty { display:none; }
   #note.is-set { color:var(--good); border-color:var(--good); }
@@ -1632,13 +1672,15 @@ const SETTINGS: &str = r##"<!doctype html>
     }
     .brand { display:none; }
     .nav-item { width:auto; flex:none; padding:8px 12px; }
-    .nav-item.on::before { top:auto; bottom:2px; left:10px; right:10px; width:auto; height:3px; }
-    #main { padding:28px 20px 52px; }
+    .nav-item.on::before { top:auto; bottom:0; left:12px; right:12px; width:auto; height:2px; }
+    #main { padding:32px 20px 56px; }
+    h1 { font-size:26px; }
+    .block { padding:24px 20px 10px; }
     .control { flex-wrap:wrap; }
     .actions { opacity:1; pointer-events:auto; transform:none; }
     .pane-head { flex-wrap:wrap; gap:16px; }
     .act-row { grid-template-columns:1fr; gap:2px; }
-    .act-group { padding:14px 16px 10px; }
+    .act-group { padding:16px 18px 12px; }
   }
 </style>
 </head>
