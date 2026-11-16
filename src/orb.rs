@@ -48,8 +48,9 @@
 //! logged and swallowed: no display, a window that will not open, a bitmap that
 //! will not allocate. IRA still answers questions.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Logical size of the window: the orb, and the dial around it.
 const SIZE: f64 = 160.0;
@@ -65,6 +66,21 @@ const FPS: u64 = 30;
 /// mark and not her.
 const GEAR_AT: (f32, f32) = (52.0, -52.0);
 const GEAR_R: f32 = 12.0;
+/// How long the pointer has to stay on another monitor before the orb goes
+/// after it: long enough that sweeping across a screen on the way to another
+/// does not drag her through it.
+const FOLLOW: Duration = Duration::from_millis(500);
+/// How long the orb takes to fade out of one monitor, and again into the next.
+const MOVE_FADE: f32 = 0.15;
+
+/// The monitor the orb sits on, as an `HMONITOR`; zero until it is placed.
+/// The corner widget reads it, so the panel opens on the same screen.
+static ON: AtomicIsize = AtomicIsize::new(0);
+
+/// The monitor the orb is on, or null before it has been placed.
+pub(crate) fn monitor() -> windows_sys::Win32::Graphics::Gdi::HMONITOR {
+    ON.load(Ordering::Relaxed) as _
+}
 
 /// What the orb is showing. Not `main::State`: the loop's `Holding` covers
 /// thinking and speaking as one -- barge-in has to be armed across both -- and
@@ -404,6 +420,11 @@ struct Orb {
     /// of its way; see `hud::screen_taken`. Checked about once a second.
     hidden: bool,
     frames: u32,
+    /// The monitor the pointer is on, and since when: the orb follows it to
+    /// another screen once it has stayed there for [`FOLLOW`].
+    pointer: (isize, Instant),
+    /// 1 on screen, 0 faded out while moving to the pointer's monitor.
+    shown: f32,
 }
 
 /// The window class name, UTF-16 because that is what `RegisterClassW` reads.
@@ -503,6 +524,8 @@ fn run(shared: Arc<Shared>, ui: crate::ui::Ui) -> anyhow::Result<()> {
                 settings: None,
                 hidden: false,
                 frames: 0,
+                pointer: (ON.load(Ordering::Relaxed), Instant::now()),
+                shown: 1.0,
             });
         });
 
@@ -524,44 +547,83 @@ fn run(shared: Arc<Shared>, ui: crate::ui::Ui) -> anyhow::Result<()> {
 
 /// Draws one frame, if there is an orb on this thread to draw -- or hides it
 /// while something has the whole screen, and brings it back after.
+///
+/// Also where the orb follows the pointer to another monitor: it fades out,
+/// moves, and fades back in. The move is made after the borrow is dropped,
+/// because a monitor with another scale answers it with `WM_DPICHANGED`, and
+/// that handler needs the orb to rebuild its canvas.
 fn frame() {
+    let moving = ORB.with(|cell| draw_frame(cell.borrow_mut().as_mut()?));
+    if let Some((hwnd, monitor, side, scale)) = moving {
+        settle_on(hwnd, monitor, side, scale);
+    }
+}
+
+/// One frame of [`frame`]; returns where the orb should move to, if anywhere.
+fn draw_frame(
+    orb: &mut Orb,
+) -> Option<(windows_sys::Win32::Foundation::HWND, windows_sys::Win32::Graphics::Gdi::HMONITOR, u32, f32)> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE};
-    ORB.with(|cell| {
-        if let Some(orb) = cell.borrow_mut().as_mut() {
-            orb.frames = orb.frames.wrapping_add(1);
-            if orb.frames.is_multiple_of(FPS as u32) {
-                let taken = crate::hud::screen_taken();
-                if taken != orb.hidden {
-                    orb.hidden = taken;
-                    // SAFETY: the window this thread created.
-                    unsafe { ShowWindow(orb.canvas.hwnd, if taken { SW_HIDE } else { SW_SHOWNOACTIVATE }) };
-                }
-            }
-            if orb.hidden {
-                // Nobody can see it, so it costs nothing either.
-                orb.last = std::time::Instant::now();
-                return;
-            }
-            let look = orb.shared.look();
-            let barged = orb.shared.barged.swap(false, Ordering::Relaxed);
-            let now = std::time::Instant::now();
-            // Capped, so a frame after the machine wakes from sleep eases
-            // rather than teleporting.
-            let dt = now.duration_since(orb.last).as_secs_f32().min(0.1);
-            orb.last = now;
-            let heard = f32::from_bits(orb.shared.heard.load(Ordering::Relaxed));
-            orb.frame.step(look, dt, barged, heard);
-            // A frame's worth of fade, toward wherever the pointer is.
-            let step = 1.0 / (FPS as f32 * GEAR_FADE);
-            let target = if orb.hovered { 1.0 } else { 0.0 };
-            orb.reveal = if orb.reveal < target {
-                (orb.reveal + step).min(target)
-            } else {
-                (orb.reveal - step).max(target)
-            };
-            orb.canvas.draw(&orb.frame, orb.scale, orb.reveal);
+    orb.frames = orb.frames.wrapping_add(1);
+    if orb.frames.is_multiple_of(FPS as u32) {
+        let taken = crate::hud::screen_taken();
+        if taken != orb.hidden {
+            orb.hidden = taken;
+            // SAFETY: the window this thread created.
+            unsafe { ShowWindow(orb.canvas.hwnd, if taken { SW_HIDE } else { SW_SHOWNOACTIVATE }) };
         }
-    });
+    }
+    if orb.hidden {
+        // Nobody can see it, so it costs nothing either.
+        orb.last = std::time::Instant::now();
+        return None;
+    }
+    let look = orb.shared.look();
+    let barged = orb.shared.barged.swap(false, Ordering::Relaxed);
+    let now = std::time::Instant::now();
+    // Capped, so a frame after the machine wakes from sleep eases
+    // rather than teleporting.
+    let dt = now.duration_since(orb.last).as_secs_f32().min(0.1);
+    orb.last = now;
+    let heard = f32::from_bits(orb.shared.heard.load(Ordering::Relaxed));
+    orb.frame.step(look, dt, barged, heard);
+    // A frame's worth of fade, toward wherever the pointer is.
+    let step = 1.0 / (FPS as f32 * GEAR_FADE);
+    let target = if orb.hovered { 1.0 } else { 0.0 };
+    orb.reveal = if orb.reveal < target {
+        (orb.reveal + step).min(target)
+    } else {
+        (orb.reveal - step).max(target)
+    };
+    // Off to the pointer's monitor once it has settled there; back in
+    // if it comes home before the fade is done.
+    let pointer = pointer_monitor();
+    if pointer != orb.pointer.0 {
+        orb.pointer = (pointer, now);
+    }
+    let on = ON.load(Ordering::Relaxed);
+    let leaving = pointer != 0 && pointer != on && orb.pointer.1.elapsed() >= FOLLOW;
+    let fade = dt / MOVE_FADE;
+    orb.shown = if leaving { (orb.shown - fade).max(0.0) } else { (orb.shown + fade).min(1.0) };
+    let eased = orb.shown * orb.shown * (3.0 - 2.0 * orb.shown);
+    orb.canvas.alpha = (eased * 255.0).round() as u8;
+    orb.canvas.draw(&orb.frame, orb.scale, orb.reveal);
+    (leaving && orb.shown == 0.0).then_some((orb.canvas.hwnd, pointer as _, orb.canvas.width, orb.scale))
+}
+
+/// The monitor the pointer is on, as an `HMONITOR`, or zero if there is no
+/// pointer to ask about.
+fn pointer_monitor() -> isize {
+    use windows_sys::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONEAREST};
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    // SAFETY: a POINT that outlives the call.
+    unsafe {
+        let mut at = std::mem::zeroed();
+        if GetCursorPos(&mut at) == 0 {
+            return 0;
+        }
+        MonitorFromPoint(at, MONITOR_DEFAULTTONEAREST) as isize
+    }
 }
 
 /// How long the gear takes to arrive, and to leave.
@@ -1060,28 +1122,45 @@ fn resize_webview(parent: windows_sys::Win32::Foundation::HWND, w: i32, h: i32) 
 }
 
 /// Puts the orb in the bottom-left of the work area of the monitor it is on.
+fn settle(hwnd: windows_sys::Win32::Foundation::HWND, side: u32, scale: f32) {
+    use windows_sys::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
+    // SAFETY: a valid HWND.
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    settle_on(hwnd, monitor, side, scale);
+}
+
+/// Puts the orb in the bottom-left of the work area of `monitor`.
 ///
 /// The work area, not the monitor: the full panel puts the bottom of the orb
 /// behind the taskbar. Measured, not guessed -- an earlier version used the
 /// monitor size and landed 33 px under it.
-fn settle(hwnd: windows_sys::Win32::Foundation::HWND, side: u32, scale: f32) {
-    use windows_sys::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    };
+///
+/// Onto a monitor with another scale, this is placed at the old size and
+/// Windows answers with `WM_DPICHANGED`, which rebuilds the orb at the new one
+/// and settles it again.
+fn settle_on(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    monitor: windows_sys::Win32::Graphics::Gdi::HMONITOR,
+    side: u32,
+    scale: f32,
+) {
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     };
 
-    // SAFETY: a valid HWND. `cbSize` is set as the API requires and the struct
-    // is read only after a non-zero return.
+    // SAFETY: a valid HWND and monitor. `cbSize` is set as the API requires
+    // and the struct is read only after a non-zero return.
     unsafe {
-        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         let mut info: MONITORINFO = std::mem::zeroed();
         info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
         if GetMonitorInfoW(monitor, &mut info) == 0 {
             return;
         }
         let margin = (MARGIN as f32 * scale) as i32;
+        // Stored first: moving to a monitor with another scale settles again
+        // from inside `SetWindowPos`, and that one must see where it is going.
+        ON.store(monitor as isize, Ordering::Relaxed);
         SetWindowPos(
             hwnd,
             std::ptr::null_mut(),
@@ -1112,6 +1191,9 @@ pub(crate) struct Canvas {
     height: u32,
     /// So a failing paint is reported once rather than thirty times a second.
     complained: bool,
+    /// How opaque the whole window is, 0 to 255, on top of each pixel's own
+    /// alpha: what fades the orb out of one monitor and into another.
+    pub(crate) alpha: u8,
 }
 
 impl Canvas {
@@ -1168,6 +1250,7 @@ impl Canvas {
             width,
             height,
             complained: false,
+            alpha: 255,
         })
     }
 
@@ -1206,7 +1289,7 @@ impl Canvas {
         let blend = BLENDFUNCTION {
             BlendOp: AC_SRC_OVER as u8,
             BlendFlags: 0,
-            SourceConstantAlpha: 255,
+            SourceConstantAlpha: self.alpha,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
         // SAFETY: every pointer is to a local that outlives the call, and the DC

@@ -623,6 +623,8 @@ struct Hud {
     shown: bool,
     /// The last frame she was in a turn, so the panel lingers after it.
     busy_at: Option<Instant>,
+    /// The monitor it was last put on: the orb's, which it follows.
+    on: isize,
     /// Something has the whole screen; see [`screen_taken`]. Checked once a
     /// second rather than every frame.
     taken: bool,
@@ -743,6 +745,7 @@ fn run(ai: Arc<Mutex<Ai>>, ui: crate::ui::Ui) -> anyhow::Result<()> {
                 scale,
                 shown: false,
                 busy_at: None,
+                on: crate::orb::monitor() as isize,
                 taken: screen_taken(),
                 ticks: 0,
             });
@@ -766,6 +769,21 @@ fn run(ai: Arc<Mutex<Ai>>, ui: crate::ui::Ui) -> anyhow::Result<()> {
 /// the whole screen.
 fn tick() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE};
+    // The orb went to another monitor: so does the panel, before it is drawn.
+    // Moved outside the borrow, because a monitor with another scale answers
+    // with `WM_DPICHANGED`, and that handler rebuilds the canvas.
+    let moved = HUD.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        let hud = cell.as_mut()?;
+        let orb = crate::orb::monitor() as isize;
+        (orb != 0 && orb != hud.on).then(|| {
+            hud.on = orb;
+            (hud.window, hud.scale)
+        })
+    });
+    if let Some((window, scale)) = moved {
+        settle(window, scale);
+    }
     HUD.with(|cell| {
         let mut cell = cell.borrow_mut();
         let Some(hud) = cell.as_mut() else {
@@ -806,17 +824,23 @@ fn tick() {
     });
 }
 
-/// Puts the panel in the top-left corner of the work area -- below a taskbar at
-/// the top of the screen, if that is where it is.
+/// Puts the panel in the top-left corner of the work area of the orb's monitor
+/// -- below a taskbar at the top of the screen, if that is where it is.
 fn settle(window: windows_sys::Win32::Foundation::HWND, scale: f32) {
     use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    // The orb's monitor; its own if the orb never opened.
+    let mut monitor = crate::orb::monitor();
+    if monitor.is_null() {
+        // SAFETY: a valid handle.
+        monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
+    }
     use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
     // SAFETY: valid handles; `cbSize` set as the API requires, and the struct is
     // read only after a non-zero return.
     unsafe {
         let mut info: MONITORINFO = std::mem::zeroed();
         info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-        if GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &mut info) == 0 {
+        if GetMonitorInfoW(monitor, &mut info) == 0 {
             return;
         }
         let work = info.rcWork;

@@ -330,7 +330,9 @@ IRA only tells the model it has a screen while a page is actually open.
 A tab does not tell you IRA is running while you are working in something else.
 So there is also a small always-on-top orb in the bottom-left corner, over
 whatever you are doing — the same one as on the website, a dark core with a lit
-rim inside a dial:
+rim inside a dial. With more than one monitor it is on the one your pointer is
+on: half a second after the pointer settles on another screen, the orb fades
+out and back in at that screen's corner, and the corner widget goes with it.
 
 | | |
 |---|---|
