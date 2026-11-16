@@ -104,8 +104,7 @@ pub fn describe_local(unix_ms: i64) -> String {
 }
 
 /// (year, month, day, hour, minute, weekday with Monday = 0) for a
-/// Unix-milliseconds moment, in local time. The corner widget's clock and its
-/// reminder times, as well as `describe_local`.
+/// Unix-milliseconds moment, in local time, for `describe_local`.
 pub(crate) fn local_parts(unix_ms: i64) -> (i64, u32, u32, u32, u32, usize) {
     civil(unix_ms.div_euclid(1000) + local_offset_secs())
 }

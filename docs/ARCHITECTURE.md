@@ -122,7 +122,7 @@ The exhaustive transition table lives in [SPEC.md](SPEC.md).
 | `transcript.rs` | The JSONL record of what was said | Config |
 | `ui.rs` | The served page and its event stream | Closed |
 | `orb.rs` | The overlay: the website's orb, drawn on a layered window, same stream | Closed |
-| `hud.rs` | The corner widgets: what she is doing, top left; this machine, top right | Closed |
+| `hud.rs` | The corner widget: what she is doing, top left, during a turn | Closed |
 | `console.rs` | Closing the console a shortcut launch was given. Windows only | Closed |
 | `settings.rs` | Keys in the OS keyring, URLs and model ids in SQLite | Config |
 | `skills.rs` | `skills/*.md`: user-written instructions, loaded on demand | Config |

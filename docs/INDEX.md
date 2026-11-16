@@ -69,7 +69,8 @@ context, the decision, its consequences, and what would change it.
 | [0020](decisions/0020-she-runs-whisper-herself.md) | She runs whisper herself, and local is the default | accepted |
 | [0021](decisions/0021-kokoro-is-the-voice.md) | Kokoro is the voice, and Piper is what she falls back to | accepted |
 | [0022](decisions/0022-the-orb-is-the-websites.md) | The orb is the website's | accepted |
-| [0023](decisions/0023-the-corners-show-what-she-is-doing.md) | The corners show what she is doing, in words | accepted |
+| [0023](decisions/0023-the-corners-show-what-she-is-doing.md) | The corners show what she is doing, in words | narrowed by 0024 |
+| [0024](decisions/0024-the-corner-shows-only-during-a-turn.md) | The corner shows only during a turn | accepted |
 
 ## Looking for something specific?
 

@@ -152,9 +152,9 @@ pub const FIELDS: &[Field] = &[
     },
     Field {
         name: "IRA_WIDGETS",
-        label: "Corner widgets",
+        label: "Corner widget",
         group: SCREEN,
-        about: "What she is doing at the top left, and this machine at the top right. Clicks go straight through them.",
+        about: "What she heard, said and did, at the top left while she is talking. Clicks go straight through it.",
         empty: "",
         secret: false,
         // Read by `hud.rs` on every frame, so hiding them takes effect at once.

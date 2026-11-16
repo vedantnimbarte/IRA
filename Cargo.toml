@@ -72,12 +72,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_LibraryLoader",
     # The local UTC offset, for reminders set "at 3pm" and the clock. See remind.rs.
     "Win32_System_Time",
-    # The system widget: memory, CPU time, battery and whether she is online.
-    # See hud.rs.
-    "Win32_System_SystemInformation",
-    "Win32_System_Threading",
-    "Win32_System_Power",
-    "Win32_Networking_WinInet",
     # Whether a full-screen app or presentation has the screen, so the orb and
     # the widgets can get out of its way. See hud.rs.
     "Win32_UI_Shell",

@@ -1,44 +1,48 @@
-//! The corner widgets: what IRA is doing at the top left, and the machine she
-//! runs on at the top right.
+//! The corner widget: what IRA is doing, at the top left, while she is doing it.
 //!
-//! [decisions/0023](../docs/decisions/0023-the-corners-show-what-she-is-doing.md).
-//! The orb is a light and says one thing. These say the rest, in words: what
+//! [decisions/0023](../docs/decisions/0023-the-corners-show-what-she-is-doing.md),
+//! narrowed by [0024](../docs/decisions/0024-the-corner-shows-only-during-a-turn.md).
+//! The orb is a light and says one thing. This says the rest, in words: what
 //! she heard and said, how long the last turn took and where the time went,
-//! what she last did, what she is running on; and on the other side the time,
-//! the machine's load, its power and network, and the next reminders.
+//! what she last did, what she is running on. It opens when she wakes and
+//! closes [`LINGER`] after she goes back to idle; the rest of the time the
+//! corner is yours.
 //!
 //! **The same kind of window as the orb.** Layered, topmost, drawn with
 //! tiny-skia and pushed with the orb's own [`Canvas`]. A webview cannot be
-//! transparent (0013), and these sit over your work. They are also
-//! click-through -- `WS_EX_TRANSPARENT` -- so they never take a click meant for
+//! transparent (0013), and this sits over your work. It is also
+//! click-through -- `WS_EX_TRANSPARENT` -- so it never takes a click meant for
 //! the window underneath. Text is drawn with swash, from the same Archivo file
 //! the settings page loads, at the website's widths.
 //!
-//! **They read the same broadcast as the orb.** Subscribing is not watching,
+//! **It reads the same broadcast as the orb.** Subscribing is not watching,
 //! exactly as there: IRA does not tell the model there is a screen because
-//! these are up, so she never claims to have put the detail on one.
+//! this is up, so she never claims to have put the detail on one.
 //!
 //! **Hidden from the settings window.** `IRA_WIDGETS`, read on every frame, so
-//! hiding them is immediate and needs no restart.
+//! hiding it is immediate and needs no restart.
 //!
 //! Every failure here is a missing panel and never a broken IRA, on the same
 //! terms as `orb.rs`.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::orb::Canvas;
 
-/// Logical sizes of the two panels, before the display's scale.
+/// Logical size of the panel, before the display's scale.
 const AI_SIZE: (f32, f32) = (380.0, 316.0);
-const SYS_SIZE: (f32, f32) = (300.0, 316.0);
 /// From the corner of the work area, the same as the orb's.
 const MARGIN: f32 = 24.0;
-/// Inside a panel.
+/// Inside the panel.
 const PAD: f32 = 24.0;
-/// Redraws a second. Nothing on either panel changes faster than a state does,
+/// Redraws a second. Nothing on the panel changes faster than a state does,
 /// and a quarter of a second is quicker than anyone reads one.
 const FPS: u32 = 4;
+/// How long the panel stays up once she is idle again: long enough to read the
+/// two lines of her reply after she finishes saying them.
+const LINGER: Duration = Duration::from_secs(8);
 
 // The website's palette, as bytes.
 const CYAN: [u8; 3] = [47, 224, 208];
@@ -69,7 +73,6 @@ const MARK: Style = Style { size: 12.0, wdth: 125.0, wght: 600.0, track: 0.18 };
 /// Words to read.
 const BODY: Style = Style { size: 13.5, wdth: 100.0, wght: 400.0, track: 0.0 };
 const SMALL: Style = Style { size: 12.5, wdth: 100.0, wght: 400.0, track: 0.0 };
-const CLOCK: Style = Style { size: 44.0, wdth: 125.0, wght: 300.0, track: -0.02 };
 
 // ------------------------------------------------------------------ what --
 
@@ -166,6 +169,12 @@ impl Ai {
             _ => ("Idle", DIM),
         }
     }
+
+    /// Whether she is in a turn: woken, thinking, speaking or asking. What
+    /// decides that the panel is up.
+    fn busy(&self) -> bool {
+        self.live && (self.speaking || matches!(self.state.as_str(), "listening" | "holding" | "confirming"))
+    }
 }
 
 /// What she is running on: read once a second rather than per frame, because
@@ -205,126 +214,6 @@ impl Info {
             voice,
             servers,
         }
-    }
-}
-
-/// The right panel's readings.
-#[derive(Default)]
-struct Machine {
-    /// Idle, kernel and user time at the last reading, for the next delta.
-    cpu_at: Option<(u64, u64, u64)>,
-    cpu: f32,
-    /// Eased toward `cpu`, so the bar glides rather than ticks.
-    cpu_shown: f32,
-    mem: f32,
-    mem_shown: f32,
-    battery: Option<(u8, bool)>,
-    online: bool,
-    reminders: Vec<(i64, String)>,
-    ticks: u32,
-}
-
-impl Machine {
-    /// Takes whatever readings are due on this frame.
-    fn sample(&mut self) {
-        if self.ticks.is_multiple_of(FPS) {
-            if let Some(now) = cpu_times() {
-                if let Some(busy) = self.cpu_at.and_then(|prev| busy(prev, now)) {
-                    self.cpu = busy;
-                }
-                self.cpu_at = Some(now);
-            }
-            self.mem = memory_load();
-            self.battery = battery();
-        }
-        // Slower ones: a database read and a network check are cheap, but not
-        // four-times-a-second cheap, and neither changes that quickly.
-        if self.ticks.is_multiple_of(FPS * 5) {
-            self.online = online();
-            let now = crate::audit::now_ms();
-            self.reminders = crate::db::reminders()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|r| r.due >= now - 60_000)
-                .take(2)
-                .map(|r| (r.due, r.text))
-                .collect();
-        }
-        self.cpu_shown += (self.cpu - self.cpu_shown) * 0.5;
-        self.mem_shown += (self.mem - self.mem_shown) * 0.5;
-        self.ticks = self.ticks.wrapping_add(1);
-    }
-}
-
-/// How busy the processors were between two readings, 0 to 1. Kernel time
-/// includes idle time, which is why idle comes off the sum of both.
-fn busy(prev: (u64, u64, u64), now: (u64, u64, u64)) -> Option<f32> {
-    let idle = now.0.saturating_sub(prev.0);
-    let total = now.1.saturating_sub(prev.1) + now.2.saturating_sub(prev.2);
-    (total > 0).then(|| (1.0 - idle as f32 / total as f32).clamp(0.0, 1.0))
-}
-
-fn cpu_times() -> Option<(u64, u64, u64)> {
-    use windows_sys::Win32::Foundation::FILETIME;
-    use windows_sys::Win32::System::Threading::GetSystemTimes;
-    let zero = || FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-    let (mut idle, mut kernel, mut user) = (zero(), zero(), zero());
-    // SAFETY: three FILETIMEs that outlive the call.
-    let ok = unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) };
-    let n = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
-    (ok != 0).then(|| (n(idle), n(kernel), n(user)))
-}
-
-fn memory_load() -> f32 {
-    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-    // SAFETY: a zeroed MEMORYSTATUSEX with its length set, as the API requires.
-    unsafe {
-        let mut m: MEMORYSTATUSEX = std::mem::zeroed();
-        m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
-        if GlobalMemoryStatusEx(&mut m) == 0 {
-            return 0.0;
-        }
-        m.dwMemoryLoad as f32 / 100.0
-    }
-}
-
-/// Charge and whether it is charging, or `None` on a machine with no battery
-/// -- which is a desktop, and gets no battery line at all.
-fn battery() -> Option<(u8, bool)> {
-    use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
-    // SAFETY: a zeroed struct the call fills in.
-    let s = unsafe {
-        let mut s: SYSTEM_POWER_STATUS = std::mem::zeroed();
-        if GetSystemPowerStatus(&mut s) == 0 {
-            return None;
-        }
-        s
-    };
-    // 128 is "no system battery", 255 is "unknown"; neither has a level.
-    if s.BatteryFlag & 128 != 0 || s.BatteryFlag == 255 || s.BatteryLifePercent > 100 {
-        return None;
-    }
-    Some((s.BatteryLifePercent, s.BatteryFlag & 8 != 0))
-}
-
-fn online() -> bool {
-    use windows_sys::Win32::Networking::WinInet::InternetGetConnectedState;
-    let mut flags = 0;
-    // SAFETY: a flags word that outlives the call; the reserved argument is 0.
-    unsafe { InternetGetConnectedState(&mut flags, 0) != 0 }
-}
-
-/// "12 min", "2 h 5 min", "3 d": short enough to sit beside a reminder.
-fn countdown(ms: i64) -> String {
-    if ms < 60_000 {
-        return "now".into();
-    }
-    let mins = (ms + 59_999) / 60_000;
-    match mins {
-        m if m < 60 => format!("{m} min"),
-        m if m < 1440 && m % 60 == 0 => format!("{} h", m / 60),
-        m if m < 1440 => format!("{} h {} min", m / 60, m % 60),
-        m => format!("{} d", m / 1440),
     }
 }
 
@@ -586,7 +475,8 @@ fn draw_ai(pen: &mut Pen, ai: &Ai, info: &Info) {
     // The conversation.
     let col = 64.0;
     if ai.heard.is_empty() && ai.reply.is_empty() && ai.asking.is_none() {
-        pen.say("Say \u{201c}hey Jarvis\u{201d}, or click the orb.", PAD, 84.0, BODY, DIM);
+        // Only ever seen at the start of her first turn: she is listening.
+        pen.say("Go ahead.", PAD, 84.0, BODY, DIM);
     } else {
         pen.say("You", PAD, 84.0, READOUT, FAINT);
         pen.say_fit(&ai.heard, col, right, 84.0, BODY, PAPER);
@@ -679,59 +569,9 @@ fn draw_ai(pen: &mut Pen, ai: &Ai, info: &Info) {
     pen.say_fit(&info.voice, end + 10.0, right, 298.0, SMALL, DIM);
 }
 
-/// The right panel: the time, the machine's load, its power and network, and
-/// the next reminders.
-fn draw_machine(pen: &mut Pen, m: &Machine, now_ms: i64) {
-    use crate::remind::{local_parts, MONTHS, WEEKDAYS};
-    let (w, h) = SYS_SIZE;
-    let right = w - PAD;
-    pen.panel(w, h);
-
-    let (_, month, day, hour, min, weekday) = local_parts(now_ms);
-    pen.say(&format!("{hour:02}:{min:02}"), PAD - 2.0, 74.0, CLOCK, PAPER);
-    let date = format!("{} {day} {}", WEEKDAYS[weekday], MONTHS[month as usize - 1]);
-    pen.say(&date, PAD, 100.0, READOUT, DIM);
-
-    for (y, name, frac) in [(140.0, "CPU", m.cpu_shown), (166.0, "RAM", m.mem_shown)] {
-        pen.say(name, PAD, y, READOUT, FAINT);
-        pen.say_right(&format!("{:.0}%", frac * 100.0), right, y, READOUT, PAPER);
-        pen.bar(PAD + 44.0, y - 4.0, right - PAD - 44.0 - 44.0, frac, CYAN);
-    }
-
-    if let Some((pct, charging)) = m.battery {
-        let end = pen.say("Battery", PAD, 204.0, READOUT, FAINT);
-        let end = pen.say(&format!("{pct}%"), end + 8.0, 204.0, READOUT, PAPER);
-        if charging {
-            pen.say("charging", end + 8.0, 204.0, READOUT, DIM);
-        }
-    }
-    let (net, rgb) = if m.online { ("Online", CYAN) } else { ("Offline", BAD) };
-    let at = pen.say_right(net, right, 204.0, READOUT, rgb);
-    pen.dot(at - 9.0, 200.0, 3.0, rgb);
-
-    pen.rect(PAD, 222.0, right - PAD, 1.0, LINE, 1.0);
-    pen.say("Next", PAD, 248.0, READOUT, FAINT);
-    if m.reminders.is_empty() {
-        pen.say("No reminders set", PAD, 272.0, SMALL, FAINT);
-    }
-    let (_, _, today, ..) = local_parts(now_ms);
-    for (i, (due, text)) in m.reminders.iter().enumerate() {
-        let y = 272.0 + 22.0 * i as f32;
-        let (_, _, d, h, mi, wd) = local_parts(*due);
-        let when = if d == today && due - now_ms < 86_400_000 {
-            format!("{h:02}:{mi:02}")
-        } else {
-            format!("{} {h:02}:{mi:02}", &WEEKDAYS[wd][..3])
-        };
-        let end = pen.say(&when, PAD, y, READOUT, CYAN);
-        let at = pen.say_right(&countdown(due - now_ms), right, y, READOUT, DIM);
-        pen.say_fit(text, end + 12.0, at - 10.0, y, SMALL, PAPER);
-    }
-}
-
 // ---------------------------------------------------------------- window --
 
-/// Opens both widgets, on their own thread.
+/// Opens the widget, on its own thread.
 ///
 /// Hidden, without closing, by `IRA_WIDGETS=off` in the settings window.
 pub fn spawn(ui: &crate::ui::Ui) {
@@ -767,22 +607,22 @@ pub fn spawn(ui: &crate::ui::Ui) {
     std::thread::spawn(move || {
         if let Err(e) = run(ai, ui) {
             // A panel that will not open is a missing panel, not a broken IRA.
-            tracing::error!("corner widgets unavailable: {e}");
+            tracing::error!("corner widget unavailable: {e}");
         }
     });
 }
 
 struct Hud {
-    windows: [windows_sys::Win32::Foundation::HWND; 2],
-    ai_canvas: Canvas,
-    sys_canvas: Canvas,
+    window: windows_sys::Win32::Foundation::HWND,
+    canvas: Canvas,
     ai: Arc<Mutex<Ai>>,
     ui: crate::ui::Ui,
     text: Text,
     info: Info,
-    machine: Machine,
     scale: f32,
     shown: bool,
+    /// The last frame she was in a turn, so the panel lingers after it.
+    busy_at: Option<Instant>,
     /// Something has the whole screen; see [`screen_taken`]. Checked once a
     /// second rather than every frame.
     taken: bool,
@@ -821,16 +661,10 @@ pub(crate) fn per_monitor_dpi() {
     }
 }
 
-/// A canvas per panel at `scale`.
-fn canvases(
-    left: windows_sys::Win32::Foundation::HWND,
-    right: windows_sys::Win32::Foundation::HWND,
-    scale: f32,
-) -> anyhow::Result<(Canvas, Canvas)> {
-    let px = |(w, h): (f32, f32)| ((w * scale).round() as u32, (h * scale).round() as u32);
-    let (aw, ah) = px(AI_SIZE);
-    let (sw, sh) = px(SYS_SIZE);
-    Ok((Canvas::new(left, aw, ah)?, Canvas::new(right, sw, sh)?))
+/// The panel's canvas at `scale`.
+fn canvas(window: windows_sys::Win32::Foundation::HWND, scale: f32) -> anyhow::Result<Canvas> {
+    let (w, h) = AI_SIZE;
+    Canvas::new(window, (w * scale).round() as u32, (h * scale).round() as u32)
 }
 
 thread_local! {
@@ -854,7 +688,7 @@ fn run(ai: Arc<Mutex<Ai>>, ui: crate::ui::Ui) -> anyhow::Result<()> {
     per_monitor_dpi();
 
     // SAFETY: a class registered with a static name and a window procedure of
-    // the required signature, then two windows created from it. Every handle
+    // the required signature, then a window created from it. Every handle
     // is checked before it is used.
     unsafe {
         let instance = GetModuleHandleW(std::ptr::null());
@@ -874,9 +708,8 @@ fn run(ai: Arc<Mutex<Ai>>, ui: crate::ui::Ui) -> anyhow::Result<()> {
         RegisterClassW(&class);
 
         // Layered and topmost like the orb, and also TRANSPARENT: the orb is a
-        // button, these are not, so every click goes to what is underneath.
-        let make = || {
-            CreateWindowExW(
+        // button, this is not, so every click goes to what is underneath.
+        let window = CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
                 CLASS.as_ptr(),
                 CLASS.as_ptr(),
@@ -889,38 +722,34 @@ fn run(ai: Arc<Mutex<Ai>>, ui: crate::ui::Ui) -> anyhow::Result<()> {
                 std::ptr::null_mut(),
                 instance as _,
                 std::ptr::null_mut(),
-            )
-        };
-        let (left, right) = (make(), make());
-        if left.is_null() || right.is_null() {
-            return Err(anyhow::anyhow!("widget windows would not open"));
+            );
+        if window.is_null() {
+            return Err(anyhow::anyhow!("widget window would not open"));
         }
 
-        let dpi = GetDpiForWindow(left);
+        let dpi = GetDpiForWindow(window);
         let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
-        let (ai_canvas, sys_canvas) = canvases(left, right, scale)?;
-        settle(left, right, scale);
+        let canvas = canvas(window, scale)?;
+        settle(window, scale);
 
         HUD.with(|cell| {
             *cell.borrow_mut() = Some(Hud {
-                windows: [left, right],
-                ai_canvas,
-                sys_canvas,
+                window,
+                canvas,
                 ai,
                 info: Info::read(&ui),
                 ui,
                 text,
-                machine: Machine::default(),
                 scale,
                 shown: false,
+                busy_at: None,
                 taken: screen_taken(),
                 ticks: 0,
             });
         });
 
-        // Painted before they are shown, so nothing flashes; `tick` shows them.
         tick();
-        SetTimer(left, TIMER, 1000 / FPS, None);
+        SetTimer(window, TIMER, 1000 / FPS, None);
         tracing::info!("widgets up");
 
         let mut msg: MSG = std::mem::zeroed();
@@ -932,8 +761,9 @@ fn run(ai: Arc<Mutex<Ai>>, ui: crate::ui::Ui) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Draws a frame of both panels, or hides them if the setting says so or
-/// something has the whole screen.
+/// Draws a frame of the panel while she is in a turn and for [`LINGER`] after,
+/// and hides it otherwise -- or whenever the setting says so or something has
+/// the whole screen.
 fn tick() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE};
     HUD.with(|cell| {
@@ -945,43 +775,40 @@ fn tick() {
         if hud.ticks.is_multiple_of(FPS) {
             hud.taken = screen_taken();
         }
-        let wanted = crate::settings::get("IRA_WIDGETS").as_deref() != Some("off") && !hud.taken;
+        let ai = hud.ai.lock().map(|a| a.clone()).unwrap_or_default();
+        if ai.busy() {
+            hud.busy_at = Some(Instant::now());
+        }
+        let wanted = crate::settings::get("IRA_WIDGETS").as_deref() != Some("off")
+            && !hud.taken
+            && hud.busy_at.is_some_and(|t| t.elapsed() < LINGER);
         if !wanted {
             if hud.shown {
-                // SAFETY: windows this thread created.
-                hud.windows.iter().for_each(|&w| unsafe {
-                    ShowWindow(w, SW_HIDE);
-                });
+                // SAFETY: a window this thread created.
+                unsafe { ShowWindow(hud.window, SW_HIDE) };
                 hud.shown = false;
             }
             return;
         }
 
-        hud.machine.sample();
         if hud.ticks.is_multiple_of(FPS) {
             hud.info = Info::read(&hud.ui);
         }
-        let ai = hud.ai.lock().map(|a| a.clone()).unwrap_or_default();
-        let now = crate::audit::now_ms();
-
-        draw_ai(&mut Pen { p: &mut hud.ai_canvas.pixmap, text: &mut hud.text, u: hud.scale }, &ai, &hud.info);
-        hud.ai_canvas.present();
-        draw_machine(&mut Pen { p: &mut hud.sys_canvas.pixmap, text: &mut hud.text, u: hud.scale }, &hud.machine, now);
-        hud.sys_canvas.present();
+        draw_ai(&mut Pen { p: &mut hud.canvas.pixmap, text: &mut hud.text, u: hud.scale }, &ai, &hud.info);
+        hud.canvas.present();
 
         if !hud.shown {
-            // SAFETY: windows this thread created.
-            hud.windows.iter().for_each(|&w| unsafe {
-                ShowWindow(w, SW_SHOWNOACTIVATE);
-            });
+            // Painted above before it is shown, so nothing flashes.
+            // SAFETY: a window this thread created.
+            unsafe { ShowWindow(hud.window, SW_SHOWNOACTIVATE) };
             hud.shown = true;
         }
     });
 }
 
-/// Puts the panels in the top corners of the work area -- below a taskbar at
+/// Puts the panel in the top-left corner of the work area -- below a taskbar at
 /// the top of the screen, if that is where it is.
-fn settle(left: windows_sys::Win32::Foundation::HWND, right: windows_sys::Win32::Foundation::HWND, scale: f32) {
+fn settle(window: windows_sys::Win32::Foundation::HWND, scale: f32) {
     use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
     use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
     // SAFETY: valid handles; `cbSize` set as the API requires, and the struct is
@@ -989,16 +816,14 @@ fn settle(left: windows_sys::Win32::Foundation::HWND, right: windows_sys::Win32:
     unsafe {
         let mut info: MONITORINFO = std::mem::zeroed();
         info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-        if GetMonitorInfoW(MonitorFromWindow(left, MONITOR_DEFAULTTONEAREST), &mut info) == 0 {
+        if GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &mut info) == 0 {
             return;
         }
         let work = info.rcWork;
         let m = (MARGIN * scale) as i32;
         let size = |(w, h): (f32, f32)| ((w * scale).round() as i32, (h * scale).round() as i32);
-        let (aw, ah) = size(AI_SIZE);
-        let (sw, sh) = size(SYS_SIZE);
-        SetWindowPos(left, std::ptr::null_mut(), work.left + m, work.top + m, aw, ah, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(right, std::ptr::null_mut(), work.right - sw - m, work.top + m, sw, sh, SWP_NOZORDER | SWP_NOACTIVATE);
+        let (w, h) = size(AI_SIZE);
+        SetWindowPos(window, std::ptr::null_mut(), work.left + m, work.top + m, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
 
@@ -1017,42 +842,38 @@ unsafe extern "system" fn wndproc(
             tick();
             0
         }
-        // The display's scale changed: new canvases at the new size, then the
-        // corners again, since the margins scale too. Only the first window
-        // acts, so the pair is rebuilt once. Settled outside the borrow,
-        // because moving a window sends messages back to this procedure.
+        // The display's scale changed: a new canvas at the new size, then the
+        // corner again, since the margin scales too. Settled outside the
+        // borrow, because moving a window sends messages back to this procedure.
         WM_DPICHANGED => {
             let scale = (wparam & 0xffff) as f32 / 96.0;
-            let pair = HUD.with(|cell| {
+            let rebuilt = HUD.with(|cell| {
                 let mut cell = cell.try_borrow_mut().ok()?;
-                let hud = cell.as_mut().filter(|h| h.windows[0] == hwnd)?;
-                let [left, right] = hud.windows;
-                match canvases(left, right, scale) {
-                    Ok((a, s)) => {
-                        hud.ai_canvas = a;
-                        hud.sys_canvas = s;
+                let hud = cell.as_mut()?;
+                match canvas(hud.window, scale) {
+                    Ok(c) => {
+                        hud.canvas = c;
                         hud.scale = scale;
-                        Some((left, right))
+                        Some(())
                     }
                     Err(e) => {
-                        tracing::error!("widgets could not follow the new scale: {e}");
+                        tracing::error!("widget could not follow the new scale: {e}");
                         None
                     }
                 }
             });
-            if let Some((left, right)) = pair {
-                settle(left, right, scale);
+            if rebuilt.is_some() {
+                settle(hwnd, scale);
                 tick();
             }
             0
         }
-        // A resolution change, or the taskbar moving: the corners moved too.
-        // Only the first window acts, so the pair settles once.
+        // A resolution change, or the taskbar moving: the corner moved too.
         WM_DISPLAYCHANGE | WM_SETTINGCHANGE => {
             HUD.with(|cell| {
                 if let Ok(cell) = cell.try_borrow() {
-                    if let Some(hud) = cell.as_ref().filter(|h| h.windows[0] == hwnd) {
-                        settle(hud.windows[0], hud.windows[1], hud.scale);
+                    if let Some(hud) = cell.as_ref() {
+                        settle(hud.window, hud.scale);
                     }
                 }
             });
@@ -1128,17 +949,21 @@ mod tests {
         assert_eq!(ai.label(), ("Stopped", GREY), "a stopped IRA must not look busy");
     }
 
+    /// The panel is up for a turn and only for a turn.
     #[test]
-    fn cpu_and_countdowns_read_right() {
-        // 100 ticks passed, 25 of them idle: three quarters busy.
-        assert_eq!(busy((0, 0, 0), (25, 60, 40)), Some(0.75));
-        assert_eq!(busy((5, 5, 5), (5, 5, 5)), None, "no time passed, no reading");
-
-        assert_eq!(countdown(30_000), "now");
-        assert_eq!(countdown(12 * 60_000), "12 min");
-        assert_eq!(countdown(120 * 60_000), "2 h");
-        assert_eq!(countdown(125 * 60_000), "2 h 5 min");
-        assert_eq!(countdown(3 * 86_400_000), "3 d");
+    fn only_a_turn_puts_the_panel_up() {
+        let mut ai = Ai { live: true, ..Ai::default() };
+        assert!(!ai.busy(), "nothing has happened yet");
+        for state in ["listening", "holding", "confirming"] {
+            ai.state = state.into();
+            assert!(ai.busy(), "{state} is a turn");
+        }
+        ai.state = "idle".into();
+        assert!(!ai.busy());
+        ai.speaking = true;
+        assert!(ai.busy(), "still talking after the loop went idle");
+        ai.live = false;
+        assert!(!ai.busy(), "a stopped IRA has no turn to show");
     }
 
     /// The font loads and actually puts ink down: a panel drawn with words in

@@ -1,6 +1,6 @@
 # 0023 — The corners show what she is doing, in words
 
-**Status:** accepted
+**Status:** accepted; narrowed by [0024](0024-the-corner-shows-only-during-a-turn.md) — the top-right panel is gone, and the top-left one shows only during a turn
 **Date:** 2026-11-10
 
 ## Context

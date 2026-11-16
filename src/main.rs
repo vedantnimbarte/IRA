@@ -544,8 +544,8 @@ async fn run(hide_console: bool) -> Result<()> {
     // doing. It reads the broadcast directly rather than the served page.
     #[cfg(windows)]
     orb::spawn(&ui);
-    // The corner widgets: the same events again, in words this time, with the
-    // machine she runs on beside them. Hidden from the settings window.
+    // The corner widget: the same events again, in words this time, while she
+    // is in a turn. Hidden from the settings window.
     #[cfg(windows)]
     hud::spawn(&ui);
 

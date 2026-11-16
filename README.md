@@ -154,7 +154,7 @@ around: [decisions/0001](docs/decisions/0001-audio-path-stays-in-one-process.md)
 | `wingman.rs` | Wingman's own HTTP API adapted to that trait |
 | `ui.rs` | The screen and its event stream |
 | `orb.rs` | The overlay: the website's orb, drawn on a layered window, same stream |
-| `hud.rs` | The corner widgets: what she is doing, top left; this machine, top right |
+| `hud.rs` | The corner widget: what she is doing, top left, during a turn |
 | `main.rs` | The state machine |
 | `skills.rs` | `skills/*.md`: user-written instructions, loaded on demand |
 | `cli.rs` · `oauth.rs` | The window from a terminal; signing in to a hosted server |
@@ -390,11 +390,11 @@ streams, so its full length is not known until she has finished it, and the
 arc can step back a little when a sentence lands faster than she speaks it
 ([decisions/0022](docs/decisions/0022-the-orb-is-the-websites.md)).
 
-The orb and the corner widgets are drawn at the display's own resolution and
+The orb and the corner widget are drawn at the display's own resolution and
 redrawn when its scale changes, and both step out of the way while a
 full-screen app, a game or a presentation has the screen. Screen sharing cannot
 be detected — a meeting app does not tell anyone it is sharing — so hide the
-widgets before sharing if what she said should stay private.
+widget before sharing if what she said should stay private.
 
 It reads the same events the page reads, straight off the broadcast. It is
 **drawn** rather than rendered: a webview window cannot be made transparent on
@@ -409,21 +409,22 @@ disables it. Windows only for now, and every way it can fail — no display, a
 window that will not open, a bitmap that will not allocate — is a missing light
 and never a broken IRA.
 
-### The corner widgets
+### The corner widget
 
-Two panels open with the orb, in the website's dark-glass style with its corner
-brackets. They say in words what the orb says as a light, and add the machine
-she runs on:
+A panel at the top left, in the website's dark-glass style with its corner
+brackets, says in words what the orb says as a light: her state; what she last
+heard and said, or the question she is asking you; the last turn's time split
+into hearing, thinking and her voice, marked if you cut in; the last tool she
+used and whether it worked; and the model, where hearing happens, her voice,
+and how many MCP servers are live.
 
-| | |
-|---|---|
-| top left | her state; what she last heard and said, or the question she is asking you; the last turn's time split into hearing, thinking and her voice, marked if you cut in; the last tool she used and whether it worked; the model, where hearing happens, her voice, and how many MCP servers are live |
-| top right | the time and date; CPU and memory; battery (laptops only) and whether you are online; the next two reminders with a countdown |
-
-Clicks go straight through them to the window underneath. They read the same
-events as the orb and, like it, do not count as a screen: IRA never tells you she
-has put something on them. Hide them under **On screen** in the settings
-window, or with `ira set IRA_WIDGETS off`. They are drawn the same way as the
+It opens when she wakes and closes eight seconds after she is idle again, so
+the corner is yours the rest of the time
+([decisions/0024](docs/decisions/0024-the-corner-shows-only-during-a-turn.md)).
+Clicks go straight through it to the window underneath. It reads the same
+events as the orb and, like it, does not count as a screen: IRA never tells you
+she has put something on it. Hide it under **On screen** in the settings
+window, or with `ira set IRA_WIDGETS off`. It is drawn the same way as the
 orb, with Archivo set by a small text library, since a webview cannot be
 transparent
 ([decisions/0023](docs/decisions/0023-the-corners-show-what-she-is-doing.md)).
