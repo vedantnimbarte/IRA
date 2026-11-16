@@ -888,14 +888,61 @@ fn build_settings(port: u16, scale: f32) -> anyhow::Result<Settings> {
 
     // Same origin as the page, so the settings page's saves pass the
     // cross-site guard for the same reason the talk button's presses do.
+    let window = hwnd as isize;
     let webview = wry::WebViewBuilder::new_with_web_context(context)
         .with_url(format!("http://127.0.0.1:{port}/settings"))
         // A right-click menu offering "View source" on a settings form is a way
         // to break it, not a feature.
         .with_devtools(false)
+        // The page draws the title bar, so its buttons and its drag strip ask
+        // the window to do what a title bar would. Nothing else is accepted.
+        .with_ipc_handler(move |req| window_command(window as _, req.body()))
         .build(&Handle(hwnd))?;
 
     Ok(Settings { hwnd, _webview: webview })
+}
+
+/// What the settings page's own title bar asked for: minimise, close, a drag
+/// from the strip, or a resize from its top edge.
+///
+/// Posted, not sent, and never done in place: this runs inside a WebView2
+/// callback, and a move loop entered here -- or the webview torn down by a
+/// close -- would happen under the webview's own feet. Dragging and resizing
+/// are the window's own `WM_NCLBUTTONDOWN` handling, so snapping, the move
+/// cursor and the resize outline are all Windows'.
+fn window_command(hwnd: windows_sys::Win32::Foundation::HWND, what: &str) {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, PostMessageW, ShowWindow, HTCAPTION, HTTOP, HTTOPLEFT, HTTOPRIGHT, SW_MINIMIZE,
+        WM_CLOSE, WM_NCLBUTTONDOWN,
+    };
+    let hit = match what {
+        "min" => {
+            // SAFETY: the window this webview lives in.
+            unsafe { ShowWindow(hwnd, SW_MINIMIZE) };
+            return;
+        }
+        "close" => {
+            // SAFETY: as above; the close is handled after this returns.
+            unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+            return;
+        }
+        "drag" => HTCAPTION,
+        "n" => HTTOP,
+        "nw" => HTTOPLEFT,
+        "ne" => HTTOPRIGHT,
+        _ => return,
+    };
+    // SAFETY: a POINT that outlives the call, and a window this module owns.
+    // The webview holds the mouse after a press; the window cannot take a
+    // drag until it lets go.
+    unsafe {
+        let mut at = std::mem::zeroed();
+        GetCursorPos(&mut at);
+        ReleaseCapture();
+        let packed = ((at.y as u16 as isize) << 16) | at.x as u16 as isize;
+        PostMessageW(hwnd, WM_NCLBUTTONDOWN, hit as usize, packed);
+    }
 }
 
 /// Closing the settings window must not close IRA.
@@ -910,11 +957,35 @@ unsafe extern "system" fn settings_proc(
     wparam: windows_sys::Win32::Foundation::WPARAM,
     lparam: windows_sys::Win32::Foundation::LPARAM,
 ) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DefWindowProcW, GetClientRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER, WM_DESTROY,
-        WM_DPICHANGED, WM_SIZE,
+        DefWindowProcW, GetClientRect, IsZoomed, SetWindowPos, NCCALCSIZE_PARAMS, SM_CXPADDEDBORDER,
+        SM_CYFRAME, SWP_NOACTIVATE, SWP_NOZORDER, WM_DESTROY, WM_DPICHANGED, WM_NCCALCSIZE, WM_SIZE,
     };
     match msg {
+        // No title bar: the page draws its own. Windows works out the frame as
+        // usual and the top of it is given back to the page, so the sides and
+        // bottom keep their invisible resize borders, and the window keeps its
+        // shadow, rounded corners and snapping -- it is still a framed window,
+        // only without a caption. The page's own strip does the top edge.
+        WM_NCCALCSIZE if wparam != 0 => {
+            // SAFETY: with wparam set, lparam is an NCCALCSIZE_PARAMS Windows
+            // owns for the duration of the call.
+            unsafe {
+                let params = &mut *(lparam as *mut NCCALCSIZE_PARAMS);
+                let top = params.rgrc[0].top;
+                DefWindowProcW(hwnd, msg, wparam, lparam);
+                params.rgrc[0].top = top;
+                // Maximised, the frame hangs off the screen's edge; without it
+                // the top of the page would too.
+                if IsZoomed(hwnd) != 0 {
+                    let dpi = GetDpiForWindow(hwnd);
+                    params.rgrc[0].top +=
+                        GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+                }
+            }
+            0
+        }
         // Dragged to a monitor with another scale, or the scale changed: take
         // the size Windows suggests, which keeps the window the same physical
         // size. The webview follows through WM_SIZE below.

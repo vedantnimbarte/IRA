@@ -1465,7 +1465,7 @@ const SETTINGS: &str = r##"<!doctype html>
   .about { margin:4px 0 0; color:var(--muted); font-size:13px; line-height:1.5; max-width:54ch; }
 
   .control { display:flex; gap:8px; margin-top:12px; align-items:stretch; }
-  input, .control select {
+  input {
     flex:1 1 auto; min-width:0; height:40px; padding:0 13px;
     border:1px solid var(--edge); border-radius:6px;
     background:var(--sunk); color:var(--ink);
@@ -1473,14 +1473,56 @@ const SETTINGS: &str = r##"<!doctype html>
     transition:border-color .15s ease, background .15s ease, box-shadow .15s ease;
   }
   input::placeholder { color:var(--faint); font-family:var(--sans); font-size:13px; }
-  input:hover, .control select:hover { border-color:var(--muted); }
-  input:focus, .control select:focus {
+  input:hover { border-color:var(--muted); }
+  input:focus {
     outline:none; border-color:var(--accent); background:var(--ground);
     box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
   }
-  input.saved, select.saved { border-color:var(--good); }
-  /* A list says words, not a value, so it reads in the text face. */
-  .control select { flex:0 1 320px; font-family:var(--sans); cursor:pointer; }
+  input.saved { border-color:var(--good); }
+
+  /* A list you pick from: the choice on a button, and the rest in a popover.
+     It says words, not a value, so it reads in the text face. */
+  button.pick {
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    min-width:0; height:40px; padding:0 14px 0 13px; border-radius:6px;
+    border:1px solid var(--edge); background:var(--sunk); color:var(--ink);
+    font:400 13px/1 var(--sans); font-stretch:100%; text-align:left;
+    transition:border-color .15s ease, background .15s ease, box-shadow .15s ease;
+  }
+  .pick span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .pick::after {
+    content:""; flex:none; width:6px; height:6px; margin-top:-3px;
+    border-right:1.5px solid var(--muted); border-bottom:1.5px solid var(--muted);
+    transform:rotate(45deg); transition:transform .15s ease, margin .15s ease;
+  }
+  .pick[aria-expanded="true"]::after { transform:rotate(-135deg); margin-top:3px; }
+  button.pick:hover { border-color:var(--muted); filter:none; }
+  button.pick[aria-expanded="true"], button.pick:focus-visible {
+    outline:none; border-color:var(--accent); background:var(--ground);
+    box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+  button.pick.saved { border-color:var(--good); }
+  .control .pick { flex:0 1 320px; }
+
+  .menu {
+    position:fixed; inset:auto; margin:0; padding:5px;
+    max-height:min(340px, 60vh); overflow:auto; outline:none;
+    border:1px solid var(--edge); border-radius:8px;
+    background:var(--surface); color:var(--ink); box-shadow:var(--lift);
+    font:400 13px/1.35 var(--sans);
+  }
+  .menu:popover-open { animation:menu-in .12s ease-out; }
+  @keyframes menu-in { from { opacity:0; transform:translateY(-4px); } }
+  .menu [role="option"] {
+    display:flex; align-items:baseline; gap:8px;
+    padding:9px 14px 9px 8px; border-radius:5px; cursor:pointer; color:var(--soft);
+    white-space:nowrap;
+  }
+  /* The check keeps its column whether or not it shows, so the words line up. */
+  .menu [role="option"]::before { content:"\2713"; flex:none; width:14px; text-align:center; color:transparent; }
+  .menu [role="option"][aria-selected="true"] { color:var(--ink); }
+  .menu [role="option"][aria-selected="true"]::before { color:var(--accent); }
+  .menu [role="option"].active { background:var(--sunk); color:var(--ink); }
 
   /* Actions arrive when you are working on a field, so six of them are not
      competing for attention while you read. A reserved column, so every box is
@@ -1501,7 +1543,7 @@ const SETTINGS: &str = r##"<!doctype html>
   button.ghost { background:transparent; color:var(--soft); border-color:var(--edge); font-weight:500; }
   button:hover { filter:brightness(1.1); }
   button.ghost:hover { color:var(--accent); border-color:var(--accent); filter:none; }
-  button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  button:focus-visible, input:focus-visible, textarea:focus-visible {
     outline:2px solid var(--accent); outline-offset:3px;
   }
 
@@ -1589,10 +1631,11 @@ const SETTINGS: &str = r##"<!doctype html>
   .form { display:flex; flex-direction:column; gap:12px; padding:16px 0 18px; }
   .labelled { display:flex; flex-direction:column; gap:6px; }
   .small { color:var(--muted); font-size:12.5px; }
-  .labelled input, .labelled textarea, .form select {
+  .labelled input, .labelled textarea {
     width:100%; height:auto; padding:9px 11px; border:1px solid var(--edge); border-radius:6px;
     background:var(--ground); color:var(--ink); font:400 12.5px/1.5 var(--mono);
   }
+  .form .pick { width:100%; background:var(--ground); }
   .labelled textarea { resize:vertical; min-height:76px; }
   .labelled input:disabled { color:var(--muted); background:var(--sunk); }
   .form-actions { display:flex; gap:8px; padding-top:4px; }
@@ -1612,10 +1655,7 @@ const SETTINGS: &str = r##"<!doctype html>
   /* --- activity ------------------------------------------------------- */
   .act-find { display:flex; flex-wrap:wrap; gap:10px; margin:0 0 34px; }
   .act-find input { flex:1 1 260px; font-family:var(--sans); }
-  .act-find select, .act-keep select {
-    height:40px; padding:0 13px; border:1px solid var(--edge); border-radius:6px;
-    background:var(--sunk); color:var(--ink); font:400 13px/1 var(--sans); cursor:pointer;
-  }
+  .act-find .pick, .act-keep .pick { flex:none; min-width:190px; }
   .head-actions { display:flex; gap:8px; flex:none; }
   .act-day { font-size:12px; color:var(--muted); margin:34px 0 14px; }
   .act-day:first-child { margin-top:0; }
@@ -1673,11 +1713,37 @@ const SETTINGS: &str = r##"<!doctype html>
   #note.is-set { color:var(--good); border-color:var(--good); }
   #note.is-bad { color:var(--bad); border-color:var(--bad); }
 
+  /* --- the window's own title bar (settings window only) -------------- */
+  body.framed { grid-template-rows:36px minmax(0,1fr); }
+  #bar {
+    grid-column:1 / -1; position:relative; display:flex; justify-content:flex-end;
+    /* The rail and the pane carry on up into it, divider and all. */
+    background:linear-gradient(to right, var(--rail) 247px, var(--line) 247px 248px, var(--ground) 248px);
+    user-select:none;
+  }
+  .grip { position:absolute; top:0; height:5px; }
+  .grip.n { left:8px; right:8px; cursor:ns-resize; }
+  .grip.nw { left:0; width:8px; cursor:nwse-resize; }
+  .grip.ne { right:0; width:8px; cursor:nesw-resize; }
+  button.win {
+    position:relative; width:46px; height:36px; padding:0; border:0; border-radius:0;
+    display:grid; place-items:center; background:transparent; color:var(--muted);
+  }
+  button.win svg { width:10px; height:10px; fill:none; stroke:currentColor; stroke-width:1.1; }
+  button.win:hover { background:var(--sunk); color:var(--ink); filter:none; }
+  /* Red, as every Windows close button is: the one place the palette yields. */
+  button.win.close:hover { background:#c42b1c; color:#fff; }
+  button.win:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+  body.framed #nav { padding-top:8px; }
+  body.framed #main { padding-top:32px; }
+
   @media (prefers-reduced-motion:reduce) {
-    * { transition:none !important; }
+    * { transition:none !important; animation:none !important; }
   }
   @media (max-width:760px) {
     body { grid-template-columns:1fr; grid-template-rows:auto minmax(0,1fr); }
+    body.framed { grid-template-rows:36px auto minmax(0,1fr); }
+    #bar { background:var(--rail); }
     #nav {
       flex-direction:row; align-items:center; gap:6px; overflow-x:auto;
       border-right:0; border-bottom:1px solid var(--line); padding:10px 12px;
@@ -1729,6 +1795,154 @@ function el(tag, cls, text) {
   if (cls) n.className = cls;
   if (text !== undefined) n.textContent = text;
   return n;
+}
+
+// A list you pick from. It answers to `value`, `onchange`, an id and a label
+// the way a <select> does, so the code using it reads the same; what changes
+// is the list, which opens as a popover under it in the page's own style.
+// The popover is the browser's: top layer, so a scrolling pane never clips it,
+// and Escape or a click anywhere else closes it without any code here.
+function picker(choices, value) {
+  const btn = el('button', 'pick');
+  btn.type = 'button';
+  btn.setAttribute('aria-haspopup', 'listbox');
+  btn.setAttribute('aria-expanded', 'false');
+  const shown = el('span');
+  btn.append(shown);
+  let current = '';
+  Object.defineProperty(btn, 'value', {
+    get: () => current,
+    set: v => {
+      current = String(v);
+      const hit = choices.find(([c]) => String(c) === current);
+      shown.textContent = hit ? hit[1] : current;
+    },
+  });
+  btn.value = value;
+  btn.onclick = () => {
+    // The press that closed the list by clicking outside it lands here too:
+    // it closes the list, it does not open it again.
+    if (Date.now() - (btn.closedAt || 0) > 250) openMenu(btn, choices);
+  };
+  btn.onkeydown = e => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      openMenu(btn, choices);
+    }
+  };
+  return btn;
+}
+
+function openMenu(btn, choices) {
+  const menu = el('div', 'menu');
+  menu.popover = 'auto';
+  menu.tabIndex = -1;
+  menu.setAttribute('role', 'listbox');
+  const named = btn.getAttribute('aria-label') || btn.closest('.field, .labelled, .act-keep')
+    ?.querySelector('.name, .small, label')?.textContent;
+  if (named) menu.setAttribute('aria-label', named);
+
+  const items = choices.map(([value, text], i) => {
+    const o = el('div', null, text);
+    o.id = 'menu-option-' + i;
+    o.setAttribute('role', 'option');
+    o.setAttribute('aria-selected', String(String(value) === btn.value));
+    o.onmousemove = () => mark(i);
+    o.onclick = () => choose(i);
+    return o;
+  });
+  let active = Math.max(0, items.findIndex(o => o.getAttribute('aria-selected') === 'true'));
+  const mark = i => {
+    items[active].classList.remove('active');
+    active = (i + items.length) % items.length;
+    items[active].classList.add('active');
+    items[active].scrollIntoView({ block: 'nearest' });
+    menu.setAttribute('aria-activedescendant', items[active].id);
+  };
+  const choose = i => {
+    menu.hidePopover();
+    const v = String(choices[i][0]);
+    if (v !== btn.value) {
+      btn.value = v;
+      if (btn.onchange) btn.onchange();
+    }
+  };
+  menu.onkeydown = e => {
+    if (e.key === 'ArrowDown') mark(active + 1);
+    else if (e.key === 'ArrowUp') mark(active - 1);
+    else if (e.key === 'Home') mark(0);
+    else if (e.key === 'End') mark(items.length - 1);
+    else if (e.key === 'Enter' || e.key === ' ') choose(active);
+    else if (e.key === 'Tab') menu.hidePopover();
+    else return;
+    e.preventDefault();
+  };
+  // Focus goes back to the button only if it was in the list: a click
+  // somewhere else in the page keeps the focus it gave.
+  let refocus = false;
+  menu.addEventListener('beforetoggle', e => {
+    if (e.newState === 'closed') refocus = menu.contains(document.activeElement);
+  });
+  menu.addEventListener('toggle', e => {
+    if (e.newState !== 'closed') return;
+    btn.closedAt = Date.now();
+    btn.setAttribute('aria-expanded', 'false');
+    menu.remove();
+    if (refocus && btn.isConnected) btn.focus();
+  });
+
+  menu.append(...items);
+  document.body.append(menu);
+  menu.showPopover();
+  btn.setAttribute('aria-expanded', 'true');
+
+  // Under the button and at least as wide as it; above it if there is no room
+  // below and more room above.
+  const r = btn.getBoundingClientRect();
+  menu.style.minWidth = r.width + 'px';
+  const h = menu.offsetHeight;
+  const below = innerHeight - r.bottom - 12;
+  const above = r.top - 12;
+  menu.style.left = Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8)) + 'px';
+  menu.style.top = (h <= below || below >= above ? r.bottom + 6 : r.top - h - 6) + 'px';
+  menu.focus();
+  mark(active);
+}
+
+// A list left open while the page scrolls would float away from its button.
+document.addEventListener('scroll', e => {
+  const open = document.querySelector('.menu:popover-open');
+  if (open && !open.contains(e.target)) open.hidePopover();
+}, true);
+addEventListener('resize', () => document.querySelector('.menu:popover-open')?.hidePopover());
+
+// IRA's own settings window has no title bar; this is it. Only there:
+// `window.ipc` is the window's, and the same page in a browser keeps the
+// browser's frame. The page asks; the window does the moving (orb.rs).
+if (window.ipc) {
+  const ask = what => window.ipc.postMessage(what);
+  const bar = el('header');
+  bar.id = 'bar';
+  bar.onmousedown = e => { if (e.button === 0 && e.target === bar) ask('drag'); };
+  // The top edge resizes, as a frame's would. The other three edges are
+  // still the window's own.
+  for (const edge of ['n', 'nw', 'ne']) {
+    const grip = el('div', 'grip ' + edge);
+    grip.onmousedown = e => { if (e.button === 0) ask(edge); };
+    bar.append(grip);
+  }
+  const icon = d => '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="' + d + '"/></svg>';
+  for (const [what, label, d] of [['min', 'Minimize', 'M0 5.5h10'], ['close', 'Close', 'M0 0l10 10M10 0L0 10']]) {
+    const b = el('button', 'win ' + what);
+    b.type = 'button';
+    b.title = label;
+    b.setAttribute('aria-label', label);
+    b.innerHTML = icon(d);
+    b.onclick = () => ask(what);
+    bar.append(b);
+  }
+  document.body.prepend(bar);
+  document.body.classList.add('framed');
 }
 
 function go(pane, server, skill) {
@@ -1812,14 +2026,8 @@ function field(f) {
   // A fixed set of values is a list, saved the moment it changes. The first
   // choice is what unset means, so an unset one shows as that.
   if (f.choices.length) {
-    const pick = el('select');
+    const pick = picker(f.choices, f.value || f.choices[0][0]);
     pick.id = f.name;
-    for (const [value, label] of f.choices) {
-      const o = el('option', null, label);
-      o.value = value;
-      pick.append(o);
-    }
-    pick.value = f.value || f.choices[0][0];
     pick.setAttribute('aria-describedby', line.id);
     pick.onchange = () => send(f.name, pick.value);
     control.append(pick);
@@ -2054,13 +2262,7 @@ function serverForm(s) {
 
   const name = box('Name', s.name, 'calendar');
   name.input.disabled = !isNew;   // it keys two tables; renaming is add-and-remove
-  const kind = el('select');
-  for (const t of ['stdio', 'http']) {
-    const o = el('option', null, t === 'stdio' ? 'A program on this machine' : 'A URL');
-    o.value = t;
-    if (s.transport === t) o.selected = true;
-    kind.append(o);
-  }
+  const kind = picker([['stdio', 'A program on this machine'], ['http', 'A URL']], s.transport || 'stdio');
   const command = box('Command', s.command || '', 'mcp-calendar');
   const args = box('Arguments', (s.args || []).join(' '), '--flag value');
   const url = box('URL', s.url || '', 'http://127.0.0.1:8765');
@@ -2159,17 +2361,11 @@ function toolRow(server, t) {
 
   // How long it may take, which decides whether IRA fills the silence and
   // whether the turn waits for it at all. Named by what the user hears.
-  const pace = el('select');
-  for (const [value, label] of [
+  const pace = picker([
     ['slow', 'Takes a moment — she says something while it runs'],
     ['fast', 'Instant — no filler'],
     ['background', 'Takes minutes — she answers now and reports later'],
-  ]) {
-    const o = el('option', null, label);
-    o.value = value;
-    if ((t.latency || 'slow') === value) o.selected = true;
-    pace.append(o);
-  }
+  ], t.latency || 'slow');
   pace.onchange = () => admin({
     op: 'tool_policy', server, tool: t.name,
     exposed: true, mutates: t.mutates, latency: pace.value, confirm: t.confirm,
@@ -2667,14 +2863,8 @@ function activityPane() {
       loadActivity(false);
     }, 250);
   };
-  const filter = el('select');
+  const filter = picker(ACTIVITY_FILTERS, activity.filter);
   filter.setAttribute('aria-label', 'Show');
-  for (const [value, label] of ACTIVITY_FILTERS) {
-    const o = el('option', null, label);
-    o.value = value;
-    o.selected = value === activity.filter;
-    filter.append(o);
-  }
   filter.onchange = () => {
     activity.filter = filter.value;
     loadActivity(false);
@@ -2689,15 +2879,9 @@ function activityPane() {
 
   const keep = el('div', 'act-keep');
   const label = el('label', null, 'Keep activity for');
-  const days = el('select');
+  const days = picker(KEEP_FOR, state.audit.retention_days);
   days.id = 'keep-for';
   label.htmlFor = 'keep-for';
-  for (const [value, text] of KEEP_FOR) {
-    const o = el('option', null, text);
-    o.value = String(value);
-    o.selected = value === state.audit.retention_days;
-    days.append(o);
-  }
   days.onchange = async () => {
     if (await admin({ op: 'audit_retention', days: Number(days.value) }, 'Saving…')) loadActivity(false);
   };
